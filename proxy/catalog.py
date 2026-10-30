@@ -186,6 +186,8 @@ class Catalog:
         self._dense: dict[str, list[dict]] = {}
         self._scanned_page: dict[str, int] = {}
         self._dense_count: dict[str, int] = {}
+        # 聚合库实测的“合并后每页条数”（cat -> 条数），用于稳定估算 total
+        self._agg_page_size: dict[str, int] = {}
         # (sid, cat) -> [备用叶子 route...]（首选分类探测失败时 rescue 得到）
         self._fallbacks: dict[tuple[str, str], list[dict]] = {}
 
@@ -390,6 +392,8 @@ class Catalog:
                         "pagecount": min(int((self._routes.get(
                             self._scope_key(AGG_SCOPE, cat)) or [{}])[0]
                             .get("pagecount") or 0), MAX_PAGES),
+                        "warmed": len(self._dense.get(
+                            self._scope_key(AGG_SCOPE, cat), [])),
                     } for cat, _, _ in CATALOG_CATEGORIES},
             }
 
@@ -405,41 +409,70 @@ class Catalog:
             return min(int(routes[0].get("pagecount") or 0), MAX_PAGES)
 
     def total(self, cat: str, scope: str = AGG_SCOPE) -> int:
-        # 用规范源页数估算 total；最后一页条数未知，前端以空页自然停止。
-        return self.pagecount(cat, scope) * PAGE_SIZE
+        # 聚合库每页由多个源并发合并去重，单页条目通常远大于 CMS 的 20 条；
+        # 用首页实测合并条数作为每页大小估算 total，避免媒体库容量被严重低估。
+        pc = self.pagecount(cat, scope)
+        if not pc:
+            return 0
+        if scope == AGG_SCOPE:
+            page_n = self._agg_page_size.get(cat) or PAGE_SIZE
+            return pc * page_n
+        return pc * PAGE_SIZE
 
     def routes_stale(self) -> bool:
         return (not self._updated) or (time.time() - self._updated) >= CLASS_REFRESH
 
     # -------------------------------------------------- 页级抓取
+    DENSE_BATCH = 6      # 深翻一次并发抓多少页
+    DENSE_CONC = 6       # 深翻并发上限（对资源站友好，避免瞬时打爆）
+
     async def _extend_dense(self, scope: str, cat: str, need_count: int) -> int:
-        """顺序翻页直到去重后的累计条目数达到 need_count（或翻到该源末页）。"""
+        """并发批量翻页直到去重后的累计条目数达到 need_count（或翻到末页）。
+
+        旧实现一页一页串行（约 2s/页），滚到第 500 条要 40 多秒，TV/盒子端
+        10~15s 即判“加载失败”。改为每次并发抓 DENSE_BATCH 页，深翻耗时近似
+        从“页数×单页耗时”降为“页数/并发×单页耗时”。"""
         sk = self._scope_key(scope, cat)
         pc = self.pagecount(cat, scope)
         seen = self._seen_guids.setdefault(sk, set())
         dense = self._dense.setdefault(sk, [])
-        pg = self._scanned_page.get(sk, 0) + 1
+        next_pg = self._scanned_page.get(sk, 0) + 1
         empty_streak = 0
-        while len(dense) < need_count and pg <= pc:
-            rows = await self.get_page(cat, pg, scope)
-            added = 0
-            for b in rows:
-                gid = b.get("guid")
-                if gid in seen:
-                    continue
-                seen.add(gid); dense.append(b); added += 1
-            if added:
-                # 只有真正取到新增才把游标前移，慢源抖动的空页下次可重试
-                self._scanned_page[sk] = pg
-                pg += 1
+        while len(dense) < need_count and next_pg <= pc:
+            batch = [p for p in range(next_pg, min(next_pg + self.DENSE_BATCH,
+                                                   pc + 1))]
+            sem = asyncio.Semaphore(self.DENSE_CONC)
+
+            async def one_page(p):
+                async with sem:
+                    return p, await self.get_page(cat, p, scope)
+
+            results = await asyncio.gather(
+                *[one_page(p) for p in batch], return_exceptions=True)
+            batch_added = 0
+            max_ok_page = next_pg - 1
+            # 按页序写入，保证条目整体顺序稳定
+            for res in sorted([r for r in results if isinstance(r, tuple)],
+                              key=lambda x: x[0]):
+                p, rows = res
+                if rows:
+                    max_ok_page = p
+                for b in rows:
+                    gid = b.get("guid")
+                    if gid in seen:
+                        continue
+                    seen.add(gid); dense.append(b); batch_added += 1
+            if batch_added:
+                self._scanned_page[sk] = max_ok_page
+                next_pg = batch[-1] + 1
                 empty_streak = 0
             else:
-                # 连续多页空（超时/末页）才停止，容忍慢源的偶发抖动
+                # 整批都空（超时/末页），容忍两轮再停
                 empty_streak += 1
-                if empty_streak >= 3:
-                    self._scanned_page[sk] = pg
+                if empty_streak >= 2:
+                    self._scanned_page[sk] = batch[-1]
                     break
-                pg += 1
+                next_pg = batch[-1] + 1
         self._dense_count[sk] = len(dense)
         return len(dense)
 
@@ -610,16 +643,36 @@ class Catalog:
             return []
 
         # 跨源聚合：串行回退（不同源结果应一致，并发会无谓翻倍请求）
+        # 跨源聚合：并发抓取候选源并“合并去重”。旧逻辑串行取第一个成功源即返回，
+        # 等于多个可深翻源只用了 1 个的量；并发合并后单页条目更多、覆盖更全，
+        # 任一源抖动也不影响整页（gather 容错）。
         async with httpx.AsyncClient(follow_redirects=True, trust_env=False,
                                      verify=False) as client:
-            for route in routes:
-                got = await fetch_one(client, route, HTTP_TIMEOUT)
-                if not got:
-                    continue
-                source, _route, vods = got
-                briefs = self._briefs_from_vods(vods, source, route, scope, cat)
-                if briefs:
-                    return store.remember_merged(briefs)
+            sem = asyncio.Semaphore(4)
+
+            async def bound(r):
+                async with sem:
+                    return await fetch_one(client, r, HTTP_TIMEOUT)
+
+            results = await asyncio.gather(
+                *[bound(r) for r in routes], return_exceptions=True)
+
+        merged: list[dict] = []
+        seen_g: set[str] = set()
+        for res in results:
+            if not isinstance(res, tuple):
+                continue
+            source, route, vods = res
+            for b in self._briefs_from_vods(vods, source, route, scope, cat):
+                g = b.get("guid")
+                if g and g not in seen_g:
+                    seen_g.add(g)
+                    merged.append(b)
+        if merged:
+            # 记住聚合首页合并后的条数，供 total 稳定估算（不依赖首页缓存 TTL）
+            if scope == AGG_SCOPE and page == 1:
+                self._agg_page_size[cat] = len(merged)
+            return store.remember_merged(merged)
         return []
 
     async def warm_standalone(self, scope: str):
@@ -630,6 +683,20 @@ class Catalog:
             await asyncio.gather(
                 *[self.get_page(c, 1, scope) for c in pool
                   if self.available(c, scope)],
+                return_exceptions=True)
+        except Exception:
+            pass
+
+    # 聚合库后台预热：每类先并发把前 N 条灌入 dense，用户进入媒体库/滚动即时有内容
+    WARM_AGG_ITEMS = 240
+
+    async def warm_aggregate(self, cats=None):
+        """路由建好后后台预热聚合四库的前段内容（默认每类约 240 条）。"""
+        cats = cats or list(CATS)
+        try:
+            await asyncio.gather(
+                *[self.get_window(c, 0, self.WARM_AGG_ITEMS) for c in cats
+                  if self.available(c)],
                 return_exceptions=True)
         except Exception:
             pass
