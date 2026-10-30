@@ -348,6 +348,19 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div class="hint">「独立库」= 该站单独生成一张媒体库卡片；「非过滤」= 不按标题/备注过滤解说/预告/花絮；
           删除内置源仅隐藏，可恢复。批量导入 TVBox 订阅请用左侧「导入订阅」。</div>
       </div>
+
+      <div class="card">
+        <div class="card-title">源健康画像
+          <span class="hint" style="font-weight:400">按真实播放探测统计成功率/延迟，死源自动降权 15 分钟</span>
+          <button class="small" style="margin-left:auto" onclick="loadHealth()">刷新</button>
+        </div>
+        <table>
+          <thead><tr><th>源</th><th style="width:80px">样本</th>
+            <th style="width:110px">成功率</th><th style="width:100px">平均延迟</th>
+            <th style="width:90px">状态</th><th style="width:70px">操作</th></tr></thead>
+          <tbody id="healthRows"><tr><td colspan="6" class="muted">播放几次后自动生成。</td></tr></tbody>
+        </table>
+      </div>
     </section>
 
     <!-- ============ 导入 TVBox 订阅（独立页） ============ -->
@@ -533,6 +546,7 @@ async function switchPage(page){
   if(page==="overview"){renderOverview();startLivePoll();}
   if(page==="library"){loadLibs().then(renderLibrary);}
   if(page==="quality")renderQuality();
+  if(page==="sources"){try{loadHealth();}catch(e){}}
   if(page==="tvbox"){try{loadGuardZone();}catch(e){}try{gbInit();}catch(e){}}
   if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{loadAdfilter();}catch(e){}try{if(typeof loadSpiderMgmt==="function")loadSpiderMgmt();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}}
   if(page==="about"){loadUpdate(false);}
@@ -986,6 +1000,26 @@ async function testAll(){
     if(d.ok)setSt(tr,`✓ ${d.elapsed_ms}ms · ${d.count}条${d.direct?(' · '+d.direct+'直链'):''}`,"ok");
     else setSt(tr,"✕ "+(d.error||"失败"),"bad");});
   toast("测速完成");
+}
+async function loadHealth(){
+  const box=$("healthRows");if(!box)return;box.innerHTML='<tr><td colspan="6" class="muted">加载中…</td></tr>';
+  try{
+    const r=await (await fetch("/v/api/ext/source-health")).json();
+    const rows=(r.data&&r.data.sources)||[];
+    if(!rows.length){box.innerHTML='<tr><td colspan="6" class="muted">还没有数据，正常播放几次后会自动统计。</td></tr>';return;}
+    const G=["健康","慢","高失败率","冷却中"];
+    const GC=["ok","wait","bad","bad"];
+    box.innerHTML=rows.map(s=>{
+      const pct=Math.round((s.success_rate||0)*100);
+      return `<tr><td>${s.key}</td><td>${s.samples}</td>
+        <td>${pct}%</td><td>${(s.avg_latency||0).toFixed(1)}s</td>
+        <td class="st ${GC[s.grade]||''}">${G[s.grade]||""}</td>
+        <td><button class="small" onclick="resetHealth('${s.key}')">清零</button></td></tr>`;
+    }).join("");
+  }catch(e){box.innerHTML='<tr><td colspan="6" class="muted">读取失败</td></tr>';}
+}
+async function resetHealth(key){
+  await jpost("/v/api/ext/source-health/reset",{key});loadHealth();
 }
 async function addSource(){
   const name=$("addName").value.trim(),api=$("addApi").value.trim(),standalone=$("addStandalone").checked;

@@ -233,6 +233,15 @@ async def resolve_share(client: httpx.AsyncClient, page_url: str,
     headers = {"User-Agent": "Mozilla/5.0"}
     if referer:
         headers["Referer"] = referer
+    # 优先用强化嗅探引擎（player_aaaa / iframe 递归 / 转义解码 / base64），
+    # 它是纯 HTTP 解析，可替代部分原本要靠加固爬虫或 WebView 的网页源。
+    try:
+        import sniff as _sniff
+        found = await _sniff.sniff(client, page_url, referer)
+        if found:
+            return found
+    except Exception:
+        pass
     try:
         r = await client.get(page_url, headers=headers, timeout=10,
                              follow_redirects=True)

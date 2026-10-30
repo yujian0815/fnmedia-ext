@@ -32,6 +32,7 @@ from fastapi.responses import (HTMLResponse, JSONResponse, RedirectResponse,
 
 import features
 import providers
+import sourcehealth
 import client as clientmod
 import live as livemod
 import inject as inj
@@ -412,6 +413,16 @@ async def lifespan(app: FastAPI):
     app.state.stop_hot = asyncio.Event()
     app.state.hot_task = asyncio.create_task(_hot_worker(app))
 
+    # 源健康画像：每 5 分钟把内存统计落盘一次（热路径零 IO）
+    async def _health_flush_loop():
+        while True:
+            await asyncio.sleep(300)
+            try:
+                await asyncio.to_thread(sourcehealth.flush)
+            except Exception:
+                pass
+    app.state.health_task = asyncio.create_task(_health_flush_loop())
+
 
     # 后台只读检查 GitHub 更新（仅提示，绝不自动安装）
     app.state.stop_update = asyncio.Event()
@@ -427,6 +438,14 @@ async def lifespan(app: FastAPI):
         try:
             await app.state.hot_task
         except (asyncio.CancelledError, Exception):
+            pass
+        try:
+            app.state.health_task.cancel()
+        except Exception:
+            pass
+        try:
+            await asyncio.to_thread(sourcehealth.flush)
+        except Exception:
             pass
         try:
             app.state.stop_update.set()
@@ -2640,7 +2659,11 @@ def _ordered_candidates(picked: dict) -> list[dict]:
     cur = picked.get("line")
 
     def rank(t: dict) -> tuple:
-        return (t["line"] != cur, _line_is_bad(t))
+        sk = sourcehealth.source_key_of(t.get("line"), t)
+        # 当前线置顶 → 坏线/死源沉底 → 按源健康画像（成功率/延迟）排序
+        return (t["line"] != cur,
+                _line_is_bad(t),
+                sourcehealth.weight(sk) if sk else (1, 5.0, 1.0))
 
     cands.sort(key=rank)
     return cands
@@ -2764,6 +2787,9 @@ async def _probe_latency(cand: dict, request: Request,
 async def _probe_target(cand: dict, request: Request) -> bool:
     """探测某条线路是否可播（HLS 顺带构建播放列表缓存）。布尔版，供故障切换复用。"""
     lat = await _probe_latency(cand, request, build_hls=True)
+    sk = sourcehealth.source_key_of(cand.get("line"), cand)
+    if sk:
+        sourcehealth.record(sk, lat is not None, lat or 0.0)
     return lat is not None
 
 
@@ -3578,6 +3604,9 @@ async def hls_main(mg: str, request: Request):
         return Response("正在为你寻找可用线路…", status_code=503,
                         headers={"Retry-After": "3",
                                  "Access-Control-Allow-Origin": "*"})
+    _sk = sourcehealth.source_key_of(picked.get("line"), picked)
+    if _sk:
+        sourcehealth.record(_sk, True)
     return Response(body, media_type="application/vnd.apple.mpegurl",
                     headers={"Cache-Control": "no-cache",
                              "Access-Control-Allow-Origin": "*"})
@@ -4415,6 +4444,30 @@ async def admin_page():
 
 
 
+
+
+
+# ---------------- 在线源健康画像（成功率/延迟，自动降权，通用能力） ----------------
+@app.get("/v/api/ext/source-health")
+async def source_health():
+    snap = sourcehealth.snapshot()
+    # 按健康等级、成功率、延迟排序输出，便于管理页展示
+    rows = sorted(
+        snap.values(),
+        key=lambda s: (s.get("grade", 1),
+                       -s.get("success_rate", 0),
+                       s.get("avg_latency", 99)))
+    return JSONResponse({"code": 0, "data": {"sources": rows}})
+
+
+@app.post("/v/api/ext/source-health/reset")
+async def source_health_reset(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    sourcehealth.reset((body or {}).get("key"))
+    return JSONResponse({"code": 0})
 
 
 
