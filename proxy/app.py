@@ -768,11 +768,20 @@ async def forward_upstream_streaming(request: Request) -> Response:
 
 # ------------------------------------------------------------- 在线搜索
 
-async def _aggregate_briefs(keyword: str, maxn: int | None = None) -> list[dict]:
-    """聚合搜索所有启用源 → 跨源合并 → 去噪/去无直链 → brief 列表（已入库）。"""
+async def _aggregate_briefs(keyword: str, maxn: int | None = None,
+                            fast_only: bool = False) -> list[dict]:
+    """聚合搜索所有启用源 → 跨源合并 → 去噪/去无直链 → brief 列表（已入库）。
+    fast_only=True 时只查秒回的标准 CMS 直链源（跳过加固/drpy 等慢源），供播放
+    失败时快速回源，避免被 redroid 慢源拖到网关超时。"""
     # 可选特性源不进入全局搜索（公开构建下该开关恒关，等价于不过滤）。
     sources = [s for s in config.enabled_sources()
                if not (features.ADULT and s.get("adult"))]
+    if fast_only:
+        sources = [s for s in sources
+                   if not s.get("guard") and not s.get("spider_src")
+                   and not str(s.get("id", "")).startswith(("spider-", "drpy-"))
+                   and s.get("api")
+                   and s.get("id") not in ("dduo", "xiaoya")]
     titles = await providers.search_all(keyword, sources)
     if maxn is None:
         maxn = int(config.get().get("max_per_keyword", 12))
@@ -2448,7 +2457,28 @@ async def media_p(request: Request):
 
 # ------------------------------------------------------------- HLS 代理
 
+def _line_key_match(want: str, got: str) -> bool:
+    """判断请求线路名与实际选中线路是否同一条（兼容 源前缀::显示名 与裸显示名）。"""
+    if not want or not got:
+        return False
+    if want == got:
+        return True
+    def disp(k: str) -> str:
+        return k.split("::", 1)[1] if "::" in k else k
+    return disp(want) == disp(got)
+
+
 def _pick_episode(mg: str, request: Request) -> dict | None:
+    # 全网回源别名：内置线路全死、已按片名找到别的可播记录时，原 mg 改指新记录
+    alt_og = _MEDIA_REDIRECT.get(mg)
+    if alt_og:
+        try:
+            index = int(request.query_params.get("index", "0"))
+        except ValueError:
+            index = 0
+        r = store.resolve_episode(alt_og, request.query_params.get("line"), index)
+        if r:
+            return dict(r, online_guid=alt_og, kind="title")
     # 优先：mg 已绑定具体某集（TV 选集）或标题第一集
     target = store.resolve_media_guid(mg)
     if target:
@@ -2458,14 +2488,26 @@ def _pick_episode(mg: str, request: Request) -> dict | None:
                 idx = int(request.query_params.get("index", target.get("index", 0)))
             except ValueError:
                 idx = target.get("index", 0)
+            want_line = request.query_params.get("line")
             r = store.resolve_episode(
-                target["online_guid"], request.query_params.get("line"), idx)
+                target["online_guid"], want_line, idx)
+            # 用户显式选的线路不在本条同名记录里（同名多记录、各挂部分线路）：
+            # 回退到含该线路、线路最全的同名聚合记录，避免静默放第一条死链。
+            if r and want_line and not _line_key_match(want_line, r.get("line", "")):
+                alt_og = store.find_title_with_line(
+                    target.get("title", ""), want_line)
+                if alt_og and alt_og != target["online_guid"]:
+                    ar = store.resolve_episode(alt_og, want_line, idx)
+                    if ar:
+                        r = ar
+                        target = dict(target, online_guid=alt_og)
             if r:
                 return dict(r, online_guid=target["online_guid"],
                             ep_guid=target.get("ep_guid", ""), kind=target.get("kind"))
         return target
     # 兼容：未在索引中的旧 mg，退回标题解析；也支持秒进时登记的待绑定榜单片
-    og = store.online_guid_by_media(mg) or _PENDING_MEDIA_CHART.get(mg)
+    og = _MEDIA_REDIRECT.get(mg) or store.online_guid_by_media(mg) \
+        or _PENDING_MEDIA_CHART.get(mg)
     if not og:
         return None
     try:
@@ -2633,16 +2675,21 @@ async def _probe_latency(cand: dict, request: Request,
                 req = cli.build_request(
                     "GET", url, headers={**headers, "Range": _PROBE_RANGE})
                 r = await cli.send(req, follow_redirects=True)
+                try:
+                    status = r.status_code
+                    ctype = (r.headers.get("content-type") or "").lower()
+                    body = b""
+                    try:
+                        body = await r.aread()
+                    except Exception:
+                        pass
+                finally:
+                    try:
+                        await r.aclose()
+                    except Exception:
+                        pass
             except Exception:
                 return None
-            async with r:
-                status = r.status_code
-                ctype = (r.headers.get("content-type") or "").lower()
-                body = b""
-                try:
-                    body = await r.aread()
-                except Exception:
-                    pass
             if status >= 400:
                 return None
             # 小雅/AList 对“目录或不存在文件”回 200 + JSON 错误（假活），判死
@@ -2652,7 +2699,13 @@ async def _probe_latency(cand: dict, request: Request,
 
         # HLS
         key = _playlist_cache_key(cand)
-        if key in _PLAYLIST_CACHE:
+        cached = _PLAYLIST_CACHE.get(key)
+        if cached:
+            body = cached[1]
+            if body is not _NOT_HLS and \
+                    not await _verify_rewritten_first_seg(body, request, cand):
+                _PLAYLIST_CACHE.pop(key, None)
+                return None
             return time.time() - t0
         if build_hls:
             mg = getattr(request.state, "_play_mg", "") if hasattr(request, "state") else ""
@@ -2660,10 +2713,48 @@ async def _probe_latency(cand: dict, request: Request,
                 body = await _get_playlist_cached(mg, cand, request)
                 if body is None:
                     return None
+                if body is not _NOT_HLS and \
+                        not await _verify_rewritten_first_seg(body, request, cand):
+                    _PLAYLIST_CACHE.pop(key, None)
+                    return None
                 return time.time() - t0
         # 轻量验活：抓原始清单（跟随嵌套 master），不做分片改写
         text, _cur = await _fetch_playlist(request, url, headers)
         if text is None or not _is_media_playlist(text):
+            return None
+        # 分片级验活：部分加固源（海绵/糯米的 yximgs PNG 伪装流等）清单能下、
+        # 但所有分片在源站 404（清单活、分片死）。只验清单会误判可播，起播即报错。
+        # 取首个分片 Range 2KB 复核：4xx/5xx 或空体即判死，触发自动换线。
+        try:
+            first_seg = next(
+                (ln.strip() for ln in text.splitlines()
+                 if ln.strip() and not ln.lstrip().startswith("#")), "")
+            if first_seg:
+                seg_url = urllib.parse.urljoin(_cur, first_seg)
+                sreq = cli.build_request(
+                    "GET", seg_url, headers={**headers, "Range": _PROBE_RANGE})
+                sr = await cli.send(sreq, follow_redirects=True)
+                try:
+                    if sr.status_code >= 400:
+                        _log.info("线路首分片%d判死: %s 《%s》%s",
+                                  sr.status_code, cand.get("line"),
+                                  cand.get("title"),
+                                  urllib.parse.urlsplit(seg_url).netloc)
+                        return None
+                    head = b""
+                    try:
+                        head = await sr.aread()
+                    except Exception:
+                        pass
+                    # 源站对失效分片常回 200/404 + XML/HTML 错误页（非媒体）
+                    if not head or head[:1] in (b"<", b"{", b"["):
+                        return None
+                finally:
+                    try:
+                        await sr.aclose()
+                    except Exception:
+                        pass
+        except Exception:
             return None
         return time.time() - t0
     except Exception:
@@ -2674,6 +2765,61 @@ async def _probe_target(cand: dict, request: Request) -> bool:
     """探测某条线路是否可播（HLS 顺带构建播放列表缓存）。布尔版，供故障切换复用。"""
     lat = await _probe_latency(cand, request, build_hls=True)
     return lat is not None
+
+
+# 首分片验活的短期正缓存：真实分片 URL -> 验活时间。签名 URL 会变，自然按新
+# URL 重新验活。避免正常播放每次取清单都探测上游。
+_SEG_OK_CACHE: dict[str, float] = {}
+_SEG_OK_TTL = 180.0
+
+
+async def _verify_rewritten_first_seg(body: str, request: Request,
+                                      picked: dict | None = None) -> bool:
+    """对已改写的清单做首分片验活：解码 /seg?u= 里的真实上游地址，直接 Range 探测。
+    识别“清单活、分片 404/错误页”的死链（如某源 yximgs CDN 删流）。不在进程内
+    回环请求自身（会受 worker 并发影响而误判）。探测异常不轻易判死，避免误伤。"""
+    try:
+        first = next((ln.strip() for ln in body.splitlines()
+                      if ln.strip() and not ln.lstrip().startswith("#")), "")
+        if not first or first.startswith("hls?"):
+            return True  # 紧凑分片/无分片信息：交由实际分片端点处理，不预判
+        qs = urllib.parse.urlparse(first if first.startswith("http")
+                                   else _self_url(first)).query
+        u = urllib.parse.parse_qs(qs).get("u", [""])[0]
+        if not u:
+            return True
+        real = b64d(u)
+        now = time.time()
+        if _SEG_OK_CACHE.get(real) and now - _SEG_OK_CACHE[real] < _SEG_OK_TTL:
+            return True
+        headers = dict((picked or {}).get("headers") or
+                       {"User-Agent": "Mozilla/5.0"})
+        headers["Range"] = _PROBE_RANGE
+        cli = ext_client(request)
+        req = cli.build_request("GET", real, headers=headers)
+        r = await cli.send(req, follow_redirects=True)
+        try:
+            if r.status_code >= 400:
+                return False
+            b = b""
+            try:
+                b = await r.aread()
+            except Exception:
+                return True  # 读体失败不判死
+            if not b or b[:1] in (b"<", b"{", b"["):
+                return False
+        finally:
+            try:
+                await r.aclose()
+            except Exception:
+                pass
+        _SEG_OK_CACHE[real] = now
+        if len(_SEG_OK_CACHE) > 1500:
+            for old in list(_SEG_OK_CACHE)[:700]:
+                _SEG_OK_CACHE.pop(old, None)
+        return True
+    except Exception:
+        return True  # 探测本身异常：保守放行，避免误伤好线
 
 
 async def _find_playable(picked: dict, request: Request,
@@ -2694,6 +2840,145 @@ async def _find_playable(picked: dict, request: Request,
             if ok:
                 return cand
     return None
+
+
+# 内置线路全死后，按片名全网回源找到的可播记录：原 media_guid -> 真实可播 og。
+# 让播放器后续仍用原 mg 请求时能命中新记录（跨同名记录播放）。
+_MEDIA_REDIRECT: dict[str, str] = {}
+_RESURRECT_FAIL: dict[str, float] = {}
+_RESURRECT_FAIL_TTL = 10 * 60
+_RESURRECT_FUT: dict[str, asyncio.Future] = {}  # 规范化片名 -> 后台回源任务（单飞）
+
+
+async def _http_head_ok(url: str, headers: dict) -> bool:
+    """不依赖 request 的首片段验活：Range 取 2KB，4xx/错误页/空体判死。"""
+    try:
+        cli = app.state.ext
+        req = cli.build_request(
+            "GET", url, headers={**headers, "Range": _PROBE_RANGE})
+        r = await cli.send(req, follow_redirects=True)
+        try:
+            if r.status_code >= 400:
+                return False
+            b = b""
+            try:
+                b = await r.aread()
+            except Exception:
+                pass
+            return bool(b) and b[:1] not in (b"<", b"{", b"[")
+        finally:
+            try:
+                await r.aclose()
+            except Exception:
+                pass
+    except Exception:
+        return False
+
+
+async def _resurrect_start(picked: dict, mg: str) -> str:
+    """启动（或复用）按片名的后台回源任务。返回 'running' / 'ok' / 'fail'。"""
+    title = (picked.get("title") or "").strip()
+    nkey = re.sub(r"[\s\W_]+", "", title.lower())
+    if not nkey:
+        return "fail"
+    if mg and mg in _MEDIA_REDIRECT:
+        return "ok"
+    if time.time() - _RESURRECT_FAIL.get(nkey, 0) < _RESURRECT_FAIL_TTL:
+        return "fail"
+    fut = _RESURRECT_FUT.get(nkey)
+    if fut is None:
+        fut = asyncio.ensure_future(_resurrect_worker(picked, mg, nkey))
+        _RESURRECT_FUT[nkey] = fut
+
+        def _drop(_f, k=nkey):
+            _RESURRECT_FUT.pop(k, None)
+        fut.add_done_callback(_drop)
+    if fut.done() and not fut.cancelled():
+        return "ok" if fut.result() else "fail"
+    return "running"
+
+
+async def _resurrect_worker(picked: dict, mg: str, nkey: str) -> bool:
+    """后台按片名找真正能播的同名记录。两阶段：秒回直链源 → 加固源。"""
+    title = (picked.get("title") or "").strip()
+    want_idx = int(picked.get("index", 0) or 0)
+
+    def match(b):
+        return re.sub(r"[\s\W_]+", "", (b.get("title") or "").lower()) == nkey
+
+    async def evaluate(briefs, direct_only):
+        for b in briefs:
+            if not match(b):
+                continue
+            og = b.get("guid")
+            if not og:
+                continue
+            for ln, eps in (b.get("lines") or {}).items():
+                if not eps:
+                    continue
+                ep = store.resolve_episode(og, ln, want_idx)
+                if not ep or not ep.get("url"):
+                    continue
+                cand = dict(ep)
+                if direct_only and not re.search(
+                        r"\.(m3u8|mp4)(\?|$)", cand["url"], re.I):
+                    continue
+                # 解析到真实地址（加固源 detail+play），再验首片段
+                try:
+                    tgt = dict(cand, online_guid=og, kind="title")
+                    await _resolve_if_needed(tgt, None)
+                    if not tgt.get("url") or tgt.get("guard"):
+                        continue
+                    hdrs = tgt.get("headers") or {"User-Agent": "Mozilla/5.0"}
+                    real = _self_url(tgt["url"])
+                    is_hls = bool(tgt.get("m3u8")) or bool(
+                        re.search(r"\.m3u8(\?|$)", real.split("?", 1)[0], re.I))
+                    seg_url = real
+                    if is_hls:
+                        cur, seg_url = real, ""
+                        for _d in range(3):  # 跟随嵌套 master 取首个分片
+                            rr = await app.state.ext.get(
+                                cur, headers=hdrs, timeout=15,
+                                follow_redirects=True)
+                            txt = rr.text
+                            sl = [x.strip() for x in txt.splitlines()
+                                  if x.strip() and not x.lstrip().startswith("#")]
+                            if not sl:
+                                break
+                            if _is_media_playlist(txt):
+                                seg_url = urllib.parse.urljoin(cur, sl[0])
+                                break
+                            cur = urllib.parse.urljoin(cur, sl[0])
+                        if not seg_url:
+                            continue
+                    if not await _http_head_ok(seg_url, hdrs):
+                        continue
+                except Exception:
+                    continue
+                # 命中：记录可播 og，并补一条可解析线路到该 og（_pick_episode 用）
+                if mg:
+                    _MEDIA_REDIRECT[mg] = og
+                _log.info("内置线路全死，全网回源《%s》-> %s", title, ln)
+                return True
+        return False
+
+    try:
+        briefs = await asyncio.wait_for(
+            _aggregate_briefs(title, maxn=10, fast_only=True), timeout=20)
+        if await evaluate(briefs, True):
+            return True
+    except Exception:
+        pass
+    try:
+        briefs = await asyncio.wait_for(
+            _aggregate_briefs(title, maxn=10), timeout=30)
+        if await evaluate(briefs, False):
+            return True
+    except Exception:
+        pass
+    _RESURRECT_FAIL[nkey] = time.time()
+    return False
+
 
 
 # ===== 完全自动选最快线 =====
@@ -3271,6 +3556,28 @@ async def hls_main(mg: str, request: Request):
         # 预判为 HLS、解析后实为 mp4：302 到直链代理（direct 复用已解析结果）
         q = urllib.parse.urlencode({"line": picked["line"], "index": picked["index"]})
         return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/direct?{q}", status_code=302)
+    # 清单活、分片死（如某源 CDN 删流）：先在已解析清单上验首个分片，失败则
+    # 标记坏线，并启动「按片名全网回源」后台任务。回源较慢，首个请求不阻塞到
+    # 网关超时，而是让客户端（本就每 3 秒重试）在后台找到可播源后的下一次请求
+    # 经 _MEDIA_REDIRECT 命中新记录。
+    if _autofail_on() and not await _verify_rewritten_first_seg(body, request, picked):
+        _mark_line_bad(picked)
+        status = await _resurrect_start(picked, mg)
+        if status == "ok":
+            alt = _pick_episode(mg, request)
+            if alt:
+                body2 = await _get_playlist_cached(mg, alt, request)
+                if body2 and body2 is not _NOT_HLS:
+                    return Response(body2, media_type="application/vnd.apple.mpegurl",
+                                    headers={"Cache-Control": "no-cache",
+                                             "Access-Control-Allow-Origin": "*"})
+        if status == "fail":
+            return Response("暂无可播线路（该源分片已失效，且未找到其他可用源）",
+                            status_code=502)
+        # running：让客户端稍候重试，不返回错误清单
+        return Response("正在为你寻找可用线路…", status_code=503,
+                        headers={"Retry-After": "3",
+                                 "Access-Control-Allow-Origin": "*"})
     return Response(body, media_type="application/vnd.apple.mpegurl",
                     headers={"Cache-Control": "no-cache",
                              "Access-Control-Allow-Origin": "*"})

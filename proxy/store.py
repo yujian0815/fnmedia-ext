@@ -290,6 +290,26 @@ class Store:
         with self._lock:
             return self._titles.get(guid)
 
+    def find_title_with_line(self, title: str, line: str) -> Optional[str]:
+        """同名标题常因不同搜索/聚合路径各存一条、且只挂部分线路。当播放页记录里
+        没有用户所选线路时，按片名找到「包含该线路、线路最多」的另一条记录，返回其
+        guid，避免静默退回第一条死链。"""
+        if not title or not line:
+            return None
+        best, best_n = None, -1
+        disp = line.split("::", 1)[1] if "::" in line else line
+        with self._lock:
+            for g, b in self._titles.items():
+                if b.get("title") != title:
+                    continue
+                lines = b.get("lines") or {}
+                hit = line in lines or any(
+                    k == line or ("::" in k and k.split("::", 1)[1] == disp)
+                    for k in lines)
+                if hit and len(lines) > best_n:
+                    best, best_n = g, len(lines)
+        return best
+
     def provider_of(self, online_guid: str) -> str:
         """guid 对应标题所属资源源 id（来自 online_id "<provider>:<vod_id>"）。"""
         with self._lock:
