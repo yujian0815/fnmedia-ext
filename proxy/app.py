@@ -875,6 +875,13 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
     for g in ordered:
         brief = inj.brief_of(g["rep"])
         brief["lines"] = g["lines"]
+        # 预算海报角标：网盘资源名 + 最优线路健康等级（搜索/媒体库海报通用）
+        try:
+            _pl, _hg, _ = _brief_line_flags(brief)
+            brief["_pan"] = _pl
+            brief["_health"] = _hg
+        except Exception:  # noqa: BLE001
+            pass
         briefs.append(brief)
     return store.remember_merged(briefs)
 
@@ -939,8 +946,65 @@ def _should_online(q: str) -> bool:
 
 # ------------------------------------------------------------- 在线热门媒体库
 
+def _brief_line_flags(brief: dict) -> tuple[str, int | None, set]:
+    """扫描 brief 的所有线路，返回 (网盘名标注, 最优健康等级, 网盘源key集合)。
+
+    网盘名：任一线路播放地址命中网盘特征即给出（如"夸克"/"UC"/"阿里"），多盘取首个；
+    健康等级：在非死线路里取最优（grade 数值越小越优）；全死则返回 3。"""
+    pan_names: list[str] = []
+    pan_keys: set = set()
+    grades: list[int] = []
+    for lname, eps in (brief.get("lines") or {}).items():
+        src_key = sourcehealth.source_key_of(lname)
+        if src_key:
+            g = sourcehealth.display_grade(src_key)
+            if g is not None:
+                grades.append(g)
+        for e in eps:
+            url = str(e.get("url") or "")
+            pv = _pan_match(url) if url else None
+            if pv is not None:
+                nm = pv.get("name", "")
+                tag = nm.replace("网盘", "")
+                if tag and tag not in pan_names:
+                    pan_names.append(tag)
+                if src_key:
+                    pan_keys.add(src_key)
+    pan_label = "/".join(pan_names[:3])
+    # 只在有真实探测样本时显示健康点；全死(3)且无更优时显示红点
+    live = [g for g in grades if g != 3] or grades
+    grade = min(live) if live else None
+    return pan_label, grade, pan_keys
+
+
+# 向注入层提供海报角标（网盘名 + 健康等级），使所有 search_item 路径统一生效
+try:
+    inj.set_badge_provider(lambda b: _brief_line_flags(b)[:2])
+except Exception:  # noqa: BLE001
+    pass
+
+
+def _brief_poster_badged(brief: dict) -> str:
+    """按 brief 线路的网盘/健康情况生成带角标的海报路径。"""
+    cover = brief.get("poster") or ""
+    if not cover:
+        return ""
+    pan_label, grade, _ = _brief_line_flags(brief)
+    try:
+        return inj._poster_badged(cover, pan_label, grade)
+    except Exception:  # noqa: BLE001
+        return inj._poster(cover)
+
+
 def _hot_card(brief: dict, cat: str) -> dict:
     row = inj.search_item(brief)
+    # 海报墙角标：网盘资源 + 源健康点（烧进海报图，原生库无需改 UI）
+    try:
+        bp = _brief_poster_badged(brief)
+        if bp:
+            row["poster"] = bp
+    except Exception:  # noqa: BLE001
+        pass
     # 媒体库内不再重复显示【在线】前缀，让海报墙更接近原生媒体库体验
     title = (brief.get("title") or "").strip()
     remarks = (brief.get("remarks") or "").strip()
@@ -3446,6 +3510,10 @@ async def hls_preset(mg: str, request: Request):
         fast = remembered_fast_line(picked)
         if fast:
             hls_targets.sort(key=lambda t: t["line"] != fast)
+    else:
+        # 手动/菜单模式：网盘线（高质量原画）排在在线线之前，便于直接选到网盘资源
+        hls_targets.sort(key=lambda t: 0 if _pan_match(str(t.get("url") or ""))
+                         else 1)
 
     def variant_uri(t: dict, is_auto_first: bool = False) -> str:
         q = {"index": idx, "line": t["line"]}
@@ -3464,7 +3532,7 @@ async def hls_preset(mg: str, request: Request):
         # 多线路：无 RESOLUTION 的变体，飞牛 HLS 播放器呈现为可切换「线路」
         out = ["#EXTM3U", "#EXT-X-VERSION:3"]
         for i, t in enumerate(hls_targets):
-            name = _friendly_line(t["line"])
+            name = _line_display_name(t)
             # NAME 供支持的播放器显示线路名；BANDWIDTH 差异化避免变体被合并
             out.append(f'#EXT-X-STREAM-INF:BANDWIDTH={1000000 + i * 100000},'
                        f'PROGRAM-ID=1,NAME="{name}"')
@@ -3491,6 +3559,12 @@ def _friendly_line(key: str) -> str:
         return pcn
     if group in _GROUP_CN:
         return f"{pcn}·{_GROUP_CN[group]}"
+    # guard-/spider-/drpy- 等技术源：组名常是中文（如 🐻剧圈┃多线），取 ┃| 前可读部分
+    if re.match(r"(guard|spider|drpy)-", provider, re.I):
+        nice = re.sub(r"[┃|].*$", "", group).strip()
+        nice = re.sub(r"^[\s\U0001F000-\U0001FAFF☀-➿]+", "", nice)
+        if nice and not re.fullmatch(r"[A-Za-z0-9_-]+", nice):
+            return nice
     stem = group
     for suf in ("zym3u8", "m3u8", "yun"):
         if stem.endswith(suf):
@@ -3498,6 +3572,24 @@ def _friendly_line(key: str) -> str:
             break
     stem = stem.upper() if stem.isascii() and stem else ""
     return f"{pcn}·{stem}" if stem else pcn
+
+
+def _line_display_name(t: dict) -> str:
+    """播放器线路菜单显示名：网盘线路加 ☁网盘名 前缀，便于区分高质量网盘资源。
+
+    网盘线的来源多为 guard-Xxx 这类技术源名，直接展示不友好；改用线路组名里
+    的中文可读部分（去掉 ┃多线 等装饰与 emoji 源前缀）。"""
+    line = t.get("line", "")
+    url = str(t.get("url") or "")
+    pv = _pan_match(url) if url else None
+    if pv is not None:
+        tag = pv.get("name", "网盘").replace("网盘", "")
+        group = line.split("::", 1)[1] if "::" in line else ""
+        nice = re.sub(r"[┃|].*$", "", group).strip(" 🐌🍓🐻🍉🛡️")
+        # 去掉常见纯英文技术源尾巴
+        nice = re.sub(r"(guard-|spider-|drpy-)", "", nice, flags=re.I).strip()
+        return f"☁{tag} {nice}".strip() if nice else f"☁{tag} 网盘"
+    return _friendly_line(line)
 
 
 def _is_media_playlist(text: str) -> bool:
@@ -3748,6 +3840,26 @@ def _decode_tok(tok: str) -> str:
     return b64d(tok)
 
 
+def _decode_poster_tok(tok: str) -> tuple[str, str, int | None]:
+    """解码海报 token，返回 (图床URL, 网盘名, 健康等级)。
+
+    兼容旧版纯 URL token 与新版 JSON{u,p,h} token。"""
+    raw = _decode_tok(tok)
+    pan_label, grade = "", None
+    url = raw
+    if raw[:1] in ("{", "["):
+        try:
+            j = json.loads(raw)
+            if isinstance(j, dict):
+                url = j.get("u", "")
+                pan_label = str(j.get("p", "") or "")
+                if j.get("h") is not None:
+                    grade = int(j["h"])
+        except Exception:
+            url = raw
+    return url, pan_label, grade
+
+
 def _poster_fallback() -> Response:
     svg = """<svg xmlns="http://www.w3.org/2000/svg" width="300" height="450" viewBox="0 0 300 450">
   <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
@@ -3772,11 +3884,12 @@ async def _serve_online_poster(tok_path: str, request: Request) -> Response:
     if marker in tok_path:
         tok_path = tok_path.split(marker, 1)[1]
     try:
-        u = _decode_tok(tok_path)
+        u, pan_label, health_grade = _decode_poster_tok(tok_path)
     except Exception:
         return _poster_fallback()
     if not u.startswith("http"):
         return _poster_fallback()
+    want_badge = bool(pan_label) or health_grade is not None
     headers = {"User-Agent": "Mozilla/5.0"}
     host = urllib.parse.urlsplit(u).netloc.lower()
     # 豆瓣图床需要带豆瓣 Referer，否则可能 403
@@ -3804,8 +3917,21 @@ async def _serve_online_poster(tok_path: str, request: Request) -> Response:
         ctype = ctype if ctype.startswith("image/") else sniff
     except Exception:
         return _poster_fallback()
-    return Response(content=r.content, status_code=200,
-                    media_type=ctype or "image/jpeg",
+
+    # 在海报上烧角标（网盘资源 / 源健康点）。GIF 不动，合成失败回退原图。
+    out_bytes, out_type = r.content, (ctype or "image/jpeg")
+    if want_badge and "gif" not in out_type:
+        try:
+            import posterbadge
+            if posterbadge.available():
+                badged = await asyncio.to_thread(
+                    posterbadge.badge, r.content, pan_label, health_grade)
+                if badged:
+                    out_bytes, out_type = badged, "image/jpeg"
+        except Exception:  # noqa: BLE001
+            pass
+    return Response(content=out_bytes, status_code=200,
+                    media_type=out_type,
                     headers={"Cache-Control": "max-age=86400",
                              "Access-Control-Allow-Origin": "*"})
 

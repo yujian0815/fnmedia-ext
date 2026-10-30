@@ -173,6 +173,17 @@ def ordered(keys, now: float | None = None) -> list:
     return sorted(keys, key=lambda k: weight(k, now))
 
 
+def display_grade(key: str, now: float | None = None):
+    """海报/UI 角标用等级：无任何统计样本时返回 None（不显示点），
+    避免给从未探测过的新源误标黄/红点。返回 0~3 或 None。"""
+    now = now if now is not None else time.time()
+    with _LOCK:
+        s = _STATS.get(key)
+        if not s or s.get("n", 0) == 0:
+            return None
+        return _grade(s, now)
+
+
 def snapshot() -> dict:
     """管理页用：全部源画像。"""
     now = time.time()

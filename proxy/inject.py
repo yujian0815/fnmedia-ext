@@ -18,6 +18,29 @@ def _poster(url: str) -> str:
     return url
 
 
+def _poster_badged(url: str, pan_label: str = "",
+                   health_grade: int | None = None) -> str:
+    """带角标的海报：token 编码 JSON{u:图床, p:网盘名, h:健康等级}。
+
+    无任何角标时退化为普通 _poster（保持与旧缓存/旧链接兼容）。"""
+    if not url:
+        return ""
+    if not url.startswith("http"):
+        return url
+    if not pan_label and health_grade is None:
+        return _poster(url)
+    import json as _json
+    payload = {"u": url}
+    if pan_label:
+        payload["p"] = pan_label
+    if health_grade is not None:
+        payload["h"] = int(health_grade)
+    tok = _b64.urlsafe_b64encode(
+        _json.dumps(payload, ensure_ascii=False).encode()
+    ).decode().rstrip("=")
+    return f"/online/{tok}.jpg"
+
+
 # 单集作为 Movie 点开即播；多集作为 TV，配合 season/list、episode/list
 # 伪造出原生选集 UI。苹果 CMS 的 type_name 用于修正“单集连载剧”等边界情况。
 _TV_TYPE_WORDS = ("电视剧", "连续剧", "日剧", "韩剧", "美剧", "英剧", "泰剧",
@@ -96,6 +119,33 @@ def _ep_count(b: dict) -> int:
 
 ONLINE_TAG = "【在线】"
 
+# app 层注入的角标提供者：brief -> (网盘名, 健康等级或None)。
+# 避免 inject 反向依赖 app（循环导入）；未注入时不显示角标。
+_badge_provider = None
+
+
+def set_badge_provider(fn) -> None:
+    global _badge_provider
+    _badge_provider = fn
+
+
+def _poster_for_brief(b: dict) -> str:
+    """海报路径：按 brief 线路生成带角标海报（网盘资源 ☁ / 源健康点）。
+
+    优先用 brief 上预算好的 _pan/_health；否则实时调用注入的角标提供者。"""
+    cover = _f(b, "poster")
+    if not cover.startswith("http"):
+        return _poster(cover)
+    pan, hg = _f(b, "_pan"), b.get("_health")
+    if (not pan) and hg is None and _badge_provider is not None:
+        try:
+            pan, hg = _badge_provider(b)
+        except Exception:  # noqa: BLE001
+            pan, hg = "", None
+    if pan or hg is not None:
+        return _poster_badged(cover, pan, hg if isinstance(hg, int) else None)
+    return _poster(cover)
+
 
 def search_item(b: dict) -> dict:
     guid = b["guid"]
@@ -121,7 +171,7 @@ def search_item(b: dict) -> dict:
         "title": ONLINE_TAG + title + (f" ·{remarks}" if remarks else ""),
         "type": typ,
         "genres": [],
-        "poster": _poster(_f(b, "poster")),
+        "poster": _poster_for_brief(b),
         "poster_width": 0,
         "poster_height": 0,
         "is_favorite": 0,
