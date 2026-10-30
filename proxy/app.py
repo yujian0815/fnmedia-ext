@@ -36,6 +36,7 @@ import sourcehealth
 import client as clientmod
 import live as livemod
 import inject as inj
+import acl as aclmod
 import config as cfgmod
 from config import config
 import hot as hotmod
@@ -496,6 +497,28 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 for _noisy in ("httpx", "httpcore", "httpcore.http11", "httpcore.connection",
                "httpcore._sync.connection", "httpcore._async.connection"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
+
+
+# ------------------------------------------------------------- 用户可见性闸门
+# 只对「在线内容」相关路径解析身份；未启用用户控制时零开销直接放行。
+# 注意：本中间件必须在 _access 之后注册（Starlette 后注册者在外层），
+# 这样访问日志能记录到 403。
+_ACL_PATHS = ("/v/api/v1/", ONLINE_PREFIX)
+
+
+@app.middleware("http")
+async def _user_acl_gate(request: Request, call_next):
+    p = request.url.path
+    if not p.startswith(_ACL_PATHS):
+        request.state.acl_ok = True
+        return await call_next(request)
+    # gate() 内部对「未启用 / 全员可见」走零开销快路径，不访问上游
+    ok = await aclmod.gate(request, up_client(request))
+    if not ok and p.startswith(ONLINE_PREFIX):
+        # 直连播放代理一律拒绝，避免拿到 guid 后绕过媒体库可见性
+        return JSONResponse({"code": 403, "msg": "该账号无在线媒体库权限", "data": None},
+                            status_code=403)
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -1202,6 +1225,9 @@ async def _json_from_upstream(upstream: Response) -> dict | None:
 @app.get("/v/api/v1/mediadb/list")
 async def mediadb_list(request: Request):
     upstream = await forward_upstream(request)
+    # 无在线权限的账号：不注入任何虚拟库，完全等同官方行为
+    if aclmod.denies(request):
+        return upstream
     # 热门四库与海量四库各有独立开关；两类都关时才完全不注入（单源独立库/加固专区
     # 仍应展示，故这里只判断“聚合四库”开关）。
     if not any_virtual_lib_enabled():
@@ -1329,6 +1355,12 @@ async def mdb_detail(guid: str, request: Request):
                 break
         return ps
 
+    # 无在线权限：虚拟库一律当作“不存在”，客户端会提示「此媒体库不存在」
+    if aclmod.denies(request) and (
+            guid in CHART_GUID_CAT or guid in CATALOG_GUID_CAT or is_hot_guid(guid)
+            or standalone_source_of(guid) is not None):
+        return JSONResponse({"code": -6, "msg": "", "data": None})
+
     vguid = None
     if guid in CHART_GUID_CAT:
         cat = CHART_GUID_CAT[guid]
@@ -1427,6 +1459,8 @@ async def mdb_detail(guid: str, request: Request):
 @app.get("/v/api/v1/mediadb/sum")
 async def mediadb_sum(request: Request):
     upstream = await forward_upstream(request)
+    if aclmod.denies(request):
+        return upstream
     if not any_virtual_lib_enabled():
         return upstream
     payload = await _json_from_upstream(upstream)
@@ -1474,6 +1508,14 @@ async def item_list(request: Request):
         body = {}
     aguid = body.get("ancestor_guid")
     client = _client_of(request)
+
+    # 无在线权限：访问虚拟库根节点返回空列表（客户端表现为空库而非报错）
+    if aclmod.denies(request) and aguid and (
+            aguid in CHART_GUID_CAT or aguid in CATALOG_GUID_CAT or is_hot_guid(aguid)
+            or standalone_source_of(aguid) is not None):
+        return JSONResponse({"code": 0, "msg": "", "data": {
+            "mdb_name": "", "mdb_category": "Mix", "top_dir": "",
+            "dir": "", "total": 0, "list": [], "jump_list": None}})
 
     # —— TVBox 加固源专区库 ——
 
@@ -1584,6 +1626,9 @@ async def item_list(request: Request):
 @app.get("/v/api/v1/search/list")
 async def search_list(request: Request):
     local = await forward_upstream(request)
+    # 无在线权限：只返回官方本地搜索结果
+    if aclmod.denies(request):
+        return local
     q = request.query_params.get("q", "").strip()
     try:
         import json
@@ -1620,6 +1665,11 @@ async def search_list(request: Request):
 @app.get("/v/api/v1/item/{guid}")
 async def item_detail(guid: str, request: Request):
     client = _client_of(request)
+    # 无在线权限：在线条目/虚拟库根节点一律当作不存在
+    if aclmod.denies(request) and (
+            guid in CHART_GUID_CAT or guid in CATALOG_GUID_CAT or is_hot_guid(guid)
+            or standalone_source_of(guid) is not None or is_online_guid(guid)):
+        return JSONResponse({"code": -6, "msg": "", "data": None})
     # 单源独立媒体库根节点
     sscope = standalone_source_of(guid)
     if sscope is not None and \
@@ -1760,6 +1810,8 @@ async def item_detail(guid: str, request: Request):
 
 @app.get("/v/api/v1/season/list/{guid}")
 async def season_list_route(guid: str, request: Request):
+    if aclmod.denies(request):
+        return await forward_upstream(request)
     brief = store.get_title_by_guid(guid)
     if not brief or not inj.is_tv(brief):
         return await forward_upstream(request)
@@ -1770,6 +1822,8 @@ async def season_list_route(guid: str, request: Request):
 
 @app.get("/v/api/v1/episode/list/{guid}")
 async def episode_list_route(guid: str, request: Request):
+    if aclmod.denies(request):
+        return await forward_upstream(request)
     # guid 可能是伪造的 season guid，也可能是 tv guid
     tv = None
     from store import season_guid as _sg
@@ -1791,6 +1845,8 @@ async def episode_list_route(guid: str, request: Request):
 
 @app.get("/v/api/v1/stream/list/{guid}")
 async def stream_list(guid: str, request: Request):
+    if aclmod.denies(request):
+        return await forward_upstream(request)
     ep = store.get_episode(guid)
     target = None
     if ep:
@@ -1982,6 +2038,9 @@ async def favorite_list(request: Request):
     except Exception:
         body = {}
     local = await forward_upstream(request)
+    # 无在线权限：不合并在线收藏
+    if aclmod.denies(request):
+        return local
     try:
         ldata = json.loads(local.body)
     except Exception:
@@ -2204,6 +2263,8 @@ async def stream_post(request: Request):
     body = json.loads(await request.body() or b"{}")
     mg = body.get("media_guid", "")
     target = store.resolve_media_guid(mg)
+    if aclmod.denies(request) and (target or chart_guid_by_media(mg)):
+        return await forward_upstream(request)
     if not target and chart_guid_by_media(mg):
         # 网页播放器会在进入播放页前连续请求 stream；这里必须瞬时返回，不能等待搜源，
         # 否则三个请求串起来仍会把用户留在海报墙。真实匹配推迟到播放器请求 preset。
@@ -2239,6 +2300,8 @@ async def media_range(mg: str, request: Request):
     """
     target = store.resolve_media_guid(mg)
     chart_g = "" if target else chart_guid_by_media(mg)
+    if aclmod.denies(request) and (target or chart_g):
+        return Response("该账号无在线媒体库权限", status_code=403)
     if not target and chart_g:
         if time.time() - _CHART_FAILED_TS.get(chart_g, 0) < _CHART_FAILED_TTL:
             return Response("暂无可用在线片源", status_code=503)
@@ -2280,6 +2343,8 @@ async def play_play(request: Request):
     body = json.loads(await request.body() or b"{}")
     mg = body.get("media_guid", "")
     base_target = store.resolve_media_guid(mg)
+    if aclmod.denies(request) and (base_target or chart_guid_by_media(mg)):
+        return await forward_upstream(request)
     if not base_target and chart_guid_by_media(mg):
         # 未绑定榜单片：play/play 也立即返回占位 HLS，播放器先进入加载页；
         # preset/main 请求时再等待后台匹配，避免 play/info+stream+play 串行等待。
@@ -2488,6 +2553,9 @@ async def play_record_delete(request: Request):
 @app.get("/v/api/v1/play/list")
 async def play_list(request: Request):
     upstream = await forward_upstream(request)
+    # 无在线权限：不合并在线播放记录
+    if aclmod.denies(request):
+        return upstream
     try:
         import json
         data = json.loads(upstream.body)
@@ -3991,7 +4059,8 @@ async def ext_status(request: Request):
             "cached_titles": len(store._titles),
             "hot": hot_cache.status(),
             "charts": chart_cache.status(),
-            "catalog": catalog.status()}
+            "catalog": catalog.status(),
+            "user_acl": aclmod.status()}
 
 
 # --------------------------------------------------------------- 版本更新
@@ -4149,6 +4218,41 @@ async def ext_set_config(request: Request):
     if sources_changed:
         _schedule_routes_refresh()
     return {"code": 0, "msg": "saved"}
+
+
+# ----------------------------------------------------------- 用户可见性（管理）
+@app.get("/v/api/ext/user-acl")
+async def ext_user_acl_get(request: Request):
+    """读取用户可见性设置 + 最近识别到的飞牛用户（供管理页点选加入白名单）。"""
+    return {"code": 0, "msg": "", "data": aclmod.status()}
+
+
+@app.post("/v/api/ext/user-acl")
+async def ext_user_acl_set(request: Request):
+    """保存用户可见性设置。body: {enabled,mode,users,allow_admin,fail_open}"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"code": -1, "msg": "参数非法"}, status_code=400)
+    ok, msg = config.set_user_acl(body)
+    if not ok:
+        return JSONResponse({"code": -1, "msg": msg}, status_code=400)
+    return {"code": 0, "msg": "saved", "data": aclmod.status()}
+
+
+@app.get("/v/api/ext/user-acl/whoami")
+async def ext_user_acl_whoami(request: Request):
+    """回显当前请求被识别成哪个飞牛用户，用于确认名单里该填什么。"""
+    user = await aclmod.resolve(request, up_client(request))
+    return {"code": 0, "msg": "", "data": {
+        "identified": bool(user),
+        "name": (user or {}).get("name", ""),
+        "uid": (user or {}).get("uid", ""),
+        "admin": bool((user or {}).get("admin")),
+        "token_present": aclmod.token_present(request),
+        "visible": aclmod.visible(user)}}
 
 
 @app.post("/v/api/ext/subscription-proxy")
