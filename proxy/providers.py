@@ -149,6 +149,28 @@ def _site_root(api: str) -> str:
     return f"{p.scheme}://{p.netloc}/"
 
 
+def source_priority(source: dict, overrides: dict | None = None) -> int:
+    """片源质量权重，取值 -100..100，越高越优先。
+
+    管理页「片源质量」把用户自定义的权重落库在 config["source_priority"]
+    （source_id -> int，见 config.set_source_priority），这里优先采用；未自定义的源
+    回落到内省默认 0，于是排序自然退化为「同权重再按可播直链总数降序」，与
+    app.py 里热门榜聚合排序的注释一致。
+
+    该函数与 `prefer_quality_source` 开关配套：关闭时调用方直接把权重当 0 处理。
+    """
+    try:
+        sid = (source or {}).get("id")
+    except AttributeError:
+        sid = None
+    if overrides and sid in overrides:
+        try:
+            return max(-100, min(100, int(overrides[sid])))
+        except (TypeError, ValueError):
+            pass
+    return 0
+
+
 async def search_source(client: httpx.AsyncClient, source: dict,
                         keyword: str) -> list[OnlineTitle]:
     params = {"ac": "detail", "wd": keyword}
