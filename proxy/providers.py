@@ -34,6 +34,9 @@ DEFAULT_SOURCES: list[dict] = [
 
 
 HTTP_TIMEOUT = 12.0
+# 加固（真机）搜索单源硬超时：聚合搜索要 gather 全部源，真机卡顿不能拖垮整体。
+# 取较短值让慢加固源快速失败，纯 CMS 源通常 5s 内返回，不影响热榜片起播。
+GUARD_SEARCH_TIMEOUT = 8.0
 _DIRECT_RE = re.compile(r"^https?://", re.I)
 _MEDIA_RE = re.compile(r"\.(m3u8|mp4|flv|mkv|ts)(\?|$)", re.I)
 # 可由自有账号转存原画播放的网盘分享链接（夸克 / UC）。
