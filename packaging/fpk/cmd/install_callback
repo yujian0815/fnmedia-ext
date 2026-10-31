@@ -11,7 +11,18 @@ cd "${FNMEDIA_REPO_DIR}" || fnmedia_fail "无法进入应用目录"
 if [ ! -x ".venv/bin/python" ]; then
   python3 -m venv .venv >> "${FNMEDIA_LOG}" 2>&1 || fnmedia_fail "创建 venv 失败"
   .venv/bin/pip install -q --upgrade pip >> "${FNMEDIA_LOG}" 2>&1 || true
-  .venv/bin/pip install -q fastapi "uvicorn" httpx >> "${FNMEDIA_LOG}" 2>&1 || fnmedia_fail "Python 依赖安装失败"
+  if ! .venv/bin/pip install -q fastapi "uvicorn" httpx >> "${FNMEDIA_LOG}" 2>&1; then
+    # 国内直连 PyPI 常出现两个问题：files.pythonhosted.org 速度极低，以及下载内容
+    # 被中间设备截断/改写导致 pip 报 "THESE PACKAGES DO NOT MATCH THE HASHES"。
+    # 这类失败重试官方源没有意义，回退国内镜像再试一次；仍失败才报错。
+    # 可用 FNMEDIA_PIP_INDEX / FNMEDIA_PIP_HOST 覆盖镜像。
+    _IDX="${FNMEDIA_PIP_INDEX:-https://mirrors.aliyun.com/pypi/simple/}"
+    _HOST="${FNMEDIA_PIP_HOST:-mirrors.aliyun.com}"
+    echo "[fnmedia-ext] 官方源安装失败，回退镜像 ${_IDX}" >> "${FNMEDIA_LOG}" 2>&1
+    .venv/bin/pip install -q -i "${_IDX}" --trusted-host "${_HOST}" \
+      fastapi "uvicorn" httpx >> "${FNMEDIA_LOG}" 2>&1 \
+      || fnmedia_fail "Python 依赖安装失败（官方源与镜像均失败，详见 ${FNMEDIA_LOG}）"
+  fi
 fi
 bash deploy/install.sh >> "${FNMEDIA_LOG}" 2>&1 || { tail -n 8 "${FNMEDIA_LOG}" >&2 || true; fnmedia_fail "接管服务启动失败，详见 ${FNMEDIA_LOG}"; }
 exit 0
