@@ -191,6 +191,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
     <nav class="nav" id="nav">
       <button class="nav-item active" data-page="overview">概览</button>
       <button class="nav-item" data-page="library">虚拟媒体库</button>
+      <button class="nav-item" data-page="users">用户可见性</button>
       <button class="nav-item" data-page="quality">片源质量</button>
       <button class="nav-item" data-page="sources">资源站</button>
       <button class="nav-item" data-page="importsub">导入订阅</button>
@@ -292,6 +293,55 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <button class="primary small" onclick="saveCatCfg()">保存海量设置</button>
         </div>
         <div class="hint">海量库在分类路由建立后自动出现；也可在「资源站」页把某个站单独生成一张媒体库卡片。</div>
+      </div>
+    </section>
+
+    <!-- ============ 用户可见性 ============ -->
+    <section class="page" id="page-users">
+      <h2 class="page-title">用户可见性</h2>
+      <p class="page-desc">控制插件新增的「虚拟媒体库」与「在线搜索结果」对哪些飞牛用户可见。官方本地库、本地播放完全不受影响。</p>
+
+      <div class="card">
+        <div class="card-title">总开关与模式</div>
+        <label class="switch-row"><input type="checkbox" id="aclEnabled"/>
+          <span>启用用户可见性控制
+            <span class="sub">关闭时全员可见（与历史行为一致）</span></span></label>
+        <label class="field" style="max-width:300px"><span>可见范围</span>
+          <select id="aclMode">
+            <option value="all">全员可见</option>
+            <option value="whitelist">仅白名单内用户可见</option>
+          </select></label>
+        <label class="switch-row"><input type="checkbox" id="aclAdmin"/>
+          <span>飞牛管理员始终可见<span class="sub">避免把自己锁在门外</span></span></label>
+        <label class="switch-row"><input type="checkbox" id="aclFailOpen"/>
+          <span>认不出身份时放行
+            <span class="sub">未登录或上游鉴权抖动、拿不到用户名时默认放行；关闭则一律看不到在线内容</span></span></label>
+        <div class="hint" id="aclHint"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">白名单 <span class="badge" id="aclCount">0 人</span>
+          <span class="muted sm" style="font-weight:400;margin-left:auto">填飞牛用户名（大小写不敏感），也接受 uid</span>
+        </div>
+        <p class="card-sub">只有名单里的用户在影视里能看到「🌐在线…」这些库和【在线】搜索结果；其他账号看到的完全是官方界面。
+          白名单为空时按「认不出身份」策略处理，不会把所有人都锁掉。</p>
+        <div id="aclChips" style="display:flex;flex-wrap:wrap;gap:6px;margin:8px 0"></div>
+        <div class="row"><input type="text" id="aclAdd" placeholder="输入用户名后回车，或点右侧添加" style="flex:1"/>
+          <button class="small" type="button" onclick="addAclUser()">添加</button></div>
+        <div class="btn-row"><button class="primary small" onclick="saveUserAcl()">保存并立即生效</button></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">最近识别到的用户
+          <button class="small" style="margin-left:auto" onclick="reloadAcl()">刷新</button>
+        </div>
+        <p class="card-sub">用影视 App 或网页打开一次任意页面，这里就会出现该账号；点「加入白名单」即可，不用手打用户名。</p>
+        <div style="overflow-x:auto">
+          <table>
+            <thead><tr><th>用户名</th><th>uid</th><th>身份</th><th>最后出现</th><th></th></tr></thead>
+            <tbody id="aclRecent"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody>
+          </table>
+        </div>
       </div>
     </section>
 
@@ -545,6 +595,7 @@ async function switchPage(page){
   window.scrollTo(0,0);
   if(page==="overview"){renderOverview();startLivePoll();}
   if(page==="library"){loadLibs().then(renderLibrary);}
+  if(page==="users"){reloadAcl();}
   if(page==="quality")renderQuality();
   if(page==="sources"){try{loadHealth();}catch(e){}}
   if(page==="tvbox"){try{loadGuardZone();}catch(e){}try{gbInit();}catch(e){}}
@@ -1306,6 +1357,73 @@ async function loadOnline(){
 
 
 
+/* ---------- 用户可见性 ---------- */
+let ACL=null;
+async function reloadAcl(){
+  try{const r=await jget("/v/api/ext/user-acl");ACL=r.data||null;}catch(e){ACL=null;}
+  renderUserAcl();
+}
+function aclUsers(){return (ACL&&Array.isArray(ACL.users))?ACL.users.slice():[];}
+function renderUserAcl(){
+  if(!ACL){$("aclHint").textContent="读取失败：接口不可用（确认扩展在运行）";return;}
+  $("aclEnabled").checked=!!ACL.enabled;
+  $("aclMode").value=(ACL.mode==="whitelist")?"whitelist":"all";
+  $("aclAdmin").checked=ACL.allow_admin!==false;
+  $("aclFailOpen").checked=ACL.fail_open!==false;
+  $("aclHint").innerHTML=ACL.enabled
+    ? (ACL.mode==="whitelist"
+        ? '当前状态：<b>仅白名单可见</b>（' + aclUsers().length + ' 人）'
+        : '当前状态：<b>已启用但仍是全员可见</b>，把「可见范围」切成白名单才生效')
+    : '当前状态：<b>未启用</b>，所有飞牛用户都能看到在线媒体库';
+  renderAclChips();renderAclRecent();
+}
+function renderAclChips(){
+  const us=aclUsers();
+  $("aclCount").textContent=us.length+" 人";
+  $("aclChips").innerHTML=us.length
+    ? us.map((u,i)=>`<span class="chip">${esc(u)}<b data-aclidx="${i}" title="删除">×</b></span>`).join("")
+    : '<span class="muted sm">还没有添加用户，可从下方「最近识别到的用户」一键加入</span>';
+  $("aclChips").querySelectorAll("b[data-aclidx]").forEach(b=>b.onclick=()=>{
+    const us2=aclUsers();us2.splice(+b.dataset.aclidx,1);ACL.users=us2;renderAclChips();renderAclRecent();});
+}
+function renderAclRecent(){
+  const rs=(ACL&&ACL.recent)||[];
+  const low=aclUsers().map(x=>String(x).toLowerCase());
+  if(!rs.length){
+    $("aclRecent").innerHTML='<tr><td colspan="5" class="muted">还没有识别到用户：先用影视 App 打开一次任意页面，再点右上角「刷新」</td></tr>';
+    return;
+  }
+  $("aclRecent").innerHTML=rs.map(u=>{
+    const name=u.name||"", guid=u.uid||"";
+    const has=(name&&low.includes(name.toLowerCase()))||(guid&&low.includes(guid.toLowerCase()));
+    // guid 显示前 10 位，鼠标悬停看全串：它比用户名稳定，改名后白名单仍然命中
+    const gshort=guid?esc(guid.slice(0,10))+(guid.length>10?"…":""):"";
+    return `<tr data-name="${esc(name||guid)}"><td style="font-weight:500">${esc(name||"-")}</td>
+      <td class="muted sm" title="${esc(guid)}">${gshort}</td>
+      <td>${u.admin?'<span class="badge">管理员</span>':'<span class="muted sm">普通用户</span>'}</td>
+      <td class="muted sm">${u.ts?fmtTs(u.ts):""}</td>
+      <td>${has?'<span class="muted sm">已在白名单</span>':'<button class="small" data-acladd="1">加入白名单</button>'}</td></tr>`;
+  }).join("");
+}
+function addAclUser(name){
+  const v=String(name!=null?name:($("aclAdd").value||"")).trim();
+  if(!v)return;
+  const us=aclUsers();
+  const parts=v.split(/[,，、;；\s]+/).filter(Boolean);
+  parts.forEach(p=>{if(!us.some(x=>String(x).toLowerCase()===p.toLowerCase()))us.push(p);});
+  ACL.users=us;
+  if(name==null)$("aclAdd").value="";
+  renderAclChips();renderAclRecent();
+  if(parts.length)toast("已加入 "+parts.join("、")+"（记得点保存）");
+}
+async function saveUserAcl(){
+  const body={enabled:$("aclEnabled").checked,mode:$("aclMode").value,
+    users:aclUsers(),allow_admin:$("aclAdmin").checked,fail_open:$("aclFailOpen").checked};
+  const r=await jpost("/v/api/ext/user-acl",body);
+  if(r.code===0){ACL=r.data;renderUserAcl();toast("用户可见性已保存，立即生效");}
+  else toast(r.msg||"保存失败","fail");
+}
+
 /* ---------- 初始化 ---------- */
 async function loadStatus(){
   STATUS=await jget("/v/api/ext/status");
@@ -1334,6 +1452,10 @@ $("liveClear").addEventListener("click",async e=>{e.preventDefault();
   try{await fetch("/v/api/ext/live/clear",{method:"POST"});await loadLive();toast("已清空实时记录");}catch(_){}});
 $("liveCopy").addEventListener("click",e=>{e.preventDefault();copyDiagnosis();});
 $("kwAdd").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();addKw();}});
+$("aclAdd").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();addAclUser();}});
+$("aclRecent").addEventListener("click",e=>{
+  const b=e.target.closest("[data-acladd]");if(!b)return;
+  const tr=b.closest("tr");if(tr)addAclUser(tr.dataset.name||"");});
 $("kw").addEventListener("input",()=>{clearTimeout(window._t);window._t=setTimeout(loadOnline,250);});
 init().catch(e=>{const gs=$("globalState");gs.textContent="未接管/接口不可用";gs.className="dot bad";console.error(e);});
 </script>

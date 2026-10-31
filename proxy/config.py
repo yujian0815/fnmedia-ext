@@ -45,6 +45,17 @@ DEFAULTS = {
     "hot_library_enabled": True,
     # 虚拟“海量分类”四库媒体库（苹果 CMS 分类深翻）。与热门榜单相互独立开关。
     "catalog_library_enabled": True,
+    # —— 用户可见性：控制“插件新增的虚拟媒体库/在线搜索”对哪些飞牛用户可见 ——
+    # 关闭时对所有用户可见（与历史行为一致）；官方本地内容永不受影响。
+    "user_acl_enabled": False,
+    # all=全员可见；whitelist=仅 user_acl_users 名单内可见
+    "user_acl_mode": "all",
+    # 允许看到在线内容的飞牛用户名（大小写不敏感，也接受 uid）
+    "user_acl_users": [],
+    # 飞牛管理员始终可见，避免把自己锁在外面
+    "user_acl_allow_admin": True,
+    # 认不出身份（未登录 / 上游鉴权抖动）时是否放行。默认放行，防止全员被锁
+    "user_acl_fail_open": True,
     # 是否把每个启用的 TVBox 加固源（csp_*Guard，如比特/糯米/花花）生成为一张
     # 独立“专区媒体库”卡片。默认关闭：加固源只作为播放时可切换的线路/搜索源，
     # 不在媒体库列表里产生空库。需要专区墙时可在管理页打开。
@@ -300,6 +311,53 @@ class Config:
             self._persist(cfg)
             return True, "ok"
 
+
+    # ---------------------------------------------------------- 用户可见性
+    @staticmethod
+    def normalize_users(raw) -> list[str]:
+        """用户名列表清洗：接受字符串（逗号/顿号/分号/换行/空格分隔）或列表。"""
+        if isinstance(raw, str):
+            parts = re.split(r"[,，、;；\n\r\s]+", raw)
+        elif isinstance(raw, (list, tuple, set)):
+            parts = [str(x) for x in raw]
+        else:
+            return []
+        out, seen = [], set()
+        for p in parts:
+            k = p.strip()
+            if not k or len(k) > 64:
+                continue
+            low = k.lower()
+            if low in seen:
+                continue
+            seen.add(low)
+            out.append(k)
+            if len(out) >= 200:
+                break
+        return out
+
+    def set_user_acl(self, patch: dict) -> tuple[bool, str]:
+        """保存用户可见性设置。patch 键：enabled/mode/users/allow_admin/fail_open。"""
+        if not isinstance(patch, dict):
+            return False, "参数非法"
+        out: dict = {}
+        if "enabled" in patch:
+            out["user_acl_enabled"] = bool(patch["enabled"])
+        if "mode" in patch:
+            mode = str(patch["mode"] or "").strip().lower()
+            if mode not in ("all", "whitelist"):
+                return False, "mode 只能是 all 或 whitelist"
+            out["user_acl_mode"] = mode
+        if "users" in patch:
+            out["user_acl_users"] = self.normalize_users(patch["users"])
+        if "allow_admin" in patch:
+            out["user_acl_allow_admin"] = bool(patch["allow_admin"])
+        if "fail_open" in patch:
+            out["user_acl_fail_open"] = bool(patch["fail_open"])
+        if not out:
+            return False, "没有可保存的字段"
+        self.save(out)
+        return True, "ok"
 
     def remove_source(self, sid: str) -> tuple[bool, str]:
         with _LOCK:
