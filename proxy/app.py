@@ -478,8 +478,6 @@ async def _hot_worker(app: FastAPI):
                 await asyncio.wait_for(
                     catalog.refresh_routes(config.enabled_sources()),
                     timeout=90)
-                # 路由重建后后台预热聚合四库前段，进入媒体库/滚动即时有内容
-                asyncio.create_task(catalog.warm_aggregate())
             except Exception as exc:
                 _log.warning("catalog routes failed: %s", exc)
         try:
