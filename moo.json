@@ -1,1 +1,56 @@
-{"schema_version":"moo","source_info":{"name":"飞牛影视在线扩展（fnmedia-ext）","author":"yujian0815","homepage":"https://github.com/yujian0815/fnmedia-ext","description":"fnmedia-ext 官方应用源：飞牛影视第三方在线资源扩展的发布与更新。直连作者 GitHub Release，不重打包、不改字节。","updated_at":"2026-11-01T11:09:36+08:00"},"apps":{"fnmedia-ext":{"display_name":"飞牛影视在线扩展","app_type":"native","platform":["all"],"categories":["影音娱乐"],"install_type":"存储空间","min_fnos":"1.2.0","license":"MIT","author":"yujian0815","author_url":"https://github.com/yujian0815","homepage":"https://github.com/yujian0815/fnmedia-ext","bug_report_url":"https://github.com/yujian0815/fnmedia-ext/issues","icon_url":"https://raw.githubusercontent.com/yujian0815/fnmedia-ext/main/packaging/fpk/ICON.PNG","readme_url":"https://raw.githubusercontent.com/yujian0815/fnmedia-ext/main/README.md","desc":"飞牛影视第三方在线资源扩展：零侵入可逆接管官方影视入口，原生搜索聚合、豆瓣热门榜单四库与资源站海量分类四库（电影/剧集/动漫/综艺，无限滚动、点开即播）、m3u8/mp4 代理播放、多线路切换、播放记录与智能续播，内置应用内管理页。需保持官方「影视」(trim.media) 已安装并运行；本项目不提供、不存储、不分发任何影视内容与资源站地址。","download_count":11696,"first_release_at":"2026-10-17T14:00:32+08:00","releases":{"0.2.43":{"changelog":"修复搜索框搜不出在线资源：搜索只聚合秒回的标准在线直链源，不再被加固/爬虫真机慢源拖到超时；普通爬虫与 drpy 源补齐 8 秒硬超时；搜索结果独立缓存，重复搜索即时返回。","updated_at":"2026-11-01T11:09:36+08:00","packages":{"all":{"download_url":"https://github.com/yujian0815/fnmedia-ext/releases/download/v0.2.43/fnmedia-ext-0.2.43.fpk","sha256":"815bf58603b9a888cd1b6ac435181ef1ac453792600e9c2bc97f06593b695069","size":132063010,"size_mb":125.95}}},"0.2.42":{"changelog":"安装更稳：内置离线 Python 依赖并多镜像兜底，修复部分设备安装时「Python 依赖安装失败」的问题，无网/弱网也能装好，安装后自动自检。","updated_at":"2026-11-01T10:02:25+08:00","packages":{"all":{"download_url":"https://github.com/yujian0815/fnmedia-ext/releases/download/v0.2.42/fnmedia-ext-0.2.42.fpk","sha256":"49f9fbcfcbfa8185b4abe902c02e089938b8c38da66064b1d7488d4b87fe47ae","size":132053541,"size_mb":125.94}}}}}}}
+{
+  "schema_version": "moo",
+  "source_info": {
+    "name": "飞牛影视在线扩展（fnmedia-ext）",
+    "author": "yujian0815",
+    "homepage": "https://github.com/yujian0815/fnmedia-ext",
+    "description": "fnmedia-ext 官方应用源：飞牛影视第三方在线资源扩展的发布与更新。直连作者 GitHub Release，不重打包、不改字节。",
+    "updated_at": "2026-11-01T11:09:36+08:00"
+  },
+  "apps": {
+    "fnmedia-ext": {
+      "display_name": "飞牛影视在线扩展",
+      "app_type": "native",
+      "platform": ["all"],
+      "categories": ["影音娱乐"],
+      "install_type": "存储空间",
+      "min_fnos": "1.2.0",
+      "license": "MIT",
+      "author": "yujian0815",
+      "author_url": "https://github.com/yujian0815",
+      "homepage": "https://github.com/yujian0815/fnmedia-ext",
+      "bug_report_url": "https://github.com/yujian0815/fnmedia-ext/issues",
+      "icon_url": "https://raw.githubusercontent.com/yujian0815/fnmedia-ext/main/packaging/fpk/ICON.PNG",
+      "readme_url": "https://raw.githubusercontent.com/yujian0815/fnmedia-ext/main/README.md",
+      "desc": "飞牛影视第三方在线资源扩展：零侵入可逆接管官方影视入口，原生搜索聚合、豆瓣热门榜单四库与资源站海量分类四库（电影/剧集/动漫/综艺，无限滚动、点开即播）、m3u8/mp4 代理播放、多线路切换、播放记录与智能续播，内置应用内管理页。需保持官方「影视」(trim.media) 已安装并运行；本项目不提供、不存储、不分发任何影视内容与资源站地址。",
+      "download_count": 11696,
+      "first_release_at": "2026-10-17T14:00:32+08:00",
+      "releases": {
+        "0.2.43": {
+          "changelog": "修复搜索框搜不出在线资源：搜索只聚合秒回的标准在线直链源，不再被加固/爬虫真机慢源拖到超时；普通爬虫与 drpy 源补齐 8 秒硬超时；搜索结果独立缓存，重复搜索即时返回。",
+          "updated_at": "2026-11-01T11:09:36+08:00",
+          "packages": {
+            "all": {
+              "download_url": "https://github.com/yujian0815/fnmedia-ext/releases/download/v0.2.43/fnmedia-ext-0.2.43.fpk",
+              "sha256": "815bf58603b9a888cd1b6ac435181ef1ac453792600e9c2bc97f06593b695069",
+              "size": 132063010,
+              "size_mb": 125.95
+            }
+          }
+        },
+        "0.2.42": {
+          "changelog": "安装更稳：内置离线 Python 依赖并多镜像兜底，修复部分设备安装时「Python 依赖安装失败」的问题，无网/弱网也能装好，安装后自动自检。",
+          "updated_at": "2026-11-01T10:02:25+08:00",
+          "packages": {
+            "all": {
+              "download_url": "https://github.com/yujian0815/fnmedia-ext/releases/download/v0.2.42/fnmedia-ext-0.2.42.fpk",
+              "sha256": "49f9fbcfcbfa8185b4abe902c02e089938b8c38da66064b1d7488d4b87fe47ae",
+              "size": 132053541,
+              "size_mb": 125.94
+            }
+          }
+        }
+      }
+    }
+  }
+}
