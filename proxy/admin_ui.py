@@ -1133,20 +1133,30 @@ async function subToggleGuard(key,on){
   }catch(e){toast(String(e),"fail");}
 }
 async function importFantaiying(){
-  const out=$("subResult");
-  out.innerHTML='<div class="muted sm">正在拉取内置「饭太硬」官方订阅（多镜像自动切换、自动解密），请稍候…</div>';
+  const btn=$("btnImportFty"), out=$("subResult");
+  if(btn){btn.disabled=true;btn.style.opacity=".6";btn.style.cursor="wait";}
+  const t0=Date.now();
+  out.innerHTML='<div class="muted sm">正在拉取内置「饭太硬」官方订阅（已内置爬虫 jar，多镜像自动切换、自动解密），请稍候…<span id="ftyWait"></span></div>';
+  // 超过 8 秒给“仍在进行”反馈，避免误以为点击无反应
+  const waitTimer=setInterval(()=>{const w=$("ftyWait");if(w)w.textContent="（已等待 "+Math.round((Date.now()-t0)/1000)+" 秒，源站慢时请耐心，勿重复点击）";},8000);
   try{
     const r=await jpost("/v/api/ext/source/import-subscription",
       {builtin:"fantaiying",standalone:$("subStandalone").checked,enable_guard:"smart"});
+    clearInterval(waitTimer);
     if(r.code!==0){out.innerHTML='<div class="hint" style="color:var(--danger)">导入失败：'+esc(r.msg||"")+'</div>';return;}
     renderSubResult(r.data||{});
-    toast("饭太硬导入完成");
+    toast("饭太硬导入完成（耗时 "+Math.round((Date.now()-t0)/1000)+" 秒）");
     try{loadAdfilter();}catch(e){}
     try{await loadStatus();}catch(e){}
     try{await loadGuard();}catch(e){}
     try{await loadSpiderMgmt();}catch(e){}
     try{await loadDrpyMgmt();}catch(e){}
-  }catch(e){out.innerHTML='<div class="hint" style="color:var(--danger)">导入出错：'+esc(String(e))+'</div>';}
+  }catch(e){
+    clearInterval(waitTimer);
+    out.innerHTML='<div class="hint" style="color:var(--danger)">导入出错：'+esc(String(e))+'（可稍后重试，已登记的源不会重复添加）</div>';
+  }finally{
+    if(btn){btn.disabled=false;btn.style.opacity="";btn.style.cursor="";}
+  }
 }
 function goDeploy(){switchPage("tvbox");setTimeout(()=>{const b=$("scInstallAll");if(b)b.click();},80);}
 function renderSubResult(d){
