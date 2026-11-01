@@ -8,10 +8,16 @@ case "${wizard_agree_terms:-}" in
 esac
 [ -n "${FNMEDIA_REPO_DIR}" ] || fnmedia_fail "应用文件缺失（deploy/install.sh 不存在）"
 cd "${FNMEDIA_REPO_DIR}" || fnmedia_fail "无法进入应用目录"
-if [ ! -x ".venv/bin/python" ]; then
-  python3 -m venv .venv >> "${FNMEDIA_LOG}" 2>&1 || fnmedia_fail "创建 venv 失败"
-  .venv/bin/pip install -q --upgrade pip >> "${FNMEDIA_LOG}" 2>&1 || true
-  .venv/bin/pip install -q fastapi "uvicorn" httpx >> "${FNMEDIA_LOG}" 2>&1 || fnmedia_fail "Python 依赖安装失败"
+# 依赖：venv 缺失或核心包 import 失败时统一引导（离线 wheelhouse 优先、国内镜像兜底）。
+need_deps=1
+if [ -x ".venv/bin/python" ] && .venv/bin/python -c 'import fastapi,uvicorn,httpx' >/dev/null 2>&1; then
+  need_deps=0
+fi
+if [ "$need_deps" = "1" ]; then
+  bash deploy/bootstrap_deps.sh || {
+    tail -n 14 "${FNMEDIA_LOG}" >&2 2>/dev/null || true
+    fnmedia_fail "Python 运行环境准备失败（已尝试内置离线包与多个国内镜像），详见 ${FNMEDIA_LOG}"
+  }
 fi
 bash deploy/install.sh >> "${FNMEDIA_LOG}" 2>&1 || { tail -n 8 "${FNMEDIA_LOG}" >&2 || true; fnmedia_fail "接管服务启动失败，详见 ${FNMEDIA_LOG}"; }
 exit 0
