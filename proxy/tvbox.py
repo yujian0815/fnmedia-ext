@@ -17,10 +17,12 @@
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import json
 import re
+from pathlib import Path
 from urllib.parse import urljoin
 
 import httpx
@@ -51,6 +53,13 @@ FONGMI_FANTAIYING = {
         "https://gh-proxy.com/https://raw.githubusercontent.com/yoursmile66/TVBox/main/XC.json",
         "https://ghproxy.net/https://raw.githubusercontent.com/yoursmile66/TVBox/main/XC.json",
         "https://cdn.jsdelivr.net/gh/yoursmile66/TVBox@main/XC.json",
+        # 作者官方备用站 http://www.饭太硬.net/tv —— 返回“图种”（JPEG 后追加
+        # 前缀**base64(配置)），fetch_text 已能剥离图片自动解码。GitHub 直连不通时
+        # 用它兜底（用 punycode 主机名，避免请求库对中文域名处理不一致）。
+        "http://www.xn--sss604efuw.net/tv",
+        "https://www.xn--sss604efuw.net/tv",
+        # 备用站导航页给出的国内直链镜像（同为图片伪装配置）
+        "https://cdn09022024.gitlink.org.cn/api/v1/repos/xxooo/in/raw/in.bmp",
     ],
 }
 
@@ -630,4 +639,24 @@ async def load_fantaiying():
         except Exception as exc:  # noqa: BLE001
             last = exc
     raise RuntimeError(f"内置饭太硬订阅所有镜像均不可达：{last}")
+
+
+# 内置「轻量猫源」：随包的纯苹果CMS(type=1)订阅，无 jar/爬虫/网盘，零运行时。
+# 与饭太硬（重爬虫、依赖安卓运行时）互补，低配机器/lite 包也能直接用。
+_CAT_LITE_FILE = Path(__file__).resolve().parent / "assets" / "cat_lite.json"
+
+
+def load_cat_lite_sync() -> tuple[list, str, str, str]:
+    """同步读取随包轻量猫源配置。返回 (sites, spider, base, used)。"""
+    cfg = json.loads(_CAT_LITE_FILE.read_text(encoding="utf-8"))
+    sites = [s for s in (cfg.get("sites") or []) if isinstance(s, dict)]
+    return sites, str(cfg.get("spider") or ""), "", "builtin:cat_lite"
+
+
+async def load_cat_lite():
+    """加载内置「轻量猫源」（本地文件，不走网络，不依赖任何运行时）。
+
+    返回 (sites, spider, base, used_url)。
+    """
+    return await asyncio.to_thread(load_cat_lite_sync)
 

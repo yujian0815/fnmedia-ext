@@ -132,6 +132,56 @@ tr:last-child td{border-bottom:0}
   cursor:pointer;white-space:nowrap;padding:2px 8px;border-radius:99px;border:1px solid var(--line);background:#fff}
 .lib .pin input{margin:0;accent-color:var(--accent)}
 .lib:has(.pin input:checked){border-color:var(--accent);background:var(--accent-soft)}
+ /* 资源站卡片网格 */
+ .src-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(262px,1fr));gap:10px;margin-top:10px}
+ .src-card{background:#fafbfc;border:1px solid var(--line);border-radius:12px;padding:11px 12px;
+   display:flex;flex-direction:column;gap:8px;transition:border-color .15s,background .15s}
+ .src-card.on{border-color:var(--accent);background:var(--accent-soft)}
+ .src-card.off{opacity:.62}
+ .src-head{display:flex;align-items:center;gap:8px}
+ .src-name{font-weight:600;font-size:13.5px;line-height:1.3;word-break:break-all;flex:1;min-width:0}
+ .src-api{font-size:11px;color:var(--muted);word-break:break-all;line-height:1.35;
+   font-family:ui-monospace,Menlo,Consolas,monospace;max-height:30px;overflow:hidden}
+ .src-tags{display:flex;flex-wrap:wrap;gap:4px}
+ .src-opts{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center;font-size:11px;color:var(--muted)}
+ .src-opts label{display:inline-flex;align-items:center;gap:3px;cursor:pointer}
+ .src-opts input{width:14px;height:14px;accent-color:var(--accent)}
+ .src-actions{display:flex;gap:6px;align-items:center;margin-top:2px}
+ .src-actions .st{flex:1;font-size:11px;min-height:16px}
+ .src-actions button{padding:3px 9px;font-size:12px}
+ .src-switch{position:relative;width:38px;height:21px;flex:none}
+ .src-switch input{opacity:0;width:0;height:0}
+ .src-switch .sl{position:absolute;inset:0;background:#c3cad3;border-radius:99px;transition:.18s;cursor:pointer}
+ .src-switch .sl:before{content:"";position:absolute;width:15px;height:15px;left:3px;top:3px;background:#fff;
+   border-radius:50%;transition:.18s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+ .src-switch input:checked+.sl{background:var(--accent)}
+ .src-switch input:checked+.sl:before{transform:translateX(17px)}
+ .collapse-bar{display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;
+   font-size:12.5px;color:var(--muted);padding:6px 2px;border-top:1px dashed var(--line);margin-top:10px}
+ .collapse-bar .chev{transition:transform .18s;display:inline-block}
+ .collapse-bar.collapsed .chev{transform:rotate(-90deg)}
+ .modal-mask{position:fixed;inset:0;background:rgba(15,23,42,.45);display:none;align-items:center;
+   justify-content:center;z-index:999;padding:18px}
+ .modal-mask.show{display:flex}
+ .modal{background:var(--card,#fff);border-radius:14px;width:min(520px,94vw);max-height:88vh;overflow:auto;
+   box-shadow:0 18px 50px rgba(0,0,0,.25);padding:18px 20px}
+ .modal h3{margin:0 0 14px;font-size:16px}
+ .modal label.fld{display:block;font-size:12.5px;color:var(--muted);margin:10px 0 4px}
+ .modal input[type=text]{width:100%}
+ .modal .modal-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+ .cache-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px;margin:10px 0}
+ .cache-item{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#fafbfc}
+ .cache-item .cn{font-size:13px;font-weight:600}
+ .cache-item .cv{font-size:12px;color:var(--muted);margin:2px 0 8px;word-break:break-all}
+ /* 分段选择器 */
+ .seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#f1f3f6;flex-wrap:wrap}
+ .seg button{border:none;background:transparent;padding:7px 14px;font-size:13px;cursor:pointer;color:var(--muted);border-radius:0}
+ .seg button.active{background:var(--accent);color:#fff;font-weight:600}
+ .seg button:disabled{opacity:.5;cursor:not-allowed}
+ /* 通用长列表限高折叠 */
+ .longbox{max-height:340px;overflow:auto;border:1px solid var(--line);border-radius:10px}
+ .longbox table{border:none}
+ .longbox.collapsed{max-height:150px}
 
 /* ---------- 优先级 ---------- */
 .prio-input{width:74px}
@@ -280,6 +330,30 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
 
       <div class="card">
+        <div class="card-title">⚡ 在线缓存与性能（机械盘 / ARM 盒子建议调小）</div>
+        <p class="card-sub">搜索/点片的在线条目会写入本地缓存 <code>state/titles.json</code>，用于重启后历史卡片仍可点播。缓存越大，落盘越慢。新版已改为<strong>后台防抖异步写</strong>（搜索不再等磁盘），并按下面的上限自动丢弃最旧条目：</p>
+        <div style="display:flex;gap:16px;flex-wrap:wrap">
+          <label class="field" style="max-width:210px">
+            <span>最多保留条数（100–20000）</span>
+            <input type="number" id="titlesMaxEntries" min="100" max="20000"/>
+          </label>
+          <label class="field" style="max-width:210px">
+            <span>缓存文件上限 MB（0=不限字节）</span>
+            <input type="number" id="titlesMaxMb" min="0" max="512" step="1"/>
+          </label>
+          <label class="field" style="max-width:210px">
+            <span>落盘防抖秒数（0=立即）</span>
+            <input type="number" id="titlesDebounce" min="0" max="120" step="1"/>
+          </label>
+        </div>
+        <div class="hint" id="titlesCacheStat">当前缓存体积读取中…</div>
+        <div class="btn-row">
+          <button class="primary small" onclick="saveTitlesCacheCfg()">保存缓存设置</button>
+          <button class="small" onclick="clearTitlesCache()">清空在线缓存（重启后回到冷态，搜索更快）</button>
+        </div>
+      </div>
+
+      <div class="card">
         <div class="card-title">② 海量片库（资源站分类深翻）</div>
         <p class="card-sub">直接按苹果 CMS 分类深翻资源站，跨源聚合成「🌐海量片库」四库（电影 / 剧集 / 动漫 / 综艺），规则不变。</p>
         <div class="lib-grid" id="catLibs"></div>
@@ -293,6 +367,43 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         </div>
         <div class="hint">海量库在分类路由建立后自动出现；也可在「资源站」页把某个站单独生成一张媒体库卡片。</div>
       </div>
+
+      <div class="card">
+        <div class="card-title">③ 媒体库显示开关与排序</div>
+        <p class="card-sub">勾选=在飞牛影视里显示；取消=隐藏（对所有账号不显示，可随时恢复）。
+          ↑/↓ 调整虚拟媒体库之间的先后顺序；下方选择整体放在本地媒体库之前还是之后。</p>
+        <div class="btn-row" style="margin-bottom:8px">
+          <label class="field" style="max-width:260px"><span>虚拟媒体库整体位置</span>
+            <select id="libPlacement" onchange="onPlacementChange()">
+              <option value="front">放在本地媒体库之前</option>
+              <option value="back">放在本地媒体库之后</option>
+              <option value="after">插到指定本地库之后…</option>
+            </select></label>
+          <label class="field" id="anchorWrap" style="max-width:260px;display:none"><span>锚定的本地媒体库</span>
+            <select id="libAnchor" onchange="savePlacement()"></select></label>
+        </div>
+        <div id="libManage" class="lib-manage" style="display:grid;gap:6px;max-height:340px;overflow:auto"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">④ 子账号观看权限（家庭多用户）</div>
+        <p class="card-sub">飞牛影视支持多账号登录。可为孩子/家人账号单独勾选可见媒体库；未单独配置的账号按下方默认策略。
+          被限制的账号搜索时只出本地结果，不会误点播在线片源。</p>
+        <label class="switch-row">
+          <input type="checkbox" id="aclDefaultVisible"/>
+          <span>未配置的账号默认可见所有虚拟媒体库
+            <span class="sub">关闭后，未单独授权的账号只能看到飞牛本地媒体库</span></span>
+        </label>
+        <label class="switch-row">
+          <input type="checkbox" id="aclDefaultOnline"/>
+          <span>未配置的账号默认可用在线搜索/在线片源</span>
+        </label>
+        <div class="btn-row">
+          <button class="primary small" onclick="saveAclDefaults()">保存默认策略</button>
+        </div>
+        <div class="hint" style="margin:6px 0">选择账号后勾选其允许观看的媒体库；勾选「在线搜索」才会注入在线片源：</div>
+        <div id="aclBox" class="acl-box"></div>
+      </div>
     </section>
 
     <!-- ============ 片源质量 ============ -->
@@ -305,6 +416,11 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <span>热门资源优先高质量源
             <span class="sub">关闭后只按可播直链总数选择来源</span></span>
         </label>
+        <label class="switch-row">
+          <input type="checkbox" id="autoBest" checked/>
+          <span>自动优选连通性好的源
+            <span class="sub">结合实测健康度（失败率/延迟/死源冷却），把能连通、速度快的源排到更前；起播时仍会多线竞速自动选最快的一集线路</span></span>
+        </label>
         <div class="btn-row">
           <button class="primary small" onclick="savePreferQ()">保存</button>
         </div>
@@ -314,10 +430,12 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <button class="small" style="margin-left:auto" onclick="resetPriority()">恢复默认权重</button>
         </div>
         <p class="card-sub">数值越大越优先（-100–100，留空/0 用内省默认）。修改后点底部「保存权重」。</p>
+        <div class="longbox">
         <table>
           <thead><tr><th>资源站</th><th style="width:120px">质量权重</th><th>相对优先级</th></tr></thead>
           <tbody id="prioRows"><tr><td colspan="3" class="muted">加载中…</td></tr></tbody>
         </table>
+        </div>
         <div class="btn-row"><button class="primary small" onclick="savePriority()">保存权重</button></div>
       </div>
     </section>
@@ -328,16 +446,14 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       <p class="page-desc">标准苹果 CMS 源与扩展源；启用后进入聚合搜索与海量片库。</p>
       <div class="card">
         <div class="card-title">资源站列表 <span class="badge" id="srcCount"></span>
-          <button class="small" style="margin-left:auto" onclick="testAll()">全部测速</button>
+          <input type="text" id="srcFilter" placeholder="筛选名称/地址…" oninput="renderSources()"
+                 style="margin-left:auto;max-width:168px;font-size:12px;padding:5px 9px"/>
+          <button class="small" onclick="testAll()">全部测速</button>
           <button class="small" onclick="restoreBuiltin()">恢复内置源</button>
         </div>
-        <div style="overflow-x:auto">
-        <table>
-          <thead><tr><th style="width:42px">启用</th><th style="width:96px">选项</th><th>资源站</th>
-            <th style="width:150px">连通性</th><th style="width:70px">测试</th><th style="width:44px"></th></tr></thead>
-          <tbody id="srcRows"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
-        </table>
-        </div>
+        <div id="srcGrid" class="src-grid"><div class="muted">加载中…</div></div>
+        <div class="collapse-bar collapsed" id="srcCollapseBar" onclick="toggleSrcCollapse()">
+          <span class="chev">▾</span><span id="srcCollapseTxt">展开完整列表</span></div>
         <div class="row mt" style="display:grid;grid-template-columns:150px 1fr 90px auto;gap:10px" id="addGrid">
           <input type="text" id="addName" placeholder="名称（可选）"/>
           <input type="text" id="addApi" placeholder="苹果CMS JSON 接口，如 https://xxx.com/api.php/provide/vod/at/json"/>
@@ -345,8 +461,23 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
             <input type="checkbox" id="addStandalone" style="width:15px;height:15px;accent-color:var(--accent)"/>独立库</label>
           <button class="primary small" style="justify-content:center" onclick="addSource()">添加</button>
         </div>
-        <div class="hint">「独立库」= 该站单独生成一张媒体库卡片；「非过滤」= 不按标题/备注过滤解说/预告/花絮；
+        <div class="hint">「独立库」= 该站单独生成一张媒体库卡片；「非过滤」= 不按标题/备注过滤解说/预告/花絮；点卡片上的 ✎ 可改名称/订阅链接；
           删除内置源仅隐藏，可恢复。批量导入 TVBox 订阅请用左侧「导入订阅」。</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">🗑 缓存管理
+          <span class="hint" style="font-weight:400">搜索/榜单/海量库异常或占用过大时可一键清除，下次访问自动重建</span>
+          <button class="small" style="margin-left:auto" onclick="loadCacheStatus()">刷新</button>
+        </div>
+        <div id="cacheGrid" class="cache-grid"><div class="muted sm">读取中…</div></div>
+        <div class="btn-row">
+          <button class="small" onclick="clearCaches(['search'])">仅清搜索缓存</button>
+          <button class="small" onclick="clearCaches(['charts','catalog'])">清榜单+海量库</button>
+          <button class="primary small" onclick="clearCaches(['search','charts','catalog'])">一键清运行缓存（不重启）</button>
+          <button class="small" onclick="clearCaches(['health'])">重置源健康画像</button>
+          <button class="small" onclick="clearCaches(['titles'])">清在线资源缓存（将重启）</button>
+        </div>
       </div>
 
       <div class="card">
@@ -354,12 +485,15 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <span class="hint" style="font-weight:400">按真实播放探测统计成功率/延迟，死源自动降权 15 分钟</span>
           <button class="small" style="margin-left:auto" onclick="loadHealth()">刷新</button>
         </div>
+        <div class="longbox" id="healthBox">
         <table>
           <thead><tr><th>源</th><th style="width:80px">样本</th>
             <th style="width:110px">成功率</th><th style="width:100px">平均延迟</th>
             <th style="width:90px">状态</th><th style="width:70px">操作</th></tr></thead>
           <tbody id="healthRows"><tr><td colspan="6" class="muted">播放几次后自动生成。</td></tr></tbody>
         </table>
+        </div>
+        <div class="collapse-bar" onclick="toggleBox('healthBox',this)"><span class="chev">▾</span><span>展开/收起</span></div>
       </div>
     </section>
 
@@ -380,10 +514,34 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div id="subProxyMsg" class="muted sm" style="margin-top:6px"></div>
       </div>
       <div class="card">
+        <div class="card-title">资源站取源代理（可选）
+          <label style="float:right;display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400;cursor:pointer">
+            <input type="checkbox" id="srcProxyEnable" style="width:14px;height:14px;accent-color:var(--accent)" onchange="onSrcProxyToggle()"/> 已配置代理</label></div>
+        <p class="card-sub">部分运营商<strong>直连资源站很慢或不通</strong>（搜索转圈、无结果、测速超时）时可走 Clash 等代理。仅用于<strong>搜索、海量库分类深翻、测速、解析播放地址</strong>；真正的视频分片流量仍直连，不占代理带宽。形如 <code>http://用户:密码@主机:端口</code>。</p>
+        <div class="row">
+          <input type="text" id="srcProxyUrl" placeholder="http://Clash:密码@192.168.x.x:7890" style="flex:2" disabled/>
+          <button class="small" id="srcProxySaveBtn" onclick="saveSrcProxy(true)" disabled>保存并测速</button>
+          <button class="small" id="srcProxyClearBtn" onclick="clearSrcProxy()" disabled>清空</button>
+        </div>
+        <div class="seg" id="srcProxyMode" style="margin-top:10px" role="tablist">
+          <button type="button" data-mode="auto" onclick="setSrcProxyMode('auto')">🪄 智能（推荐）</button>
+          <button type="button" data-mode="on" onclick="setSrcProxyMode('on')">始终走代理</button>
+          <button type="button" data-mode="off" onclick="setSrcProxyMode('off')">全部直连</button>
+        </div>
+        <div class="hint" id="srcProxyModeHint" style="margin-top:6px"></div>
+        <div id="srcProxyMsg" class="muted sm" style="margin-top:6px"></div>
+      </div>
+      <div class="card">
         <div class="card-title">🛡 播放去广告（m3u8 流层）
           <label style="float:right;display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400;cursor:pointer">
             <input type="checkbox" id="adfEnable" style="width:14px;height:14px;accent-color:var(--accent)" onchange="toggleAdfilter(this.checked)"/> 启用去广告</label></div>
-        <p class="card-sub">播放时实时检测当前线路并去除广告，兼容 TVBox / OK影视 Pro：<strong>① 动态检测</strong>——按分片间断边界、切片时长模式、CDN 切换、片头/片中位置实时识别广告段（无需订阅自带规则）；<strong>② 订阅 rules</strong>——导入订阅时自动收录其去广告正则，按线路域名精准剥除；<strong>③ 选集过滤</strong>——剔除“关注公众号/加微信/下载APP”假选集。识别不确定或可能误伤时自动保留，不影响播放。</p>
+        <p class="card-sub">播放时实时检测当前线路并去除广告，兼容 TVBox / OK影视 Pro：<strong>① 编码指纹</strong>——读分片头识别“重新编码拼接”的隐形广告（无标记、无关键词也能发现，见下方开关）；<strong>② 动态检测</strong>——按分片间断边界、切片时长模式、CDN 切换、片头/片中位置实时识别广告段（无需订阅自带规则）；<strong>③ 订阅 rules</strong>——导入订阅时自动收录其去广告正则，按线路域名精准剥除；<strong>④ 选集过滤</strong>——剔除“关注公众号/加微信/下载APP”假选集。识别不确定或可能误伤时自动保留，不影响播放。</p>
+        <div style="margin:6px 0">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+            <input type="checkbox" id="adfSps" style="width:14px;height:14px;accent-color:var(--accent)" onchange="toggleAdfilterSps(this.checked)"/>
+            编码指纹去广告（读分片头 4~32KB，识别无任何标记的重编码中插/片头广告）</label>
+          <div class="muted sm" style="margin:2px 0 0 22px">仅按“宽高+帧率”判定正文，广告必须是另一套转码才剔除；探测失败、样本不足或可能误伤时一律保留。</div>
+        </div>
         <div style="margin:6px 0">
           <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
             <input type="checkbox" id="adfDynamic" style="width:14px;height:14px;accent-color:var(--accent)" onchange="toggleAdfilterDynamic(this.checked)"/>
@@ -398,6 +556,9 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           网盘/直播/无法识别的源跳过并说明原因。</p>
         <div class="row"><input type="text" id="subUrl" placeholder="配置订阅 URL（支持 base64 与多订阅聚合）" style="flex:2"/>
           <button class="primary small" onclick="importSubscription('url')">按 URL 导入</button>
+        </div>
+        <div class="row">
+          <button id="btnImportCatLite" class="small" style="border-color:var(--ok,#16a34a);color:var(--ok,#16a34a)" onclick="importCatLite()" title="纯苹果CMS精选源：无爬虫jar、无需安卓运行时，低配机器/lite版也能直接搜索与播放">🐱 一键轻量猫源（免运行时·低配推荐）</button>
         </div>
         <label class="field"><textarea id="subText" rows="7" placeholder="或直接粘贴配置 JSON（含 sites 数组）…"></textarea></label>
         <div class="btn-row">
@@ -454,13 +615,19 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
 
       <div class="card">
-        <div class="card-title">已缓存在线条目 <span class="badge" id="cacheN"></span></div>
+        <div class="card-title">已缓存在线条目 <span class="badge" id="cacheN"></span>
+          <button class="small" style="margin-left:auto" onclick="clearTitlesCache()">🗑 清空在线缓存</button>
+        </div>
+        <div class="hint" style="margin-bottom:8px">本地缓存 <code>state/titles.json</code>，按条数/容量上限自动丢弃最旧条目，默认约 4000 条 / 4MB，不会无限增长；清空后服务会重启并回到冷态。</div>
         <div class="row"><input type="text" id="kw" placeholder="按标题过滤（在飞牛搜索过的会出现在这里）" style="flex:1"/>
           <button class="small" onclick="loadOnline()">刷新</button></div>
-        <table style="margin-top:10px">
+        <div class="longbox" id="onlineBox" style="margin-top:10px">
+        <table>
           <thead><tr><th>标题</th><th style="width:100px">来源</th><th style="width:70px">集数</th></tr></thead>
           <tbody id="rows"><tr><td colspan="3" class="muted">加载中…</td></tr></tbody>
         </table>
+        </div>
+        <div class="collapse-bar" onclick="toggleBox('onlineBox',this)"><span class="chev">▾</span><span>展开/收起</span></div>
       </div>
     </section>
 
@@ -475,6 +642,34 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <div>· 海量片库：苹果 CMS 分类深翻，跨源聚合成海量四库与单源独立库。</div>
         </div>
         <div class="hint" id="aboutEdition"></div>
+      </div>
+
+      <div class="card" style="text-align:center">
+        <div class="card-title" style="justify-content:center">☕ 为爱发电 · 欢迎打赏</div>
+        <p class="card-sub" style="max-width:560px;margin:0 auto 10px">
+          本扩展<b>开源、免费、无广告</b>，所有功能都利用业余时间开发维护。
+          如果它让你的飞牛影视更好用，你的一份打赏就是对作者最大的鼓励，
+          也会让后续开发、适配新设备与维护资源源更有动力 🙏
+        </p>
+        <div style="display:flex;gap:18px;justify-content:center;flex-wrap:wrap;align-items:stretch">
+          <div style="display:inline-flex;flex-direction:column;align-items:center;gap:6px">
+            <div style="padding:10px;border:1px solid var(--border,#e3e3e6);border-radius:12px;background:#fff;display:flex;align-items:center;justify-content:center;height:232px">
+              <img src="/v/ext/donate-qr" alt="微信打赏码"
+                   style="width:200px;height:200px;object-fit:contain;display:block;border-radius:6px"
+                   onerror="this.style.display='none'"/>
+            </div>
+            <div class="muted sm" style="font-weight:600">微信扫码打赏</div>
+          </div>
+          <div style="display:inline-flex;flex-direction:column;align-items:center;gap:6px">
+            <div style="padding:10px;border:1px solid var(--border,#e3e3e6);border-radius:12px;background:#fff;display:flex;align-items:center;justify-content:center;height:232px">
+              <img src="/v/ext/alipay-qr" alt="支付宝打赏码"
+                   style="width:200px;height:200px;object-fit:contain;display:block;border-radius:6px"
+                   onerror="this.style.display='none'"/>
+            </div>
+            <div class="muted sm" style="font-weight:600">支付宝扫码打赏</div>
+          </div>
+        </div>
+        <div class="muted sm" style="margin-top:8px">微信 / 支付宝 扫码打赏 · 金额随意，感谢支持 ❤️</div>
       </div>
 
       <div class="card" id="updCard">
@@ -525,6 +720,23 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
 
 <div id="toast"></div>
 
+<!-- 资源站编辑弹窗 -->
+<div class="modal-mask" id="srcEditMask" onclick="if(event.target===this)closeSrcEdit()">
+  <div class="modal">
+    <h3>✎ 编辑资源站</h3>
+    <input type="hidden" id="seId"/>
+    <label class="fld">显示名称</label>
+    <input type="text" id="seName" maxlength="40" placeholder="给这个资源站起个名字"/>
+    <label class="fld">订阅 / 接口地址（苹果CMS JSON）</label>
+    <input type="text" id="seApi" placeholder="https://xxx.com/api.php/provide/vod/at/json"/>
+    <div class="hint" id="seHint" style="margin-top:8px"></div>
+    <div class="modal-foot">
+      <button class="small" onclick="closeSrcEdit()">取消</button>
+      <button class="primary small" onclick="saveSrcEdit()">保存</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const $=(id)=>document.getElementById(id);
 const $$=(sel)=>Array.from(document.querySelectorAll(sel));
@@ -546,9 +758,9 @@ async function switchPage(page){
   if(page==="overview"){renderOverview();startLivePoll();}
   if(page==="library"){loadLibs().then(renderLibrary);}
   if(page==="quality")renderQuality();
-  if(page==="sources"){try{loadHealth();}catch(e){}}
+  if(page==="sources"){try{loadHealth();}catch(e){}try{loadCacheStatus();}catch(e){}}
   if(page==="tvbox"){try{loadGuardZone();}catch(e){}try{gbInit();}catch(e){}}
-  if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{loadAdfilter();}catch(e){}try{if(typeof loadSpiderMgmt==="function")loadSpiderMgmt();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}}
+  if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{if(typeof initSrcProxy==="function")initSrcProxy();}catch(e){}try{loadAdfilter();}catch(e){}try{if(typeof loadSpiderMgmt==="function")loadSpiderMgmt();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}}
   if(page==="about"){loadUpdate(false);}
 }
 $$("[data-page]").forEach(b=>b.addEventListener("click",()=>switchPage(b.dataset.page)));
@@ -829,8 +1041,12 @@ function libCards(chartCounts,cats){
 
 /* ---------- 虚拟媒体库 ---------- */
 let LIBS=[];
+let LIBMETA={placement:"front",order:[],anchor:""};
+let LOCALLIBS=[];
+let ACCOUNTS=null;
 async function loadLibs(){
   try{const r=await jget("/v/api/ext/libs");LIBS=(r.data&&r.data.libs)||[];
+    LIBMETA={placement:r.data&&r.data.placement||"front",order:(r.data&&r.data.order)||[],anchor:(r.data&&r.data.anchor)||""};
     if($("catEnabled"))$("catEnabled").checked=!!(r.data&&r.data.catalog_enabled);
   }catch(e){LIBS=[];}
 }
@@ -841,10 +1057,123 @@ function catKeyOf(title){
 function libCardHtml(L,ic){
   return `<div class="lib" data-g="${L.guid}"><div class="ic">${ic}</div>
     <div style="flex:1;min-width:0"><div class="t">${esc(L.title)}</div>
-      <div class="c">${L.group==="hot"?(L.count+" 条"):(L.count?("路由 "+L.count):"建库中…")}</div></div>
+      <div class="c">${L.kind==="chart"?(L.count+" 条"):(L.count?("路由 "+L.count):"可用")}</div></div>
     <label class="pin" title="在飞牛影视媒体库列表中置顶">
       <input type="checkbox" ${L.pinned?"checked":""} onchange="togglePin('${L.guid}',this)"/>置顶</label>
   </div>`;
+}
+function orderedManageLibs(){
+  const rest=LIBS.filter(L=>!(LIBMETA.order||[]).includes(L.key));
+  const head=(LIBMETA.order||[]).map(k=>LIBS.find(L=>L.key===k)).filter(Boolean);
+  return head.concat(rest);
+}
+function renderLibManage(){
+  const box=$("libManage"); if(!box)return;
+  const arr=orderedManageLibs();
+  const icon=L=>({chart:"🏆",catalog:"🌐",standalone:"📡","guard-native":"🛡",guard:"🛡",xlib:"☁️"}[L.kind]||"📁");
+  box.innerHTML=arr.map((L,i)=>`
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--border,#e3e3e6);border-radius:8px">
+      <span style="width:20px;text-align:center">${icon(L)}</span>
+      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(L.title)}</span>
+      <button class="small" style="padding:2px 8px" ${i===0?"disabled":""} onclick="moveLib('${L.key}',-1)">↑</button>
+      <button class="small" style="padding:2px 8px" ${i===arr.length-1?"disabled":""} onclick="moveLib('${L.key}',1)">↓</button>
+      <label style="margin:0;font-size:12px;display:inline-flex;align-items:center;gap:4px" title="在飞牛影视中显示">
+        <input type="checkbox" ${!L.hidden?"checked":""} onchange="toggleLibVisible('${L.key}',this)"/>显示</label>
+    </div>`).join("");
+}
+async function moveLib(key,dir){
+  const arr=orderedManageLibs();
+  const keys=arr.map(L=>L.key);
+  const i=keys.indexOf(key); const j=i+dir;
+  if(i<0||j<0||j>=keys.length)return;
+  [keys[i],keys[j]]=[keys[j],keys[i]];
+  LIBMETA.order=keys;
+  await jpost("/v/api/ext/lib/order",{order:keys,placement:LIBMETA.placement});
+  await loadLibs(); renderLibrary(); toast("顺序已保存");
+}
+async function toggleLibVisible(key,el){
+  try{
+    const r=await jpost("/v/api/ext/lib/visibility",{key,hidden:!el.checked});
+    if(r.code===0){const L=LIBS.find(x=>x.key===key);if(L)L.hidden=!el.checked;
+      toast(el.checked?"已设为显示":"已隐藏（所有账号不可见）");}
+    else{el.checked=!el.checked;toast(r.msg||"设置失败","fail");}
+  }catch(e){el.checked=!el.checked;toast("设置失败","fail");}
+}
+async function loadLocalLibs(){
+  try{const r=await jget("/v/api/ext/local-libs");LOCALLIBS=(r.data||[]);
+    const sel=$("libAnchor"); if(!sel)return;
+    const cur=LIBMETA.anchor;
+    sel.innerHTML=LOCALLIBS.map(L=>`<option value="${L.guid}" ${L.guid===cur?"selected":""}>${esc(L.title||L.guid.slice(0,8))}</option>`).join("");
+    if(cur&&!LOCALLIBS.some(L=>L.guid===cur))sel.insertAdjacentHTML("afterbegin",`<option value="${cur}" selected>${cur.slice(0,10)}（可能已失效）</option>`);
+  }catch(e){}
+}
+function onPlacementChange(){
+  const p=$("libPlacement").value;
+  $("anchorWrap").style.display=p==="after"?"":"none";
+  if(p==="after"){loadLocalLibs().then(savePlacement);}else{savePlacement();}
+}
+async function savePlacement(){
+  const p=$("libPlacement").value; LIBMETA.placement=p;
+  const body={placement:p,order:LIBMETA.order};
+  if(p==="after")body.anchor=($("libAnchor")||{}).value||LIBMETA.anchor||"";
+  await jpost("/v/api/ext/lib/order",body);
+  LIBMETA.anchor=body.anchor||"";
+  toast(p==="front"?"虚拟库将排在本地库之前":(p==="back"?"虚拟库将排在本地库之后":"已插到指定本地库之后"));
+}
+async function loadAccounts(){
+  try{ACCOUNTS=await jget("/v/api/ext/accounts");}catch(e){ACCOUNTS=null;}
+  renderAcl();
+}
+function renderAcl(){
+  const box=$("aclBox"); if(!box||!ACCOUNTS||!ACCOUNTS.data)return;
+  const d=ACCOUNTS.data;
+  $("aclDefaultVisible").checked=!!d.default_visible;
+  $("aclDefaultOnline").checked=!!d.default_online;
+  const libs=d.libs||[];
+  box.innerHTML=(d.users||[]).map(u=>{
+    const acl=u.acl, configured=Array.isArray(acl);
+    const allow=configured?new Set(acl):null;
+    const checks=libs.map(L=>{
+      const on=allow?allow.has(L.key):true;
+      const dis=allow?"":"disabled";
+      return `<label style="display:inline-flex;align-items:center;gap:4px;margin:2px 10px 2px 0;font-size:12px">
+        <input type="checkbox" data-k="${L.key}" ${on?"checked":""} ${dis}/>${esc(L.title)}</label>`;
+    }).join("");
+    const onlineOn=allow?allow.has("__online__"):true;
+    return `<div style="border:1px solid var(--border,#e3e3e6);border-radius:8px;padding:8px;margin:8px 0">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+        <b>${esc(u.name)}${u.is_admin?' <span class="sub">（管理员始终全部可见）</span>':''}</b>
+        <label style="margin-left:auto;font-size:12px"><input type="checkbox" ${configured?"checked":""} onchange="toggleAclMode('${u.guid}',this)"/> 单独授权</label>
+      </div>
+      <div data-acl-libs="${u.guid}" ${configured?"":"style='opacity:.5'"}>
+        <label style="display:inline-flex;align-items:center;gap:4px;margin:2px 10px 2px 0;font-size:12px">
+          <input type="checkbox" data-k="__online__" ${onlineOn?"checked":""} ${configured?"":"disabled"}/>🔍 在线搜索/片源</label>
+        ${checks}
+      </div>
+      <div class="btn-row" style="margin-top:6px">
+        <button class="primary small" onclick="saveAcl('${u.guid}')">保存该账号</button></div></div>`;
+  }).join("") || '<div class="hint">未发现飞牛影视账号（在飞牛系统“用户管理”创建并用该账号登录影视后出现）。</div>';
+}
+function toggleAclMode(guid,el){
+  const area=document.querySelector(`[data-acl-libs="${guid}"]`);
+  area.querySelectorAll("input").forEach(cb=>{cb.disabled=!el.checked;});
+  area.style.opacity=el.checked?"1":".5";
+  if(!el.checked){ saveAclRaw(guid,null); }
+}
+async function saveAcl(guid){
+  const area=document.querySelector(`[data-acl-libs="${guid}"]`);
+  const allow=Array.from(area.querySelectorAll("input:checked")).map(cb=>cb.getAttribute("data-k"));
+  await saveAclRaw(guid,allow);
+}
+async function saveAclRaw(guid,allow){
+  const r=await jpost("/v/api/ext/account/acl",{guid,allow});
+  if(r.code===0){toast("账号授权已保存");await loadAccounts();}else toast(r.msg||"保存失败","fail");
+}
+async function saveAclDefaults(){
+  const r=await jpost("/v/api/ext/account/acl",{
+    default_visible:$("aclDefaultVisible").checked,
+    default_online:$("aclDefaultOnline").checked});
+  if(r.code===0){toast("默认策略已保存");await loadAccounts();}else toast(r.msg||"保存失败","fail");
 }
 async function togglePin(guid,el){
   try{
@@ -857,13 +1186,22 @@ function renderLibrary(){
   if(!STATUS)return;
   $("hotEnabled").checked=CFG.hot_library_enabled!==false;
   if($("catEnabled"))$("catEnabled").checked=CFG.catalog_library_enabled!==false;
+  if($("libPlacement"))$("libPlacement").value=LIBMETA.placement||"front";
+  if($("anchorWrap")){
+    $("anchorWrap").style.display=(LIBMETA.placement==="after")?"":"none";
+    if(LIBMETA.placement==="after")loadLocalLibs();
+  }
   $("hotInterval").value=Math.round((CFG.hot_refresh_interval||21600)/3600);
+  if($("titlesMaxEntries"))$("titlesMaxEntries").value=CFG.titles_cache_max_entries??4000;
+  if($("titlesMaxMb"))$("titlesMaxMb").value=(CFG.titles_cache_max_mb??4);
+  if($("titlesDebounce"))$("titlesDebounce").value=(CFG.titles_flush_debounce??5);
+  refreshTitlesCacheStat();
   const c=STATUS.charts&&STATUS.charts.counts||{};
   const cats=(STATUS.catalog&&STATUS.catalog.categories)||{};
   const hotIc={movie:"🎬",tv:"📺",anime:"🌸",variety:"🎤"};
   if(LIBS.length){
-    $("hotLibs").innerHTML=LIBS.filter(x=>x.group==="hot").map(L=>libCardHtml(L,hotIc[catKeyOf(L.title)]||"🔥")).join("");
-    $("catLibs").innerHTML=LIBS.filter(x=>x.group==="catalog").map(L=>libCardHtml(L,"🌐")).join("");
+    $("hotLibs").innerHTML=LIBS.filter(x=>x.kind==="chart").map(L=>libCardHtml(L,hotIc[catKeyOf(L.title)]||"🔥")).join("");
+    $("catLibs").innerHTML=LIBS.filter(x=>x.kind==="catalog").map(L=>libCardHtml(L,"🌐")).join("");
   }else{
     $("hotLibs").innerHTML=[["movie","🎬","热门电影",c.movie||0],["tv","📺","热门剧集",c.tv||0],["anime","🌸","动漫新番",c.anime||0],["variety","🎤","热门综艺",c.variety||0]]
         .map(([k,ic,t,n])=>`<div class="lib"><div class="ic">${ic}</div><div><div class="t">${t}</div><div class="c">${n} 条</div></div></div>`).join("");
@@ -871,6 +1209,8 @@ function renderLibrary(){
       .map(([k,t])=>{const n=(cats[k]||{}).routes||0;
         return `<div class="lib"><div class="ic">🌐</div><div><div class="t">${t}</div><div class="c">${n?("路由 "+n):"建库中…"}</div></div></div>`;}).join("");
   }
+  renderLibManage();
+  loadAccounts();
   $("hotStatus").textContent=(STATUS.charts&&STATUS.charts.refreshing?"正在后台刷新榜单…":"最近刷新："+fmtTs(STATUS.charts&&STATUS.charts.updated_at))
     +` · 数据源 ${(STATUS.charts&&STATUS.charts.provider_ok)||0}/${(STATUS.charts&&STATUS.charts.provider_total)||0}`
     +(STATUS.charts&&STATUS.charts.last_error?(" · "+STATUS.charts.last_error):"");
@@ -882,6 +1222,31 @@ async function saveHotCfg(){
     hot_refresh_interval:Math.max(1,Math.min(24,parseInt($("hotInterval").value)||6))*3600};
   const r=await jpost("/v/api/ext/config",body);
   if(r.code===0){Object.assign(CFG,body);toast("热门设置已保存");await loadLibs();renderLibrary();}else toast(r.msg||"保存失败","fail");
+}
+async function saveTitlesCacheCfg(){
+  const body={
+    titles_cache_max_entries:Math.max(100,Math.min(20000,parseInt($("titlesMaxEntries").value)||4000)),
+    titles_cache_max_mb:Math.max(0,Math.min(512,parseFloat($("titlesMaxMb").value)||0)),
+    titles_flush_debounce:Math.max(0,Math.min(120,parseFloat($("titlesDebounce").value)||0))};
+  const r=await jpost("/v/api/ext/config",body);
+  if(r.code===0){Object.assign(CFG,body);toast("缓存设置已保存（下次落盘生效，超出上限的最旧条目会在后台自动丢弃）");refreshTitlesCacheStat();}
+  else toast(r.msg||"保存失败","fail");
+}
+async function refreshTitlesCacheStat(){
+  try{
+    const r=await jget("/v/api/ext/titles-cache");
+    const el=$("titlesCacheStat"); if(!el)return;
+    if(r.code===0){
+      const mb=(r.bytes/1048576).toFixed(2);
+      el.textContent=`当前 titles.json：${r.entries} 条 / ${mb} MB`+(r.dirty?"（有未落盘改动）":"");
+    } else { $("titlesCacheStat").textContent=""; }
+  }catch(e){const el=$("titlesCacheStat");if(el)el.textContent="";}
+}
+async function clearTitlesCache(){
+  if(!confirm("清空在线资源缓存 titles.json？\n这会清空最近搜索/点片的本地缓存（不影响源和媒体库），重启服务后历史卡片需重新搜索。"))return;
+  const r=await jpost("/v/api/ext/titles-cache/clear",{});
+  if(r.code===0){toast("已清空在线缓存，正在重启服务生效…");setTimeout(()=>location.reload(),1500);}
+  else toast(r.msg||"清空失败","fail");
 }
 async function saveCatCfg(){
   const body={catalog_library_enabled:$("catEnabled").checked};
@@ -900,6 +1265,7 @@ async function refreshHot(){
 function renderQuality(){
   if(!STATUS)return;
   $("preferQ").checked=CFG.prefer_quality_source!==false;
+  if($("autoBest"))$("autoBest").checked=CFG.auto_best_source!==false;
   PRIO=STATUS.source_priority||{};
   const ov=CFG.source_priority||{};
   $("prioCount").textContent=Object.keys(ov).length+" 自定义";
@@ -927,49 +1293,71 @@ async function resetPriority(){
   if(r.code===0){toast("已恢复默认权重");await loadStatus();renderQuality();}else toast("失败","fail");
 }
 async function savePreferQ(){
-  const r=await jpost("/v/api/ext/config",{prefer_quality_source:$("preferQ").checked});
-  if(r.code===0){CFG.prefer_quality_source=$("preferQ").checked;toast("已保存");}else toast("失败","fail");
+  const r=await jpost("/v/api/ext/config",{prefer_quality_source:$("preferQ").checked,auto_best_source:$("autoBest").checked});
+  if(r.code===0){CFG.prefer_quality_source=$("preferQ").checked;CFG.auto_best_source=$("autoBest").checked;toast("已保存");}else toast("失败","fail");
 }
 
 /* ---------- 资源站 ---------- */
 function renderSources(){
-  const srcs=CFG.sources;
-  $("srcCount").textContent=srcs.filter(x=>x.enabled).length+"/"+srcs.length+" 启用";
-  $("srcRows").innerHTML=srcs.map(src=>{
-    let extraCell="",extraTag="";
-    return `<tr data-id="${src.id}">
-      <td><input type="checkbox" class="en" ${src.enabled?"checked":""} style="accent-color:var(--accent);width:16px;height:16px"/></td>
-      <td style="white:nowrap">
-        <label title="把该资源站单独生成一张媒体库卡片" style="display:inline-flex;align-items:center;gap:2px;font-size:11px;cursor:pointer">
-          <input type="checkbox" class="sa" ${src.standalone?"checked":""}
-           ${(src.enabled&&!(FEAT_DDUO&&src.xsrc))?"":"disabled"} style="width:15px;height:15px;accent-color:var(--accent)"/>库</label>
-        <label title="非过滤：独立库内不按标题/备注过滤解说/预告/花絮" style="display:inline-flex;align-items:center;gap:2px;font-size:11px;cursor:pointer;margin-left:4px">
-          <input type="checkbox" class="lf" ${src.loose_filter?"checked":""}
-           ${(src.enabled&&src.standalone&&!(FEAT_DDUO&&src.xsrc))?"":"disabled"} style="width:15px;height:15px;accent-color:var(--warn)"/>非过滤</label>
-        ${extraCell}
-      </td>
-      <td><div style="font-weight:500">${esc(src.name)}${extraTag}${src.builtin?'':'<span class="tag amber">自定义</span>'}${src.standalone?'<span class="tag">媒体库</span>':''}</div>
-        <div class="meta">${esc(src.api)}</div></td>
-      <td class="st wait" data-st>未测</td>
-      <td><button class="small" data-test>测试</button></td>
-      <td><button class="del" data-del title="删除">✕</button></td>
-    </tr>`;
-  }).join("");
-  $$("#srcRows tr").forEach(tr=>{
-    const id=tr.dataset.id;
-    tr.querySelector(".en").addEventListener("change",()=>toggleEnable(id,tr.querySelector(".en").checked));
-    const sa=tr.querySelector(".sa");sa.addEventListener("change",()=>toggleStandalone(id,sa.checked));
-    const lf=tr.querySelector(".lf");if(lf)lf.addEventListener("change",()=>toggleLoose(id,lf.checked));
-    tr.querySelector("[data-test]").addEventListener("click",()=>testOne(id,tr));
-    tr.querySelector("[data-del]").addEventListener("click",()=>delSource(id,srcName(id)));
+  const all=CFG.sources;
+  const q=($("srcFilter")?.value||"").trim().toLowerCase();
+  const srcs=q?all.filter(s=>(s.name||"").toLowerCase().includes(q)||(s.api||"").toLowerCase().includes(q)):all;
+  $("srcCount").textContent=all.filter(x=>x.enabled).length+"/"+all.length+" 启用";
+  const collapsed=$("srcCollapseBar")?.classList.contains("collapsed");
+  // 默认折叠时只展示前 12 个；筛选时不受折叠限制
+  const PREVIEW=12;
+  let view=srcs, hiddenNote="";
+  if(collapsed && !q && srcs.length>PREVIEW){
+    view=srcs.slice(0,PREVIEW);
+    hiddenNote=`<div class="muted sm" style="grid-column:1/-1;text-align:center;padding:6px">还有 ${srcs.length-PREVIEW} 个未展开</div>`;
+  }
+  const bar=$("srcCollapseBar");
+  if(bar){bar.style.display=srcs.length>PREVIEW?"flex":"none";
+    $("srcCollapseTxt").textContent=collapsed?`展开完整列表（${srcs.length} 个）`:"收起列表";}
+  $("srcGrid").innerHTML=view.map(src=>{
+    let adultOpt="",extraTag="";
+    const canLib=(src.enabled&&!(FEAT_DDUO&&src.xsrc));
+    const tags=(src.builtin?'':'<span class="tag amber">自定义</span>')+(src.standalone?'<span class="tag">媒体库</span>':'')+extraTag;
+    return `<div class="src-card ${src.enabled?'on':'off'}" data-id="${src.id}">
+      <div class="src-head">
+        <label class="src-switch" title="启用/停用"><input type="checkbox" class="en" ${src.enabled?"checked":""}/><span class="sl"></span></label>
+        <div class="src-name">${esc(src.name)}<div class="src-tags">${tags}</div></div>
+      </div>
+      <div class="src-api" title="${esc(src.api)}">${esc(src.api)}</div>
+      <div class="src-opts">
+        <label title="把该资源站单独生成一张媒体库卡片"><input type="checkbox" class="sa" ${src.standalone?"checked":""} ${canLib?"":"disabled"}/>独立库</label>
+        <label title="非过滤：独立库内不按标题/备注过滤解说/预告/花絮"><input type="checkbox" class="lf" ${src.loose_filter?"checked":""} ${(canLib&&src.standalone)?"":"disabled"}/>非过滤</label>
+        ${adultOpt}
+      </div>
+      <div class="src-actions">
+        <span class="st wait" data-st>未测</span>
+        <button class="small" data-test>测速</button>
+        <button class="small" data-edit title="编辑名称/订阅链接">✎</button>
+        <button class="del small" data-del title="删除">✕</button>
+      </div>
+    </div>`;
+  }).join("")+hiddenNote;
+  $$("#srcGrid .src-card").forEach(card=>{
+    const id=card.dataset.id;
+    card.querySelector(".en").addEventListener("change",e=>toggleEnable(id,e.target.checked));
+    const sa=card.querySelector(".sa");sa.addEventListener("change",()=>toggleStandalone(id,sa.checked));
+    const lf=card.querySelector(".lf");if(lf)lf.addEventListener("change",()=>toggleLoose(id,lf.checked));
+    card.querySelector("[data-test]").addEventListener("click",()=>testOne(id,card));
+    card.querySelector("[data-edit]").addEventListener("click",()=>openSrcEdit(id));
+    card.querySelector("[data-del]").addEventListener("click",()=>delSource(id,srcName(id)));
   });
 }
+function toggleSrcCollapse(){
+  const bar=$("srcCollapseBar");bar.classList.toggle("collapsed");renderSources();
+}
+function toggleBox(id,bar){const el=$(id);if(!el)return;el.classList.toggle("collapsed");if(bar)bar.classList.toggle("collapsed");}
 function srcName(id){const s=CFG.sources.find(x=>x.id===id);return s?s.name:id;}
 async function toggleEnable(id,on){
   const sources=CFG.sources.map(s=>({id:s.id,enabled:s.id===id?on:s.enabled}));
   const r=await jpost("/v/api/ext/config",{sources});
   if(r.code===0){CFG.sources.find(x=>x.id===id).enabled=on;
-    $("srcCount").textContent=CFG.sources.filter(x=>x.enabled).length+"/"+CFG.sources.length+" 启用";toast(on?"已启用":"已停用");}
+    $("srcCount").textContent=CFG.sources.filter(x=>x.enabled).length+"/"+CFG.sources.length+" 启用";
+    renderSources();toast(on?"已启用":"已停用");}
   else toast(r.msg||"保存失败","fail");
 }
 async function toggleStandalone(id,on){
@@ -983,23 +1371,75 @@ async function toggleLoose(id,on){
   if(r.code===0){const s=CFG.sources.find(x=>x.id===id);if(s)s.loose_filter=on;renderSources();toast(on?"已开启非过滤":"已恢复严格过滤");}
   else{toast(r.msg||"操作失败","fail");renderSources();}
 }
-function setSt(tr,html,cls){const el=tr.querySelector("[data-st]");el.className="st "+cls;el.innerHTML=html;}
-async function testOne(id,tr){
-  setSt(tr,"测试中…","wait");tr.querySelector("[data-test]").disabled=true;
+function setSt(card,html,cls){const el=card.querySelector("[data-st]");el.className="st "+cls;el.innerHTML=html;}
+async function testOne(id,card){
+  setSt(card,"测试中…","wait");card.querySelector("[data-test]").disabled=true;
   try{const r=await jpost("/v/api/ext/source/test",{id});const d=r.data;
-    if(d.ok)setSt(tr,`✓ ${d.elapsed_ms}ms · ${d.count}条${d.direct?(' · '+d.direct+'直链'):''}`,"ok");
-    else setSt(tr,"✕ "+(d.error||"失败")+(d.elapsed_ms?(" · "+d.elapsed_ms+"ms"):""),"bad");
-  }catch(e){setSt(tr,"✕ "+e,"bad");}
-  tr.querySelector("[data-test]").disabled=false;
+    if(d.ok)setSt(card,`✓ ${d.elapsed_ms}ms·${d.count}条${d.direct?('·'+d.direct+'直链'):''}`,"ok");
+    else setSt(card,"✕ "+(d.error||"失败")+(d.elapsed_ms?(" · "+d.elapsed_ms+"ms"):""),"bad");
+  }catch(e){setSt(card,"✕ "+e,"bad");}
+  card.querySelector("[data-test]").disabled=false;
 }
 async function testAll(){
   toast("正在并发测速…");
-  $$("#srcRows [data-st]").forEach(el=>{el.className="st wait";el.textContent="测试中…";});
+  $$("#srcGrid [data-st]").forEach(el=>{el.className="st wait";el.textContent="测试中…";});
   const r=await jpost("/v/api/ext/source/test-all",{});
-  (r.data||[]).forEach(d=>{const tr=$("srcRows").querySelector(`tr[data-id="${d.id}"]`);if(!tr)return;
-    if(d.ok)setSt(tr,`✓ ${d.elapsed_ms}ms · ${d.count}条${d.direct?(' · '+d.direct+'直链'):''}`,"ok");
-    else setSt(tr,"✕ "+(d.error||"失败"),"bad");});
+  (r.data||[]).forEach(d=>{const card=$("srcGrid").querySelector(`.src-card[data-id="${d.id}"]`);if(!card)return;
+    if(d.ok)setSt(card,`✓ ${d.elapsed_ms}ms·${d.count}条${d.direct?('·'+d.direct+'直链'):''}`,"ok");
+    else setSt(card,"✕ "+(d.error||"失败"),"bad");});
   toast("测速完成");
+}
+function openSrcEdit(id){
+  const s=CFG.sources.find(x=>x.id===id);if(!s)return;
+  $("seId").value=id;$("seName").value=s.name||"";$("seApi").value=s.api||"";
+  const apiInp=$("seApi"),hint=$("seHint");
+  const isGuard=!!s.guard;
+  apiInp.disabled=isGuard||!!s.builtin;
+  hint.innerHTML=isGuard?"加固源订阅请在「TVBox 加固」页管理，这里仅可改名称。"
+    : (s.builtin?"内置源仅可改显示名称；如需更换接口地址，请删除后以自定义源重新添加。"
+    : "自定义源可同时改名称与接口地址；改地址后源 ID 会重建，原有权重迁移，搜索缓存自动清空。");
+  hint.className="hint";
+  $("srcEditMask").classList.add("show");setTimeout(()=>$("seName").focus(),50);
+}
+function closeSrcEdit(){$("srcEditMask").classList.remove("show");}
+document.addEventListener("keydown",e=>{if(e.key==="Escape"){const m=$("srcEditMask");if(m)m.classList.remove("show");}});
+async function saveSrcEdit(){
+  const id=$("seId").value,name=$("seName").value.trim(),api=$("seApi").value.trim();
+  const s=CFG.sources.find(x=>x.id===id);if(!s)return;
+  if(!api){toast("接口地址不能为空","fail");return;}
+  const body={id,name};
+  if(!s.builtin&&!s.guard)body.api=api;
+  const r=await jpost("/v/api/ext/source/update",body);
+  if(r.code===0){toast("已保存");closeSrcEdit();await loadStatus();renderSources();}
+  else toast(r.msg||"保存失败","fail");
+}
+async function loadCacheStatus(){
+  const box=$("cacheGrid");if(!box)return;
+  try{
+    const r=await jget("/v/api/ext/cache");const d=(r.data||{});
+    const fmtB=n=>n>=1048576?(n/1048576).toFixed(2)+" MB":(n>=1024?(n/1024).toFixed(1)+" KB":n+" B");
+    const items=[
+      ["titles","在线资源缓存",d.titles&&(fmtB(d.titles.bytes)+" · "+d.titles.entries+" 条"),"清后将重启服务"],
+      ["charts","热门榜单缓存",d.charts&&fmtB(d.charts.bytes),"后台自动重抓"],
+      ["catalog","海量库分类/分页",d.catalog&&(d.catalog.routes+" 路由 · "+d.catalog.pages+" 分页"),"下次浏览重建"],
+      ["search","搜索结果内存缓存",d.search&&(d.search.entries+" 条"),"即时清空不重启"],
+      ["health","源健康画像",d.health&&(d.health.entries+" 源"),"清空后冷启动重新画像"],
+    ];
+    box.innerHTML=items.map(([k,label,val,note])=>`<div class="cache-item">
+      <div class="cn">${label}</div><div class="cv">${val||"-"}<br><span style="opacity:.7">${note}</span></div>
+      <button class="small" style="width:100%" onclick="clearCaches(['${k}'])">清除</button></div>`).join("");
+  }catch(e){box.innerHTML='<div class="muted sm">读取失败</div>';}
+}
+async function clearCaches(targets){
+  const labels={titles:"在线资源缓存（会重启服务）",charts:"热门榜单",catalog:"海量库",search:"搜索缓存",health:"源健康画像"};
+  const names=targets.map(t=>labels[t]||t).join("、");
+  if(!confirm("确定清除："+names+" ？"))return;
+  const r=await jpost("/v/api/ext/cache/clear",{targets});
+  if(r.code===0){
+    toast(r.msg||"已清除");
+    if((r.data||{}).restart){setTimeout(()=>location.reload(),1800);}
+    else setTimeout(loadCacheStatus,600);
+  } else toast(r.msg||"清除失败","fail");
 }
 async function loadHealth(){
   const box=$("healthRows");if(!box)return;box.innerHTML='<tr><td colspan="6" class="muted">加载中…</td></tr>';
@@ -1026,7 +1466,10 @@ async function addSource(){
   if(!api){toast("请填写接口地址","fail");return;}
   const r=await jpost("/v/api/ext/source/add",{name,api,standalone});
   if(r.code===0){toast("已添加");$("addName").value="";$("addApi").value="";$("addStandalone").checked=false;
-    await loadStatus();const tr=$("srcRows").querySelector(`tr[data-id="${r.data.id}"]`);if(tr&&!standalone)testOne(r.data.id,tr);}
+    await loadStatus();renderSources();
+    // 折叠态下自动展开并定位测速
+    const bar=$("srcCollapseBar");if(bar&&bar.classList.contains("collapsed")){bar.classList.remove("collapsed");renderSources();}
+    const card=$("srcGrid").querySelector(`.src-card[data-id="${r.data.id}"]`);if(card&&!standalone)testOne(r.data.id,card);}
   else toast(r.msg||"添加失败","fail");
 }
 // ---------- 订阅抓取代理（仅拉订阅/jar/脚本，不影响播放） ----------
@@ -1070,6 +1513,76 @@ async function clearSubProxy(){
     $("subProxyMsg").textContent="已清空，当前直连";$("subProxyMsg").style.color="";toast("已切回直连");}
   else toast(r.msg||"失败","fail");
 }
+// ---------- 资源站取源代理（搜索/分类/测速，视频流仍直连） ----------
+function initSrcProxy(){
+  const p=(CFG&&CFG.source_proxy)||"";
+  const en=$("srcProxyEnable"),inp=$("srcProxyUrl"),sb=$("srcProxySaveBtn"),cb=$("srcProxyClearBtn"),msg=$("srcProxyMsg");
+  if(!en)return;
+  inp.value=p;en.checked=!!p;
+  inp.disabled=!en.checked;sb.disabled=!en.checked;cb.disabled=!p;
+  msg.textContent=p?"取源请求按下方模式决定是否经代理，视频流仍直连":"当前未设代理（全部直连）";
+  msg.style.color="";
+  renderSrcProxyMode();
+}
+const SRC_MODE_HINT={
+  auto:"🪄 智能：每个资源站默认直连；只有直连失败（被墙/重置/超时）的站自动切换到代理，其它站保持直连，兼顾速度与成功率。",
+  on:"始终走代理：所有资源站的搜索/分类/测速/解析都经代理（需要代理本身稳定，否则可能拖慢全部源）。",
+  off:"全部直连：忽略已配置的代理地址。"
+};
+function renderSrcProxyMode(){
+  const mode=(CFG&&CFG.source_proxy_mode)||"auto";
+  const seg=$("srcProxyMode"),hint=$("srcProxyModeHint");
+  if(!seg)return;
+  seg.querySelectorAll("button").forEach(b=>b.classList.toggle("active",b.dataset.mode===mode));
+  if(hint)hint.textContent=SRC_MODE_HINT[mode]||SRC_MODE_HINT.auto;
+}
+async function setSrcProxyMode(mode){
+  const proxy=$("srcProxyUrl").value.trim();
+  // 先确保代理地址已保存（选择智能/始终时若输入框有未保存内容则一并保存）
+  if(mode!=="off" && proxy && proxy!==((CFG&&CFG.source_proxy)||"")){
+    await saveSrcProxy(false);
+  }
+  const r=await jpost("/v/api/ext/source-proxy",{proxy:(CFG&&CFG.source_proxy)||"",mode});
+  if(r.code===0){
+    CFG.source_proxy_mode=(r.data&&r.data.mode)||mode;renderSrcProxyMode();
+    toast({auto:"已切换为智能模式",on:"已切换为始终走代理",off:"已切换为全部直连"}[mode]);
+  } else toast(r.msg||"切换失败","fail");
+}
+function onSrcProxyToggle(){
+  const en=$("srcProxyEnable"),inp=$("srcProxyUrl"),sb=$("srcProxySaveBtn");
+  inp.disabled=!en.checked;sb.disabled=!en.checked;
+  if(en.checked)inp.focus();
+}
+async function saveSrcProxy(test){
+  const inp=$("srcProxyUrl"),msg=$("srcProxyMsg");
+  const proxy=inp.value.trim();
+  if(!proxy){toast("请填写代理地址，或点清空直连","fail");return;}
+  msg.textContent="保存并测试资源站连通性…";msg.style.color="";
+  try{
+    const mode=(CFG&&CFG.source_proxy_mode)||"auto";
+    const r=await jpost("/v/api/ext/source-proxy",{proxy,mode});
+    if(r.code!==0){msg.textContent="未保存："+(r.msg||"格式错误");msg.style.color="var(--danger)";return;}
+    CFG.source_proxy=proxy;CFG.source_proxy_mode=(r.data&&r.data.mode)||mode;renderSrcProxyMode();
+    const d=r.data||{};
+    if(test){
+      msg.textContent=d.test_ok?("✓ 已保存，经代理测速成功（"+(d.test_msg||"")+"）")
+                               :("已保存，但经代理测速失败："+(d.test_msg||"可先保存后再在资源站页测速"));
+      msg.style.color=d.test_ok?"var(--ok,#3a9)":"var(--warn,#d59a2b)";
+    }else{msg.textContent="已保存";}
+    $("srcProxyClearBtn").disabled=false;
+    toast("源代理已保存");
+  }catch(e){msg.textContent="请求失败："+String(e);msg.style.color="var(--danger)";}
+}
+async function clearSrcProxy(){
+  if(!confirm("清空资源站代理地址？\n清空后所有源都直连（模式会回到智能，但没有代理可用即等于直连）。"))return;
+  const r=await jpost("/v/api/ext/source-proxy",{proxy:"",mode:"off"});
+  if(r.code===0){CFG.source_proxy="";CFG.source_proxy_mode="off";
+    $("srcProxyUrl").value="";$("srcProxyEnable").checked=false;
+    $("srcProxyUrl").disabled=true;$("srcProxySaveBtn").disabled=true;$("srcProxyClearBtn").disabled=true;
+    renderSrcProxyMode();
+    $("srcProxyMsg").textContent="已清空，当前直连";$("srcProxyMsg").style.color="";toast("已清空代理");}
+  else toast(r.msg||"失败","fail");
+}
 async function loadAdfilter(){
   const box=$("adfStatus"), cb=$("adfEnable");
   try{
@@ -1078,9 +1591,11 @@ async function loadAdfilter(){
     const d=r.data||{};
     if(cb)cb.checked=!!d.enabled;
     const dyn=$("adfDynamic"); if(dyn)dyn.checked=d.dynamic!==false;
+    const sps=$("adfSps"); if(sps)sps.checked=d.sps!==false;
     let h="";
     if(d.enabled) h+='<span style="color:var(--ok,#3a9)">● 已启用</span>　';
     else h+='<span class="muted">○ 已关闭</span>　';
+    h+="编码指纹："+(d.sps!==false?'<b style="color:var(--ok,#3a9)">开</b>':'关')+"　动态检测："+(d.dynamic!==false?'<b style="color:var(--ok,#3a9)">开</b>':'关')+"　";
     h+="已收录订阅规则 <b>"+(d.rule_groups||0)+"</b> 组 / 域名 "+(d.hosts||[]).length
        +" 个 / 规则 "+(d.regex_count||0)+" 条";
     if((d.groups||[]).length){
@@ -1104,6 +1619,13 @@ async function toggleAdfilterDynamic(on){
   try{
     const r=await jpost("/v/api/ext/adfilter/toggle",{dynamic:!!on});
     if(r.code===0){toast(on?"已开启播放时动态检测":"已关闭动态检测");loadAdfilter();}
+    else toast(r.msg||"操作失败","fail");
+  }catch(e){toast(String(e),"fail");}
+}
+async function toggleAdfilterSps(on){
+  try{
+    const r=await jpost("/v/api/ext/adfilter/toggle",{sps:!!on});
+    if(r.code===0){toast(on?"已开启编码指纹去广告":"已关闭编码指纹去广告");loadAdfilter();}
     else toast(r.msg||"操作失败","fail");
   }catch(e){toast(String(e),"fail");}
 }
@@ -1159,6 +1681,24 @@ async function importFantaiying(){
   }
 }
 function goDeploy(){switchPage("tvbox");setTimeout(()=>{const b=$("scInstallAll");if(b)b.click();},80);}
+async function importCatLite(){
+  const btn=$("btnImportCatLite"), out=$("subResult");
+  if(btn){btn.disabled=true;btn.style.opacity=".6";btn.style.cursor="wait";}
+  const t0=Date.now();
+  out.innerHTML='<div class="muted sm">正在导入内置「轻量猫源」——纯苹果CMS精选源，无爬虫 jar、无需安卓运行时，正在逐个探测可用性，请稍候…</div>';
+  try{
+    const r=await jpost("/v/api/ext/source/import-subscription",
+      {builtin:"cat_lite",standalone:$("subStandalone").checked,enable_guard:false});
+    if(r.code!==0){out.innerHTML='<div class="hint" style="color:var(--danger)">导入失败：'+esc(r.msg||"")+'</div>';return;}
+    renderSubResult(r.data||{});
+    toast("轻量猫源导入完成（耗时 "+Math.round((Date.now()-t0)/1000)+" 秒）");
+    try{await loadStatus();}catch(e){}
+  }catch(e){
+    out.innerHTML='<div class="hint" style="color:var(--danger)">导入出错：'+esc(String(e))+'</div>';
+  }finally{
+    if(btn){btn.disabled=false;btn.style.opacity="";btn.style.cursor="";}
+  }
+}
 function renderSubResult(d){
   const cms=d.cms||{},g=d.guard||{},rt=d.runtime,skips=d.skipped_detail||[];
   let h="";

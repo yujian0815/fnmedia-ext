@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import threading
 import time
@@ -21,6 +22,22 @@ _GUID_PREFIX = "on"
 _TTL = 24 * 3600
 _MAX_TITLES = 4000
 _STATE = Path(__file__).resolve().parent.parent / "state" / "titles.json"
+
+
+def _cache_cfg() -> tuple[int, int, float]:
+    """读取 titles.json 缓存裁剪/落盘策略（条数上限、字节上限、防抖秒）。
+    config 在函数内导入，避免与 config->providers 形成模块加载环。"""
+    try:
+        import config
+        c = config.get()
+        max_n = int(c.get("titles_cache_max_entries", _MAX_TITLES))
+        max_mb = float(c.get("titles_cache_max_mb", 4))
+        debounce = float(c.get("titles_flush_debounce", 5))
+    except Exception:
+        max_n, max_mb, debounce = _MAX_TITLES, 4.0, 5.0
+    return (max(100, max_n),
+            max(0.0, max_mb) * 1024 * 1024,
+            max(0.0, debounce))
 
 
 def _h(s: str) -> str:
@@ -69,13 +86,53 @@ class Store:
         self._play: dict[str, dict] = {}
         self._detail_cache: dict[str, providers.OnlineTitle] = {}
         self._dirty = False
+        # —— 后台防抖落盘（issue #42：机械盘同步全量写 20+MB 会让搜索卡 10s）——
+        self._dirty_at = 0.0
+        self._writer_started = False
+        self._closing = False
+        self._state: Path = _STATE    # 缓存文件路径（实例级，便于测试/端点引用）
         self._ep_index: dict[str, dict] = {}   # episode guid -> 定位信息（含多线路）
         self._media_index: dict[str, str] = {} # media/video guid -> ("t:"|"e:") + JSON
         self._load()
 
+    def _ensure_writer(self):
+        """惰性启动后台写线程（daemon，仅一个）。"""
+        if self._writer_started:
+            return
+        self._writer_started = True
+        t = threading.Thread(target=self._flush_loop, name="titles-flush",
+                             daemon=True)
+        t.start()
+
+    def _flush_loop(self):
+        """防抖写：变脏后静默满 debounce 秒（期间新脏数据顺延、合并为一次写）
+        再后台落盘；debounce=0 时尽快写。"""
+        while not self._closing:
+            time.sleep(0.25)
+            try:
+                with self._lock:
+                    if not self._dirty:
+                        continue
+                    since = time.time() - self._dirty_at
+                    _, _, debounce = _cache_cfg()
+                if since < debounce:
+                    continue
+                self._flush_now()
+            except Exception:
+                pass
+
+    def _schedule_flush(self):
+        """标记脏并请求后台合并写；搜索热路径不做任何磁盘 IO。"""
+        now = time.time()
+        with self._lock:
+            if not self._dirty:
+                self._dirty_at = now
+            self._dirty = True
+        self._ensure_writer()
+
     def _load(self):
         try:
-            j = json.loads(_STATE.read_text())
+            j = json.loads(self._state.read_text())
             self._titles = j.get("titles", {})
             self._orig = j.get("orig", {})
         except Exception:
@@ -233,27 +290,86 @@ class Store:
                for ln in brief.get("lines", {})]
         return [ln for ln, n in sorted(out, key=lambda x: -x[1]) if n > 0]
 
-    def _flush_locked(self, force=False):
-        now = time.time()
+    def _prune_memory_locked(self, keep_guards: set):
+        """内存软上限：条数远超配置上限时，丢最旧的非保护条目。
+        磁盘裁剪只影响落盘快照；这个防止长跑进程内存与索引无界增长（issue #42）。"""
+        max_n, _, _ = _cache_cfg()
+        ceiling = int(max_n * 1.5)
+        if len(self._titles) <= ceiling:
+            return False
+        keys = [k for k in self._titles.keys() if k not in keep_guards]
+        drop_n = len(self._titles) - max_n
+        for k in keys[:max(0, drop_n)]:
+            self._titles.pop(k, None)
+            self._orig.pop(k, None)
+        return True
+
+    def _snapshot_capped(self) -> tuple[dict, dict]:
+        """在锁内按「条数上限 + 字节上限」裁剪出待落盘快照。
+        只裁剪落盘内容，不动内存；按插入顺序丢最旧（dict 保序，最近搜索在后）。"""
+        max_n, max_bytes, _ = _cache_cfg()
+        g_items = list(self._titles.items())
+        o_items = list(self._orig.items())
+        # 1) 条数上限
+        if len(g_items) > max_n:
+            g_items = g_items[-max_n:]
+            keep = {k for k, _ in g_items}
+            o_items = [(k, v) for k, v in o_items if k in keep]
+        # 2) 字节上限（0=不限制）。逐条算【UTF-8 字节】长度（titles + 对应 orig；
+        #    中文在磁盘上 3 字节/字，不能用字符 len 估算），从最旧丢到达标，留 2% 余量。
+        if max_bytes > 0:
+            def _bsize(v) -> int:
+                return len(json.dumps(v, ensure_ascii=False).encode("utf-8"))
+            o_map = dict(o_items)
+            budget = max_bytes * 0.92
+            sizes = [_bsize(b) + _bsize(o_map.get(k, "")) for k, b in g_items]
+            total = sum(sizes) + 256
+            drop = 0
+            while total > budget and drop < len(g_items):
+                total -= sizes[drop]
+                drop += 1
+            if drop:
+                g_items = g_items[drop:]
+                keep = {k for k, _ in g_items}
+                o_items = [(k, v) for k, v in o_items if k in keep]
+        return dict(g_items), dict(o_items)
+
+    def _flush_now(self) -> bool:
+        """实际落盘：锁内取裁剪快照，锁外序列化+原子替换（写盘不阻塞搜索/读）。"""
         if not self._dirty:
-            return
-        # 限频写盘（最多每 3 秒一次由调用方触发，这里直接写）
+            return False
+        with self._lock:
+            if not self._dirty:
+                return False
+            titles, orig = self._snapshot_capped()
         try:
-            _STATE.parent.mkdir(parents=True, exist_ok=True)
-            tmp = _STATE.with_suffix(".tmp")
-            # 控制磁盘体积：超限时只裁剪本次写入的快照，不能从内存中删除。
-            # 否则热门库 remember_merged 后可能误删用户此前搜索缓存的标题。
-            titles = self._titles
-            orig = self._orig
-            if len(titles) > _MAX_TITLES:
-                keys = list(titles.keys())[-_MAX_TITLES:]
-                keep = set(keys)
-                titles = {k: self._titles[k] for k in keys}
-                orig = {k: v for k, v in self._orig.items() if k in keep}
-            tmp.write_text(json.dumps(
-                {"titles": titles, "orig": orig}, ensure_ascii=False))
-            tmp.replace(_STATE)
-            self._dirty = False
+            self._state.parent.mkdir(parents=True, exist_ok=True)
+            data = json.dumps({"titles": titles, "orig": orig},
+                              ensure_ascii=False)
+            tmp = self._state.with_suffix(".tmp")
+            tmp.write_text(data)
+            os.replace(tmp, self._state)
+            with self._lock:
+                self._dirty = False
+            return True
+        except Exception:
+            return False
+
+    def flush(self, wait: bool = True) -> bool:
+        """对外的立即落盘（关闭进程时调用）。wait=True 时同步写完。"""
+        with self._lock:
+            if not self._dirty:
+                return True
+        if wait:
+            return self._flush_now()
+        self._ensure_writer()
+        return True
+
+    def close(self):
+        """进程关闭：停掉防抖线程并尽力把最后一批脏数据写盘。"""
+        self._closing = True
+        try:
+            self._flush_now()
         except Exception:
             pass
 
@@ -270,8 +386,9 @@ class Store:
                 self._detail_cache[t.online_id] = t
                 briefs.append(b)
             self._play = {k: v for k, v in self._play.items() if now - v["ts"] < _TTL}
+            self._prune_memory_locked({make_guid(t) for t in titles})
             self._dirty = True
-            self._flush_locked()
+            self._schedule_flush()
             self._rebuild_index()
         return briefs
 
@@ -281,8 +398,9 @@ class Store:
             for b in briefs:
                 self._titles[b["guid"]] = b
                 self._orig.setdefault(b["guid"], b.get("online_id", ""))
+            self._prune_memory_locked({b["guid"] for b in briefs})
             self._dirty = True
-            self._flush_locked(force=True)
+            self._schedule_flush()
             self._rebuild_index()
         return briefs
 
@@ -322,8 +440,9 @@ class Store:
             self._titles[g] = inject.brief_of(t)
             self._orig[g] = t.online_id
             self._detail_cache[t.online_id] = t
+            self._prune_memory_locked({g})
             self._dirty = True
-            self._flush_locked()
+            self._schedule_flush()
             self._rebuild_index()
         return g
 

@@ -54,23 +54,21 @@ mkdir -p "${STAGE}/app/repo/proxy/assets/guard"
 mkdir -p "${STAGE}/app/repo/proxy/assets/spiders/jars"
 : > "${STAGE}/app/repo/proxy/assets/spiders/jars/.gitkeep"
 
-# 全功能版内置第三方爬虫 jar（如饭太硬订阅的 Yoursmile.jar）：来自仓库
-# proxy/assets/spiders/vendor/。打包阶段直接播种进 jars/<jarid>.jar 并生成
-# jars.json，使「一键饭太硬」离线、首装/升级首次导入即启用，无需联网下载；
-# 运行时 seed_bundled_jars() 还会在缺失时自愈补播。
-# 公开包在随后的 public_strip 阶段会整体移除 assets/spiders，故此处不灌内置 jar。
-if [ "${PUBLIC}" -eq 0 ] && [ -d "${REPO_ROOT}/proxy/assets/spiders/vendor" ]; then
-  VDST="${STAGE}/app/repo/proxy/assets/spiders/vendor"
-  mkdir -p "${VDST}"
-  cp -a "${REPO_ROOT}/proxy/assets/spiders/vendor/." "${VDST}/"
-  "${PYTHON:-python3}" - "${STAGE}/app/repo/proxy/assets/spiders" <<'PYSEED'
+# 全功能版内置第三方爬虫 jar（如饭太硬订阅的 Yoursmile.jar）：源文件放在仓库
+# proxy/assets/spiders/vendor/（不进分发包，避免与播种产物重复占空间）。打包阶段
+# 直接播种进 jars/<jarid>.jar 并生成 jars.json，使「一键饭太硬」离线、首装/升级
+# 首次导入即启用，无需联网下载。公开包在随后的 public_strip 阶段会整体移除
+# assets/spiders，故此处不灌内置 jar。
+SP_SRC="${REPO_ROOT}/proxy/assets/spiders/vendor"
+SP_DST="${STAGE}/app/repo/proxy/assets/spiders"
+if [ "${PUBLIC}" -eq 0 ] && [ -f "${SP_SRC}/bundled.json" ]; then
+  "${PYTHON:-python3}" - "${SP_SRC}" "${SP_DST}" <<'PYSEED'
 import hashlib, json, os, shutil, sys
-root = sys.argv[1]
-vendor = os.path.join(root, "vendor")
-jardir = os.path.join(root, "jars")
+src_root, dst_root = sys.argv[1], sys.argv[2]
+jardir = os.path.join(dst_root, "jars")
 os.makedirs(jardir, exist_ok=True)
 try:
-    manifest = json.load(open(os.path.join(vendor, "bundled.json"), encoding="utf-8"))
+    manifest = json.load(open(os.path.join(src_root, "bundled.json"), encoding="utf-8"))
 except Exception:
     manifest = {"jars": []}
 out = {}
@@ -79,7 +77,7 @@ for e in manifest.get("jars", []):
     fname = str(e.get("file") or "").strip()
     if not url or not fname:
         continue
-    src = os.path.join(vendor, fname)
+    src = os.path.join(src_root, fname)
     if not os.path.isfile(src) or os.path.getsize(src) <= 0:
         continue
     jid = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
@@ -88,7 +86,7 @@ for e in manifest.get("jars", []):
     os.chmod(dst, 0o644)
     out[jid] = {"url": url, "file": jid + ".jar",
                 "size": os.path.getsize(dst), "ok": True, "bundled": True}
-json.dump(out, open(os.path.join(root, "jars.json"), "w", encoding="utf-8"),
+json.dump(out, open(os.path.join(dst_root, "jars.json"), "w", encoding="utf-8"),
           ensure_ascii=False, indent=1)
 print("[fpk] 内置 spider jar 播种:", len(out), "个 ->", sorted(out))
 PYSEED

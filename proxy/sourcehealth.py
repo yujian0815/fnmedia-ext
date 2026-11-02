@@ -158,7 +158,9 @@ def weight(key: str, now: float | None = None) -> tuple:
     with _LOCK:
         s = _STATS.get(key)
         if not s:
-            return (1, 5.0, 1.0)  # 未知源给中间档，给一次机会
+            # 未知/新启用源给中性档：成功率按 0.5（而非 1.0 全失败），
+            # 否则新接入的高质量源（如网盘聚合）会因无画像被老源整体挤出前 N。
+            return (1, 5.0, 0.5)
         grade = _grade(s, now)
         n = max(1, s.get("n", 0))
         avg = s.get("lat", 0.0) / n

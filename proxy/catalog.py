@@ -18,6 +18,7 @@ from typing import Any
 
 import httpx
 
+import netutil
 import providers
 from store import make_guid
 
@@ -189,6 +190,21 @@ class Catalog:
         # (sid, cat) -> [备用叶子 route...]（首选分类探测失败时 rescue 得到）
         self._fallbacks: dict[tuple[str, str], list[dict]] = {}
 
+    def reset(self) -> None:
+        """清空海量库分类路由/分页/聚合缓冲（管理页一键清缓存）。
+        下次浏览海量库时重新探测分类并深翻。"""
+        with self._lock:
+            self._classes.clear()
+            self._routes.clear()
+            self._updated = 0.0
+            self._page_cache.clear()
+            self._inflight.clear()
+            self._seen_guids.clear()
+            self._dense.clear()
+            self._scanned_page.clear()
+            self._dense_count.clear()
+            self._fallbacks.clear()
+
     @staticmethod
     def _scope_key(scope: str, cat: str) -> str:
         return f"{scope}:{cat}"
@@ -207,9 +223,7 @@ class Catalog:
             return self.status()
         self._refreshing = True
         try:
-            async with httpx.AsyncClient(
-                    follow_redirects=True, trust_env=False,
-                    verify=False) as client:
+            async with netutil.async_client(verify=False, timeout=HTTP_TIMEOUT) as client:
                 await asyncio.gather(
                     *[self._load_source_classes(client, s) for s in sources],
                     return_exceptions=True)
@@ -231,9 +245,7 @@ class Catalog:
                     order.append(key)
             probed: dict[tuple[str, str], dict] = {}
 
-            async with httpx.AsyncClient(
-                    follow_redirects=True, trust_env=False,
-                    verify=False) as client:
+            async with netutil.async_client(verify=False, timeout=HTTP_TIMEOUT) as client:
                 async def probe_one(sid, cat, cl):
                     source = self._source_by_id(sid)
                     if not source:
@@ -581,9 +593,7 @@ class Catalog:
             sem = asyncio.Semaphore(10)
 
             async def once(timeout):
-                async with httpx.AsyncClient(follow_redirects=True,
-                                             trust_env=False,
-                                             verify=False) as client:
+                async with netutil.async_client(verify=False, timeout=HTTP_TIMEOUT) as client:
                     async def bound(r):
                         async with sem:
                             return await fetch_one(client, r, timeout)
@@ -610,8 +620,7 @@ class Catalog:
             return []
 
         # 跨源聚合：串行回退（不同源结果应一致，并发会无谓翻倍请求）
-        async with httpx.AsyncClient(follow_redirects=True, trust_env=False,
-                                     verify=False) as client:
+        async with netutil.async_client(verify=False, timeout=HTTP_TIMEOUT) as client:
             for route in routes:
                 got = await fetch_one(client, route, HTTP_TIMEOUT)
                 if not got:

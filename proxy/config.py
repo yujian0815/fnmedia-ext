@@ -52,23 +52,63 @@ DEFAULTS = {
     # 是否在飞牛原生媒体库注入单张「🛡加固影视」聚合库（源→分类片单，后台预取
     # 缓存、请求即时返回）。与 guard_zone_enabled（每源一张专区墙）相互独立。
     "guard_native_enabled": True,
+    # 加固源并入整个在线播放体系：任意在线影片的普通(CMS)线路全部不可播时，
+    # 用影片片名在可搜索加固源里元搜索聚合（复用 msearch 扇出竞速），把加固源
+    # 作为“兜底播放线路”救活。仅在普通线路全失败时才打 redroid，不拖慢正常播放。
+    # 仅完整版 GUARD 特性、且加固运行时就绪时生效。
+    "guard_playback_fallback": True,
     # 置顶的虚拟媒体库 guid 集合（打开=在飞牛影视媒体库列表置顶，关闭=普通顺序）。
     "pinned_libs": [],
+    # —— 虚拟媒体库显示开关 / 排序 / 子账号授权（稳定“库键”，见 vlibs.py）——
+    # 管理员手动隐藏、不在飞牛影视显示的库键集合
+    "lib_hidden": [],
+    # 虚拟库自定义相对顺序（库键数组；未列出的库按默认顺序追加）
+    "lib_order": [],
+    # 虚拟库整体相对本地库的位置：front=本地库之前（默认）/ back=本地库之后 /
+    # after=插到 anchor 指定的某个本地库之后
+    "lib_placement": "front",
+    # placement=after 时锚定的本地媒体库 guid
+    "lib_anchor": "",
+    # 子账号库授权：user_guid -> 允许观看的库键列表。键不存在=该账号未单独配置
+    # （按 acl_default 处理）；空列表=一个虚拟库都看不到。
+    "lib_acl": {},
+    # 未单独配置的账号默认是否可见虚拟库：True=全部可见（默认，不影响老用户）
+    "acl_default_visible": True,
+    # 未单独配置的账号是否可用“在线搜索/在线片源”：True=可用（默认）
+    "acl_default_online": True,
     "hot_library_title": "🌐在线热门",
     "hot_limit": 300,          # 四库合计保留条数上限
     "hot_per_source": 120,    # 每个资源站最多抓取的可播条目
     "hot_pages_per_source": 6,  # 每个资源站翻“最近更新”的页数（每页约20条）
     "hot_refresh_interval": 6 * 3600,
+    # —— 在线资源会话缓存 state/titles.json（issue #42：搜索越用越慢）——
+    # 该文件每次合并搜索结果都会落盘；机械盘/ARM 盒子写几十 MB 要数秒，直接拖慢搜索。
+    # 故同时给出「条数上限」和「字节上限」双重裁剪，并把落盘改为后台防抖异步写。
+    "titles_cache_max_entries": 4000,   # 最多保留多少条标题（超出丢最旧）
+    "titles_cache_max_mb": 4,          # 落盘文件 MB 硬上限（超出按最旧裁剪；0=不按字节限）
+    "titles_flush_debounce": 5,        # 落盘防抖秒数：脏后最多等这么久合并写一次（0=立即）
     # 源质量优先级：source_id -> 权重（越高越优先）。未列出的源取内省默认（见
     # providers.source_priority）。热门榜单点击搜源时按 (优先级, 直链数) 排序。
     "source_priority": {},
     # 热门资源解析是否优先高质量源（关闭则只按可播直链数）
     "prefer_quality_source": True,
+    # 自动优选（issue #4）：在源质量权重基础上，叠加实测健康度（死亡/高失败率/
+    # 慢的源排后），让能连通、延迟低的源默认排到更前。默认开启；关掉则只看质量权重。
+    "auto_best_source": True,
     "admin_token": "",
     # 仅用于「拉取订阅资源」的可选 HTTP(S) 代理（订阅配置 / spider jar / DRPY 脚本）。
     # 播放、聚合搜索、CMS 探测等一律不走此代理（产品客户端保持 trust_env=False 直连）。
     # 形如 http://user:pass@host:port ；留空表示直连。
     "subscription_proxy": "",
+    # 仅用于「访问资源站取源」（聚合搜索 / 分类深翻 / 测速探测 / CMS 详情）的可选
+    # HTTP(S) 代理。部分运营商直连资源站超时/被墙，挂代理可显著改善搜索结果与速度
+    # （issue #30）。播放、m3u8/分片等媒体流默认仍直连，不增加代理带宽压力。
+    # 形如 http://user:pass@host:port ；留空=直连。
+    "source_proxy": "",
+    # 资源站代理模式："off"=一律直连（忽略已配置代理）；"on"=所有取源都走代理；
+    # "auto"=默认直连，仅当某个资源站直连发生连接级失败（重置/超时/DNS等）时，
+    # 自动对该站切换到已配置代理重试，其余站点保持直连（推荐）。
+    "source_proxy_mode": "auto",
     # 检查/下载插件更新安装包时可选的 HTTP(S) 代理（仅更新用途）。
     # 留空则回退 subscription_proxy，再不行直连。仅存于本机 state，不随包分发。
     "update_proxy": "",
@@ -76,6 +116,9 @@ DEFAULTS = {
     "ad_filter_enabled": True,
     # 播放时动态检测（无订阅 rules 时，按 DISCONTINUITY 分段+时长/CDN/位置识别广告段）。
     "ad_filter_dynamic": True,
+    # 分片编码参数(SPS)指纹去广告：识别"重新编码拼接、无任何结构特征"的广告。
+    # 只读分片头 4~32KB，按块时长加权投票 + 多重守卫，判定不确定时绝不删。
+    "ad_filter_sps": True,
 }
 
 # 已废弃、需从旧配置里清除的键
@@ -156,6 +199,13 @@ class Config:
                 self._mtime = _STATE.stat().st_mtime
             except FileNotFoundError:
                 self._mtime = 0
+                # 首次安装（state/config.json 尚不存在）：把合并后的默认配置落盘一次。
+                # 否则干净安装后 status/管理页等依赖“文件存在”的路径会异常（见 issue #39）。
+                try:
+                    self._persist(cfg)
+                    self._mtime = _STATE.stat().st_mtime
+                except Exception:
+                    pass
 
     def maybe_reload(self):
         try:
@@ -255,6 +305,82 @@ class Config:
             cfg["subscription_proxy"] = p
             self._persist(cfg)
             return True, "ok"
+
+    def set_source_proxy(self, proxy_url: str) -> tuple[bool, str]:
+        """保存「资源站取源」专用代理（空串=直连），issue #30。
+        仅用于搜索/分类/探测/详情；不影响订阅抓取与媒体播放。"""
+        from urllib.parse import urlparse
+        p = (proxy_url or "").strip()
+        if p:
+            u = urlparse(p)
+            if u.scheme not in ("http", "https", "socks5", "socks5h") or not u.hostname:
+                return False, "代理地址格式应为 http://user:pass@host:port"
+        with _LOCK:
+            cfg = self.get()
+            cfg["source_proxy"] = p
+            self._persist(cfg)
+            return True, "ok"
+
+    def set_source_proxy_mode(self, mode: str) -> tuple[bool, str]:
+        """设置资源站代理模式：off/on/auto。"""
+        m = str(mode or "auto").strip().lower()
+        if m not in ("off", "on", "auto"):
+            return False, "模式须为 off/on/auto"
+        with _LOCK:
+            cfg = self.get()
+            cfg["source_proxy_mode"] = m
+            self._persist(cfg)
+            return True, "ok"
+
+    def source_proxy_mode(self) -> str:
+        try:
+            m = str(self.get().get("source_proxy_mode") or "auto").strip().lower()
+            return m if m in ("off", "on", "auto") else "auto"
+        except Exception:
+            return "auto"
+
+    def update_source(self, sid: str, name: str | None = None,
+                      api: str | None = None) -> tuple[bool, str]:
+        """编辑资源站的显示名称 / 订阅(API)链接。
+
+        - 改名：任意源均可；空名回退为域名。
+        - 改链接：仅自定义源（builtin=False）允许，内置源改链会破坏升级一致性，
+          如需自定义请删除后按新地址添加。新地址须 http(s) 且不能与其它源重复。
+        改 api 后该自定义源 id（由旧地址哈希生成）会一并重建为新地址的 id。"""
+        with _LOCK:
+            cfg = self.get()
+            target = next((s for s in cfg["sources"] if s["id"] == sid), None)
+            if not target:
+                return False, "源不存在"
+            if name is not None:
+                nm = str(name).strip()[:40]
+                if not nm:
+                    api0 = str(target.get("api", ""))
+                    nm = api0.split("/")[2] if "://" in api0 else str(target.get("name", "资源站"))
+                target["name"] = nm
+            if api is not None:
+                newapi = str(api).strip()
+                if not newapi.startswith(("http://", "https://")):
+                    return False, "API 地址需以 http(s):// 开头"
+                if target.get("builtin"):
+                    return False, "内置源不支持改链接，请删除后以自定义源重新添加"
+                norm = newapi.rstrip("/").lower()
+                if any(s["id"] != sid and
+                       s.get("api", "").rstrip("/").lower() == norm
+                       for s in cfg["sources"]):
+                    return False, "该资源站地址已存在"
+                new_id = self.make_custom_id(newapi)
+                if any(s["id"] == new_id for s in cfg["sources"] if s["id"] != sid):
+                    return False, "该资源站地址已存在"
+                target["api"] = newapi
+                target["id"] = new_id
+                # 同步迁移该源的独立库/优先级等按 id 记录的配置
+                pr = cfg.get("source_priority") or {}
+                if sid in pr:
+                    pr[new_id] = pr.pop(sid)
+                sid = new_id
+            self._persist(cfg)
+            return True, sid
 
     def set_standalone(self, sid: str, on: bool) -> tuple[bool, str]:
         with _LOCK:

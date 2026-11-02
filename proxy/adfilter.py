@@ -17,11 +17,13 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import threading
+import time
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import config as _cfg
 
@@ -425,10 +427,13 @@ def _detect_ad_blocks(text: str) -> tuple[str, int]:
 
 def filter_hls(text: str | None, media_url: str = "",
                use_heuristic: bool = True) -> tuple[str, int]:
-    """对一份 m3u8 文本去广告。
+    """对一份 m3u8 文本去广告（同步、不探测分片）。
 
     返回 (过滤后文本, 删除的媒体分片数估计)。任何异常都回退原文。
     子清单（master，含 #EXT-X-STREAM-INF）不做分片处理。
+
+    注意：识别"重新编码拼接、无任何结构特征"的广告需要读分片头 SPS，属于
+    网络异步操作，由 ``filter_hls_async`` 完成；本函数只跑零网络的规则层。
     """
     if not text or not enabled():
         return text or "", 0
@@ -464,6 +469,293 @@ def filter_hls(text: str | None, media_url: str = "",
         return text, removed
     except Exception:
         return original, 0
+
+
+# ---- 分片编码参数(SPS)指纹层：识别"重新编码拼接"的无特征广告 ---------------
+# 移植 MoonTV ad-filter/segment-media-probe（MIT）。只能由 filter_hls_async 调用。
+_SPS_HEAD_BYTES = 4 * 1024          # 首轮只读 4KB（实测 SPS 在分片前 1.4KB 内）
+_SPS_FALLBACK_BYTES = 32 * 1024     # 首轮没解析到再补读 32KB
+_SPS_MAX_AD_BLOCK_SECONDS = 300.0   # 超过此时长的块更可能是正文，不参与
+_SPS_MAX_BLOCKS = 120               # 块太多放弃探测，退化为结构判定
+_SPS_MIN_CANDIDATES = 3             # 候选块太少不做统计
+_SPS_CONCURRENCY = 12              # 探测并发
+_SPS_BUDGET_SECONDS = 6.0          # 整轮探测总时间预算
+_SPS_MIN_DOMINANT_RATIO = 0.75     # 正文指纹按【时长加权】至少占 75%
+_SPS_MAX_REMOVED_RATIO = 0.5       # 最多剔除总时长的 50%
+_SPS_WARMUP = 3                    # 前几块全失败（反盗链）就整体放弃
+_SPS_SEGMENTS_PER_BLOCK = 2        # 每块最多探前几个分片
+_SPS_CACHE_LIMIT = 2048
+_SPS_CACHE_TTL = 3600.0            # 成功指纹缓存 1h
+
+# 进程内分片指纹缓存：url -> (profile, ts)
+_sps_cache: dict[str, tuple[dict, float]] = {}
+_sps_inflight: dict[str, "asyncio.Future"] = {}
+_sps_cache_lock = threading.RLock()
+
+
+def sps_enabled() -> bool:
+    """SPS 编码指纹去广告开关，默认开启；可在管理页单独关闭。"""
+    try:
+        return bool(_cfg.config.get().get("ad_filter_sps", True))
+    except Exception:
+        return True
+
+
+def reset_sps_cache() -> None:
+    with _sps_cache_lock:
+        _sps_cache.clear()
+        _sps_inflight.clear()
+
+
+def _sps_cache_get(url: str):
+    with _sps_cache_lock:
+        ent = _sps_cache.get(url)
+        if not ent:
+            return None
+        prof, ts = ent
+        if time.time() - ts > _SPS_CACHE_TTL:
+            _sps_cache.pop(url, None)
+            return None
+        return prof
+
+
+def _sps_cache_put(url: str, prof: dict) -> None:
+    if not prof:
+        return
+    with _sps_cache_lock:
+        if len(_sps_cache) >= _SPS_CACHE_LIMIT:
+            _sps_cache.clear()
+        _sps_cache[url] = (prof, time.time())
+
+
+def _analyze_blocks(text: str):
+    """把点播 m3u8 切成 (tokens, blocks)。块以 #EXT-X-DISCONTINUITY 为界。
+
+    tokens: [("plain", 原始行), ("seg", 原始行列表, block_id)]，用于无损重建。
+    blocks: [{id, dur, uris:[绝对待解析的原始uri], n}]，仅含分片。
+    直播/主清单返回 None。
+    """
+    if "#EXT-X-STREAM-INF" in text or "#EXT-X-ENDLIST" not in text:
+        return None
+    lines = text.splitlines()
+    tokens: list = []
+    blocks: dict[int, dict] = {}
+    block_id = 0
+    pending: list[str] = []
+
+    def ensure(bid):
+        b = blocks.get(bid)
+        if b is None:
+            b = {"id": bid, "dur": 0.0, "uris": [], "n": 0}
+            blocks[bid] = b
+        return b
+
+    def flush():
+        nonlocal pending
+        if pending:
+            tokens.append(("plain", list(pending)))
+            pending = []
+
+    pending_dur = 0.0
+    for raw in lines:
+        s = raw.strip()
+        if not s:
+            pending.append(raw)
+            continue
+        if s == "#EXT-X-DISCONTINUITY":
+            flush()
+            block_id += 1
+            tokens.append(("plain", [raw]))
+            continue
+        if s.startswith("#"):
+            if s.startswith("#EXTINF"):
+                m = _EXTINF_DUR.search(s)
+                pending_dur = float(m.group(1)) if m else 0.0
+            pending.append(raw)
+            continue
+        # 分片 URL
+        b = ensure(block_id)
+        b["dur"] += pending_dur
+        b["uris"].append(s)
+        b["n"] += 1
+        tokens.append(("seg", pending + [raw], block_id))
+        pending = []
+        pending_dur = 0.0
+    flush()
+    ordered = [blocks[k] for k in sorted(blocks) if blocks[k]["n"] > 0]
+    return tokens, ordered
+
+
+def _dominant_profile(weighted, min_ratio=_SPS_MIN_DOMINANT_RATIO):
+    """对成功样本按【块时长】加权投票，返回加权占比≥min_ratio 的指纹，否则 None。
+
+    weighted: [(profile, weight_seconds), ...]。按块时长而非块数加权——真实
+    点播里正文是数十分钟的长块、广告是几十秒短块，即便广告块数多也压不过
+    正文时长；遇到正文/广告等时长的畸形样本则因占比不足而放弃判定（不删）。
+    """
+    tally: dict[str, tuple[dict, float]] = {}
+    total = 0.0
+    for p, w in weighted:
+        if not p or not (w and w > 0):
+            continue
+        try:
+            import sps as _sps
+            k = _sps.profile_key(p)
+        except Exception:
+            continue
+        total += w
+        if k in tally:
+            prof, cur = tally[k]
+            tally[k] = (prof, cur + w)
+        else:
+            tally[k] = (p, w)
+    if not tally or total <= 0:
+        return None
+    _key, (prof, w) = max(tally.items(), key=lambda kv: kv[1][1])
+    if w / total < min_ratio:
+        return None
+    return prof
+
+
+def _rebuild_without_blocks(tokens, drop_ids: set, trailing_newline: bool) -> str:
+    out: list[str] = []
+    for tok in tokens:
+        if tok[0] == "seg" and tok[2] in drop_ids:
+            continue
+        if tok[0] == "seg":
+            out.extend(tok[1])
+        else:
+            out.extend(tok[1])
+    # 清理孤立/重复/打头的 DISCONTINUITY
+    cleaned: list[str] = []
+    for ln in out:
+        if ln.strip() == "#EXT-X-DISCONTINUITY":
+            if not cleaned or cleaned[-1].strip() == "#EXT-X-DISCONTINUITY":
+                continue
+        cleaned.append(ln)
+    while cleaned and cleaned[0].strip() == "#EXT-X-DISCONTINUITY":
+        cleaned.pop(0)
+    body = "\n".join(cleaned)
+    return body + ("\n" if trailing_newline else "")
+
+
+async def _probe_one(url, fetch_head, sem, deadline):
+    """读一个分片的头并解析 SPS；任何失败/超时返回 None（不做判定）。
+
+    成功结果按 url 缓存 TTL。单次探测独立执行（不做跨调用 in-flight 合并，
+    避免共享 Future 在时间预算耗尽后被误复用）；同一份播放列表内一个 URL
+    只会被取一次，缓存已足够去重。
+    """
+    cached = _sps_cache_get(url)
+    if cached is not None:
+        return cached
+    try:
+        async with sem:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            import sps as _sps
+            prof = None
+            first_head = await fetch_head(
+                url, _SPS_HEAD_BYTES,
+                timeout=min(4.0, max(0.5, remaining)))
+            if first_head:
+                prof = _sps.parse_media_profile_head(first_head)
+            # 4KB 没解析到 SPS：补读 32KB 兜底（SPS 偶尔靠后）
+            if prof is None and deadline - time.monotonic() > 0:
+                more_head = await fetch_head(
+                    url, _SPS_FALLBACK_BYTES,
+                    timeout=min(4.0, max(0.5, deadline - time.monotonic())))
+                if more_head:
+                    prof = _sps.parse_media_profile_head(more_head)
+            if prof:
+                _sps_cache_put(url, prof)
+            return prof
+    except Exception:
+        return None
+
+
+async def filter_hls_async(text, media_url, fetch_head, use_heuristic=True):
+    """先跑零网络规则层，再用分片 SPS 指纹层补识别"无特征重编码广告"。
+
+    fetch_head: async (absolute_segment_url, limit_bytes, timeout) -> bytes|None，
+                由 app 提供（复用取源/防盗链头与直连策略，只 Range 读头）。
+    返回 (text, removed)。探测失败/样本不足/占比不达标时只保留规则层结论。
+    """
+    # 规则层（同步）
+    text, removed = filter_hls(text, media_url, use_heuristic=use_heuristic)
+    if not text or not sps_enabled():
+        return text, removed
+    try:
+        import sps as _sps
+        analyzed = _analyze_blocks(text)
+        if not analyzed:
+            return text, removed
+        tokens, blocks = analyzed
+        # 所有有分片的块都参与：正文是分钟级长块、广告是几十秒短块，
+        # 靠【时长加权】投票 + 占比守卫区分，不按块时长排除（否则会把正文排除、
+        # 反而让广告块成为投票多数）。
+        candidates = [b for b in blocks if b["dur"] > 0]
+        if not (_SPS_MIN_CANDIDATES <= len(candidates) <= _SPS_MAX_BLOCKS):
+            return text, removed
+
+        sem = asyncio.Semaphore(_SPS_CONCURRENCY)
+        deadline = time.monotonic() + _SPS_BUDGET_SECONDS
+
+        async def probe_block(b):
+            for uri in b["uris"][:_SPS_SEGMENTS_PER_BLOCK]:
+                if time.monotonic() >= deadline:
+                    return None
+                try:
+                    absu = urljoin(media_url, uri)
+                except Exception:
+                    continue
+                p = await _probe_one(absu, fetch_head, sem, deadline)
+                if p:
+                    return (b, p)
+            return None
+
+        # warmup：前几块全失败（典型反盗链 403）就不铺开，避免刷请求
+        warmup = await asyncio.gather(
+            *[probe_block(b) for b in candidates[:_SPS_WARMUP]])
+        if all(x is None for x in warmup):
+            return text, removed
+        rest = []
+        if len(candidates) > _SPS_WARMUP:
+            rest = await asyncio.gather(
+                *[probe_block(b) for b in candidates[_SPS_WARMUP:]])
+        entries = [e for e in (*warmup, *rest) if e]
+
+        # 覆盖率守卫：至少一半块（且≥3）读到指纹，否则不判
+        need = max(3, (len(candidates) + 1) // 2)
+        if len(entries) < need:
+            return text, removed
+
+        dominant = _dominant_profile([(p, b["dur"]) for b, p in entries])
+        if not dominant:
+            return text, removed
+
+        drop: set[int] = set()
+        for b, p in entries:
+            if not _sps.same_profile(p, dominant):
+                drop.add(b["id"])
+        if not drop:
+            return text, removed
+
+        total_dur = sum(b["dur"] for b in blocks)
+        drop_dur = sum(b["dur"] for b in blocks if b["id"] in drop)
+        total_n = sum(b["n"] for b in blocks)
+        drop_n = sum(b["n"] for b in blocks if b["id"] in drop)
+        # 守卫：删光 / 超过一半时长 / 超过一半分片 → 判定不可信，放弃
+        if drop_n >= total_n or (total_dur and drop_dur / total_dur > _SPS_MAX_REMOVED_RATIO):
+            return text, removed
+
+        new_text = _rebuild_without_blocks(tokens, drop, text.endswith("\n"))
+        if _segment_url_count(new_text) == 0:
+            return text, removed
+        return new_text, removed + drop_n
+    except Exception:
+        return text, removed
 
 
 # ---- 选集列表层：去掉“关注公众号/加微信/加群”等假选集广告 ----------------

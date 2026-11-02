@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 import httpx
 
 import features
+import netutil
 
 # 2026-10-17 国内直连实测（搜索+m3u8 直链可达性）。403/404 多为走 Clash 代理所致。
 DEFAULT_SOURCES: list[dict] = [
@@ -33,10 +34,42 @@ DEFAULT_SOURCES: list[dict] = [
 ]
 
 
+# 源质量默认权重（越高越优先；未列出取 0）。基于国内直连可达性、直链率与片单质量
+# 的经验初值，用户可在管理页「片源质量」整体覆盖（存 config.source_priority）。
+# 标准 CMS 站按口碑分档；新增自定义源默认 0。
+DEFAULT_PRIORITY: dict[str, int] = {
+    "baofeng": 40, "ffzy": 45, "guangsu": 40, "jisu": 38, "xinlang": 36,
+    "lzi": 30, "youku": 28, "dytt": 30, "wujin": 20, "ruyi": 20, "s360": 20,
+    "xiaoya": 55,
+}
+
+
+def default_source_priority(source: dict) -> int:
+    sid = source.get("id", "")
+    return DEFAULT_PRIORITY.get(sid, 0)
+
+
+def source_priority(source: dict, overrides: dict | None = None) -> int:
+    """源的有效质量权重：用户覆盖优先，否则内省默认。公开/私有构建通用，
+    不能放进 PRIVATE 剥离块（管理页与播放排序在 lite 包也会调用）。"""
+    sid = source.get("id", "")
+    if overrides and sid in overrides:
+        try:
+            return int(overrides[sid])
+        except (TypeError, ValueError):
+            pass
+    return default_source_priority(source)
+
+
+
 HTTP_TIMEOUT = 12.0
 # 加固（真机）搜索单源硬超时：聚合搜索要 gather 全部源，真机卡顿不能拖垮整体。
 # 取较短值让慢加固源快速失败，纯 CMS 源通常 5s 内返回，不影响热榜片起播。
 GUARD_SEARCH_TIMEOUT = 8.0
+# 普通 csp spider jar / drpy 真机源同样走 redroid，to_thread 本身无超时；
+# 几十源抢 3 台设备时单源可能长时间不返回，必须给硬超时，否则 gather 永久挂住。
+SPIDER_SEARCH_TIMEOUT = 8.0
+DRPY_SEARCH_TIMEOUT = 8.0
 _DIRECT_RE = re.compile(r"^https?://", re.I)
 _MEDIA_RE = re.compile(r"\.(m3u8|mp4|flv|mkv|ts)(\?|$)", re.I)
 # 可由自有账号转存原画播放的网盘分享链接（夸克 / UC）。
@@ -280,11 +313,10 @@ async def probe_source(api: str, keyword: str = "庆余年",
         return {"ok": False, "status": 0, "elapsed_ms": 0, "count": 0,
                 "sample": "", "error": "地址需以 http(s):// 开头"}
     try:
-        async with httpx.AsyncClient(follow_redirects=True,
-                                     trust_env=False) as client:
+        async with netutil.async_client(timeout=timeout) as client:
             r = await client.get(
                 api, params={"ac": "detail", "wd": keyword},
-                headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
+                headers={"User-Agent": "Mozilla/5.0"})
             ms = int((time.monotonic() - t0) * 1000)
             if r.status_code != 200:
                 return {"ok": False, "status": r.status_code,
@@ -311,11 +343,10 @@ async def probe_source(api: str, keyword: str = "庆余年",
     if not lst:
         # 接口合法但该词无结果，再试分类列表确认源活着
         try:
-            async with httpx.AsyncClient(follow_redirects=True,
-                                         trust_env=False) as client:
+            async with netutil.async_client(timeout=timeout) as client:
                 r2 = await client.get(
                     api, params={"ac": "list", "pg": 1},
-                    headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
+                    headers={"User-Agent": "Mozilla/5.0"})
                 j2 = r2.json()
             if isinstance(j2, dict) and j2.get("code") in (1, "1"):
                 return {"ok": True, "status": 200, "elapsed_ms": ms,
@@ -338,14 +369,39 @@ async def probe_source(api: str, keyword: str = "庆余年",
 
 
 
-async def search_all(keyword: str, sources=None) -> list[OnlineTitle]:
+async def search_all(keyword: str, sources=None,
+                     soft_timeout: float | None = None) -> list[OnlineTitle]:
+    """聚合搜索所有启用源。
+
+    soft_timeout：软超时（秒）。给定时用 as_completed 在预算内逐个收割已完成
+    的源，到点立即返回**已拿到的部分结果**，未完成的源在后台继续、其迟到结果
+    本次丢弃（不 await、不取消，避免 CancelledError 干扰设备池）。为 None 时
+    行为与原来一致（gather 等全部完成）。用于全局搜索框这种“宁要大部分、
+    不要因单个慢源而整块超时清空”的短预算场景。"""
     sources = sources or DEFAULT_SOURCES
     enabled = [s for s in sources if s.get("enabled")]
-    async with httpx.AsyncClient(follow_redirects=True, trust_env=False) as client:
+    async with netutil.async_client() as client:
         tasks = []
         for s in enabled:
             tasks.append(search_source(client, s, keyword))
-        results = await __import__("asyncio").gather(*tasks, return_exceptions=True)
+        import asyncio as _aio
+        if soft_timeout is None or not tasks:
+            results = await _aio.gather(*tasks, return_exceptions=True)
+        else:
+            # 软超时（仅全局搜索的纯 CMS fast 路径使用）：给每个源套一个略小于
+            # 总预算的硬上限，单源超时即视为该源本次无结果，gather 因此一定在
+            # soft_timeout 内结束、且能保留所有及时返回源的结果（不会因一个慢源
+            # 而整块清空）。超时任务内部的 HTTP 请求随后自行取消，不残留。
+            per = max(0.5, soft_timeout - 0.3)
+
+            async def _cap(coro):
+                try:
+                    return await _aio.wait_for(coro, timeout=per)
+                except Exception:
+                    return None
+
+            results = await _aio.gather(
+                *[_cap(t) for t in tasks], return_exceptions=True)
     titles: list[OnlineTitle] = []
     for r in results:
         if isinstance(r, list):

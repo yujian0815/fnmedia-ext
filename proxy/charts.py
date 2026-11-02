@@ -337,6 +337,19 @@ class ChartCache:
         with self._lock:
             return list(self._charts.get(cat, ()))
 
+    def reset(self) -> None:
+        """清空榜单缓存（管理页一键清缓存）：内存置空并删除落盘文件，
+        下次访问由后台任务重新抓取。"""
+        with self._lock:
+            self._charts = {c: [] for c, _, _ in CHART_CATEGORIES}
+            self._index = {}
+            self._meta = {"updated_at": 0, "provider_ok": 0,
+                          "provider_total": 0, "last_error": "已手动清空"}
+            try:
+                STATE.unlink(missing_ok=True)
+            except Exception:
+                pass
+
     def get_guid(self, guid: str) -> dict | None:
         with self._lock:
             return self._index.get(guid)
