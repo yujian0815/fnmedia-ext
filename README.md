@@ -33,6 +33,17 @@
 
 ## 工作原理
 
+### T4 远程来源（独立集成系列，尚未发布）
+
+管理页「资源站」可导入含 `type=4` 的订阅，启用后在「T4 选片」浏览插件目录，
+也可通过原生搜索选片。爬虫运行与取链在远程 T4/Sidecar，视频由客户端解码；
+不安装 Android/JAR/JS 爬虫运行时。
+
+当前系列尚待 NAS 与 App/TV/Web 真机回归，不代表公开发布版本已具备该功能。
+模块与合入顺序见 [T4 系列](docs/T4_SERIES.md)，
+[CMS 共存/选路/回退](docs/T4_COEXISTENCE.md) 和
+[最小真机清单](docs/T4_ACCEPTANCE.md)。既有部署方式、更新源及版本号保持上游设置。
+
 ```
 浏览器/飞牛App → nginx(/v) → /var/run/trim_media.sock → fnmedia-ext(FastAPI)
                                                    ├─ 普通请求 → 透传官方后端(upstream socket)
