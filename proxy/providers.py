@@ -90,6 +90,8 @@ class Episode:
     # play_from 是该集所属线路标识，解码必须一并上送（公开构建下恒为 False）
     xsrc: bool = False
     play_from: str = ""
+    t4: bool = False
+    episode_key: str = ""
 
 
 @dataclass
@@ -108,6 +110,7 @@ class OnlineTitle:
     actor: str
     director: str
     sources: dict          # {播放线路名: [Episode,...]}
+    locator: dict = field(default_factory=dict)
 
     @property
     def online_id(self) -> str:
@@ -187,6 +190,14 @@ def _site_root(api: str) -> str:
 
 async def search_source(client: httpx.AsyncClient, source: dict,
                         keyword: str) -> list[OnlineTitle]:
+    if source.get("kind") == "t4":
+        import logging
+        import t4
+        try:
+            return await t4.search(client, source, keyword)
+        except t4.T4Error as exc:
+            logging.getLogger("fnmedia").warning("T4 search %s: %s", source["id"], exc)
+            return []
     params = {"ac": "detail", "wd": keyword}
     try:
         r = await client.get(source["api"], params=params,
@@ -304,10 +315,14 @@ async def resolve_share(client: httpx.AsyncClient, page_url: str,
 
 
 async def probe_source(api: str, keyword: str = "庆余年",
-                       timeout: float = 8.0) -> dict:
+                       timeout: float = 8.0, source: dict | None = None) -> dict:
     """探测一个苹果CMS资源站是否可用。
     返回 {ok,status,elapsed_ms,count,sample,error}。"""
     api = (api or "").strip()
+    if source and source.get("kind") == "t4":
+        import t4
+        async with httpx.AsyncClient(trust_env=False) as client:
+            return await t4.probe(client, source, timeout)
     t0 = time.monotonic()
     if not api.startswith(("http://", "https://")):
         return {"ok": False, "status": 0, "elapsed_ms": 0, "count": 0,
@@ -370,38 +385,39 @@ async def probe_source(api: str, keyword: str = "庆余年",
 
 
 async def search_all(keyword: str, sources=None,
-                     soft_timeout: float | None = None) -> list[OnlineTitle]:
-    """聚合搜索所有启用源。
-
-    soft_timeout：软超时（秒）。给定时用 as_completed 在预算内逐个收割已完成
-    的源，到点立即返回**已拿到的部分结果**，未完成的源在后台继续、其迟到结果
-    本次丢弃（不 await、不取消，避免 CancelledError 干扰设备池）。为 None 时
-    行为与原来一致（gather 等全部完成）。用于全局搜索框这种“宁要大部分、
-    不要因单个慢源而整块超时清空”的短预算场景。"""
-    sources = sources or DEFAULT_SOURCES
+                     soft_timeout: float | None = None,
+                     *, budget: float | None = None) -> list[OnlineTitle]:
+    """限并发收集搜索结果，保留上游软超时入口并取消未完成请求。"""
+    import asyncio
+    from itertools import zip_longest
+    sources = DEFAULT_SOURCES if sources is None else sources
     enabled = [s for s in sources if s.get("enabled")]
+    # Imported T4 sources must not wait behind every built-in CMS slow request.
+    remote = [s for s in enabled if s.get("kind") == "t4"]
+    legacy = [s for s in enabled if s.get("kind") != "t4"]
+    scheduled = [s for pair in zip_longest(remote, legacy) for s in pair if s is not None]
+    sem = asyncio.Semaphore(8)
+    if budget is None:
+        budget = soft_timeout
     async with netutil.async_client() as client:
-        tasks = []
-        for s in enabled:
-            tasks.append(search_source(client, s, keyword))
-        import asyncio as _aio
-        if soft_timeout is None or not tasks:
-            results = await _aio.gather(*tasks, return_exceptions=True)
-        else:
-            # 软超时（仅全局搜索的纯 CMS fast 路径使用）：给每个源套一个略小于
-            # 总预算的硬上限，单源超时即视为该源本次无结果，gather 因此一定在
-            # soft_timeout 内结束、且能保留所有及时返回源的结果（不会因一个慢源
-            # 而整块清空）。超时任务内部的 HTTP 请求随后自行取消，不残留。
-            per = max(0.5, soft_timeout - 0.3)
-
-            async def _cap(coro):
-                try:
-                    return await _aio.wait_for(coro, timeout=per)
-                except Exception:
-                    return None
-
-            results = await _aio.gather(
-                *[_cap(t) for t in tasks], return_exceptions=True)
+        async def one(source):
+            async with sem:
+                return await search_source(client, source, keyword)
+        tasks = [asyncio.create_task(one(s)) for s in scheduled]
+        try:
+            if budget is None:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+            elif tasks:
+                done, _pending = await asyncio.wait(tasks, timeout=budget)
+                results = [task.result() for task in tasks if task in done
+                           and not task.cancelled() and task.exception() is None]
+            else:
+                results = []
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
     titles: list[OnlineTitle] = []
     for r in results:
         if isinstance(r, list):

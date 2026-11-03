@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64 as _b64
 
 import providers
+import t4
 from store import (make_guid, media_guid, video_guid,
                    season_guid, episode_guid, ep_media_guid, ep_video_guid)
 
@@ -50,6 +51,13 @@ _MOVIE_TYPE_WORDS = ("电影", "影片", "剧情片", "动作片", "喜剧片", 
                      "恐怖片", "纪录片")
 
 
+def media_type_name(primary: str, fallback: str = "") -> str:
+    for value in (primary, fallback):
+        if any(word in (value or "") for word in _MOVIE_TYPE_WORDS + _TV_TYPE_WORDS):
+            return value
+    return primary or fallback or ""
+
+
 def is_tv(b: dict) -> bool:
     typ = (b.get("type_name") or "").strip()
     # 明确的电影类型（含动画电影、纪录片等）一律作为单部电影点开即播。
@@ -60,6 +68,8 @@ def is_tv(b: dict) -> bool:
     if "综艺" in typ and _ep_count(b) <= 1:
         return False
     if any(w in typ for w in _TV_TYPE_WORDS):
+        if b.get("locator", {}).get("kind") == "t4" and not b.get("lines"):
+            return True
         return _ep_count(b) > 0
     return _ep_count(b) > 1
 
@@ -106,6 +116,7 @@ def brief_of(t: providers.OnlineTitle) -> dict:
         "director": t.director,
         "area": t.area,
         "lines": {name: [e.__dict__ for e in eps] for name, eps in t.sources.items()},
+        "locator": t.locator,
     }
 
 
@@ -114,7 +125,22 @@ def _f(b: dict, k, d=""):
 
 
 def _ep_count(b: dict) -> int:
+    if b.get("locator", {}).get("kind") == "t4":
+        import store as _st
+        if _st.store.get_title_by_guid(b["guid"]) is b:
+            return _st.store.episode_count(b["guid"])
+        keys = set()
+        for line, eps in b.get("lines", {}).items():
+            keys.update(key for key, ep in t4.playlist_entries(eps, line))
+        return len(keys)
     return sum(len(e) for e in b.get("lines", {}).values())
+
+
+def _season_count(b: dict) -> int:
+    if b.get("locator", {}).get("kind") == "t4":
+        import store as _st
+        return len(_st.store.seasons(b["guid"])) or 1
+    return 1
 
 
 ONLINE_TAG = "【在线】"
@@ -183,14 +209,15 @@ def search_item(b: dict) -> dict:
         "season_number": 0,
         "episode_number": 0,
         "air_date": year,
-        "number_of_seasons": 1 if typ == "TV" else 0,
+        "number_of_seasons": _season_count(b) if typ == "TV" else 0,
         "number_of_episodes": nep,
         "local_number_of_seasons": 0,
         "local_number_of_episodes": 0,
         "status": "在线",
         "overview": _f(b, "overview")[:500],
         "ancestor_guid": "",
-        "ancestor_name": f"🌐在线·{year}·{area}" if area else "🌐在线资源",
+        "ancestor_name": b.get("locator", {}).get("source_name") or
+        (f"🌐在线·{year}·{area}" if area else "🌐在线资源"),
         "ancestor_category": typ,
         "ts": 0,
         "duration": 0,
@@ -234,7 +261,7 @@ def detail_item(b: dict) -> dict:
         "watched_ts": 0,
         "air_date": year,
         "season_number": 0,
-        "number_of_seasons": 1 if typ == "TV" else 0,
+        "number_of_seasons": _season_count(b) if typ == "TV" else 0,
         "number_of_episodes": nep,
         "local_number_of_episodes": 0,
         "local_number_of_seasons": 0,
@@ -272,20 +299,56 @@ def _base_item(**kw):
     return d
 
 
+def _series_metadata(b: dict) -> dict:
+    detail = detail_item(b)
+    result = {key: detail[key] for key in (
+        "posters", "backdrops", "overview", "vote_average", "release_date",
+        "air_date", "production_countries", "genres", "number_of_seasons")}
+    result["poster"] = detail["posters"]
+    return result
+
+
+def episode_item(ep: dict, b: dict | None = None) -> dict:
+    if b is None:
+        import store as _st
+        b = _st.store.get_title_by_guid(ep["online_guid"]) or {}
+    eg = ep["ep_guid"]
+    data = _base_item(
+        guid=eg, type="Episode", title=ep.get("ep_title", ""),
+        parent_guid=ep.get("season_guid", ""),
+        parent_title=season_title(ep.get("season", 1)), tv_title=_f(b, "title"),
+        season_number=ep.get("season", 1),
+        episode_number=ep.get("episode_number", ep.get("index", 0) + 1),
+        can_play=1, play_item_guid=eg, play_error="",
+        media_guid=ep_media_guid(eg), video_guid=ep_video_guid(eg),
+        audio_guid="", subtitle_guid="")
+    if b:
+        data.update(_series_metadata(b))
+    return data
+
+
+def season_item(b: dict, season: dict) -> dict:
+    data = _base_item(
+        guid=season["guid"], type="Season", title=season_title(season["season"]),
+        parent_guid=b["guid"], parent_title=_f(b, "title"), tv_title=_f(b, "title"),
+        season_number=season["season"], episode_number=0,
+        number_of_episodes=len(season["episode_guids"]), can_play=None)
+    data.update(_series_metadata(b))
+    return data
+
+
 def season_list(b: dict) -> list[dict]:
-    """伪造 GET /season/list/:tvGuid -> 一个 Season。"""
+    """Build native seasons, retaining explicit T4 season identities."""
+    import store as _st
     guid = b["guid"]
-    nep = _ep_count(b)
-    sg = season_guid(guid)
-    return [_base_item(
-        guid=sg, type="Season", title="第 1 季", parent_guid=guid,
-        parent_title=_f(b, "title"), season_number=1, episode_number=0,
-        number_of_seasons=1, number_of_episodes=0, poster=_poster(_f(b, "poster")),
-        tv_title=_f(b, "title"), can_play=None, vote_average=_f(b, "score", "0") or "0",
-        release_date=_f(b, "year"), air_date=_f(b, "year"))]
+    return [season_item(b, season) for season in _st.store.seasons(guid)]
 
 
-def episode_list(b: dict) -> list[dict]:
+def season_title(number: int) -> str:
+    return f"第 {number} 季" if number else "特别内容"
+
+
+def episode_list(b: dict, season: int | None = None) -> list[dict]:
     """伪造 GET /episode/list/:seasonGuid -> 每一集。"""
     import store as _st
     guid = b["guid"]
@@ -293,18 +356,28 @@ def episode_list(b: dict) -> list[dict]:
     # 必须与 store._direct_eps 的过滤完全一致（direct 或可按需解析的 resolve 页），
     # 否则 episode/list 的第 i 张卡与 store 用同一 episode_guid(guid,"",i) 建立的
     # 集索引错位：点第 k 集播另一集，甚至 404。
-    eps = [e for e in b["lines"][line] if e.get("direct") or e.get("resolve")]
+    if b.get("locator", {}).get("kind") == "t4":
+        eps = [_st.store.get_episode(eg) for eg in _st.store.tv_episode_guids(guid)]
+        eps = [e for e in eps if season is None or e["season"] == season]
+    else:
+        eps = [e for e in b["lines"].get(line, [])
+               if e.get("direct") or e.get("resolve")]
     out = []
+    season_count = _season_count(b)
+    metadata = _series_metadata(b)
     for i, e in enumerate(eps):
-        eg = episode_guid(guid, "", i)  # 集身份不绑定线路
+        eg = e.get("ep_guid") or _st.store.episode_guid_at(guid, i)
+        sn = e.get("season", 1)
         out.append(_base_item(
             guid=eg, type="Episode",
-            title=e.get("title") or f"第{i+1}集",
-            parent_guid=season_guid(guid), parent_title="第 1 季",
-            tv_title=_f(b, "title"), season_number=1, episode_number=i + 1,
-            number_of_seasons=1, can_play=1, poster=_poster(_f(b, "poster")),
+            title=e.get("ep_title") or e.get("title") or f"第{i+1}集",
+            parent_guid=season_guid(guid, sn), parent_title=season_title(sn),
+            tv_title=_f(b, "title"), season_number=sn,
+            episode_number=e.get("episode_number", i + 1),
+            number_of_seasons=season_count, can_play=1, poster=_poster(_f(b, "poster")),
             media_guid=ep_media_guid(eg), video_guid=ep_video_guid(eg),
             audio_guid="", subtitle_guid=""))
+        out[-1].update(metadata)
     return out
 
 
@@ -341,12 +414,7 @@ def episode_play_info(ep: dict) -> dict:
         "audio_guid": "",
         "subtitle_guid": "",
         "media_guid": ep_media_guid(eg),
-        "item": {
-            "guid": eg, "type": "Episode", "title": ep.get("ep_title", ""),
-            "can_play": 1, "season_number": ep.get("season", 1),
-            "episode_number": ep.get("index", 0) + 1,
-            "parent_guid": ep.get("season_guid", ""),
-        },
+        "item": episode_item(ep),
         "direct_link_audio_index": -1,
     }
 
@@ -423,9 +491,9 @@ def history_item(brief: dict, rec: dict, ep: dict | None = None) -> dict:
         item_guid = ep["ep_guid"]
         typ = "Episode"
         tv_title = title
-        parent_title = "第 1 季"
-        season_number = 1
-        episode_number = ep.get("index", 0) + 1
+        season_number = ep.get("season", 1)
+        parent_title = season_title(season_number)
+        episode_number = ep.get("episode_number", ep.get("index", 0) + 1)
         display = ep.get("ep_title") or f"第{episode_number}集"
     else:
         item_guid = brief["guid"]
@@ -442,7 +510,7 @@ def history_item(brief: dict, rec: dict, ep: dict | None = None) -> dict:
         "guid": item_guid,
         "lan": "zh-CN", "imdb_id": "",
         "tv_title": tv_title,
-        "parent_guid": season_guid(brief["guid"]) if is_ep else "",
+        "parent_guid": season_guid(brief["guid"], season_number) if is_ep else "",
         "parent_title": parent_title,
         "title": display,
         "type": typ,
@@ -455,7 +523,7 @@ def history_item(brief: dict, rec: dict, ep: dict | None = None) -> dict:
                          "color_range_type": None},
         "season_number": season_number,
         "episode_number": episode_number,
-        "number_of_seasons": 1 if is_tv(brief) else 0,
+        "number_of_seasons": _season_count(brief) if is_tv(brief) else 0,
         "number_of_episodes": _ep_count(brief),
         "local_number_of_seasons": 0, "local_number_of_episodes": 0,
         "status": "在线",
