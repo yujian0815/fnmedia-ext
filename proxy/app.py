@@ -107,6 +107,15 @@ _PENDING_MEDIA_CHART: dict[str, str] = {}
 # 已确认暂无可播源的榜单片：短时间内不要反复全网搜索（TTL 10 分钟）。
 _CHART_FAILED_TS: dict[str, float] = {}
 _CHART_FAILED_TTL = 10 * 60
+# 浏览热门库时的后台预解析并发上限（仅限流预取，播放触发的解析不限流）
+_CHART_PREFETCH_SEM: "asyncio.Semaphore | None" = None
+
+
+def _chart_prefetch_sem() -> asyncio.Semaphore:
+    global _CHART_PREFETCH_SEM
+    if _CHART_PREFETCH_SEM is None:
+        _CHART_PREFETCH_SEM = asyncio.Semaphore(4)
+    return _CHART_PREFETCH_SEM
 
 # 海量分类片库（方案 C：按资源站分类深翻，每类数千部，无限滚动）。
 CATALOG_LIB_GUIDS: dict[str, str] = {
@@ -263,8 +272,12 @@ def chart_card(item: dict) -> dict:
     }
 
 
-def start_resolve_chart(guid: str) -> asyncio.Future | None:
-    """启动榜单 guid 的后台解析（单飞），立即返回在途 Future；不阻塞当前请求。"""
+def start_resolve_chart(guid: str, *, prefetch: bool = False) -> asyncio.Future | None:
+    """启动榜单 guid 的后台解析（单飞），立即返回在途 Future；不阻塞当前请求。
+
+    prefetch=True 表示“浏览热门库时提前解析”，受并发信号量限流（避免一次翻页
+    对十几个片名并发聚合搜索压垮源站）；播放链路上的即时解析(prefetch=False)
+    不限流，保证优先级。"""
     existing = store.get_title_by_guid(guid)
     if existing:
         return None
@@ -277,6 +290,19 @@ def start_resolve_chart(guid: str) -> asyncio.Future | None:
     _chart_resolving[guid] = fut
 
     async def work():
+        _rel = None
+        if prefetch:
+            try:
+                await asyncio.wait_for(_chart_prefetch_sem().acquire(), timeout=30)
+                _rel = True
+            except Exception:
+                _rel = False
+            if not _rel:
+                # 限流排队超时：放弃这次预取（不置失败，播放时仍会正常解析）
+                _chart_resolving.pop(guid, None)
+                if not fut.done():
+                    fut.set_result(None)
+                return
         try:
             item = chart_cache.get_guid(guid)
             if not item:
@@ -284,19 +310,30 @@ def start_resolve_chart(guid: str) -> asyncio.Future | None:
                 return
             briefs = await asyncio.wait_for(
                 _aggregate_briefs(item["title"], 12), timeout=25)
-            # 相关性：归一化片名必须包含完整榜单片名（分词全部命中），否则视为无源
+            # 严格防串片：规范片名必须【完全相等】，且榜单有年份时年份必须一致。
+            # 不做子串包含、不做 briefs[0] 宽松兜底——同名老片/短片/不同版本曾因此
+            # 被绑到榜单卡片，切线路播出与海报不符的另一部片。
             want = _norm_title(item["title"])
-            want_tokens = [_norm_title(t) for t in re.split(r"[\s]+", item["title"]) if _norm_title(t)]
-            best = None
-            for b in briefs:
-                n = _norm_title(b.get("title", ""))
-                if n and (want in n or (len(want_tokens) > 1
-                                        and all(tok in n for tok in want_tokens))):
-                    best = b
-                    break
+            want_year = str(item.get("year") or "")
+
+            def _same_title_year(b: dict) -> bool:
+                if _norm_title(b.get("title", "")) != want:
+                    return False
+                by = str(b.get("year") or "")
+                if want_year and by and by != want_year:
+                    return False
+                return True
+
+            same = [b for b in briefs if _same_title_year(b)]
+            # 榜单有年份时只接受同年；源普遍缺年份则退而求其次（仅同年或双方都缺年）
+            if want_year and same and \
+                    all(str(b.get("year") or "") == "" for b in same):
+                # 同名结果全部缺年份：无法证伪，按线路数最多者取（保持可播率）
+                pass
+            best = same[0] if same else None
             if best is None and briefs:
-                # 宽松兜底：取线路最多者（片名归一后高度重叠）
-                best = briefs[0]
+                _log.info("榜单《%s》%s 无严格同名同年源，放弃绑定(不串片)",
+                          item.get("title"), want_year)
             if best is not None:
                 # 关键：把可播放 brief 的身份换成 chart guid，使播放链挂到榜单卡片
                 bound = dict(best)
@@ -315,6 +352,8 @@ def start_resolve_chart(guid: str) -> asyncio.Future | None:
             fut.set_result(None)
         finally:
             _chart_resolving.pop(guid, None)
+            if _rel:
+                _chart_prefetch_sem().release()
 
     asyncio.create_task(work())
     return fut
@@ -337,7 +376,94 @@ async def resolve_chart(guid: str) -> dict | None:
 def chart_guid_by_media(mg: str) -> str:
     """识别 media_guid 是否属于榜单/热门片（包括秒进时尚未绑定完成的）。"""
     og = _PENDING_MEDIA_CHART.get(mg) or store.online_guid_by_media(mg)
-    return og if og and chart_cache.is_chart_guid(og) else ""
+    if og and chart_cache.is_chart_guid(og):
+        return og
+    # 重启后 _PENDING_MEDIA_CHART 已清空、记录也未绑定：mg 是 media_guid(chart_guid)
+    # 的确定性哈希，直接在榜单缓存里反查，保证占位自修复通道仍能找到并触发绑定。
+    return _chart_guid_scan(mg)
+
+
+def _chart_guid_scan(mg: str) -> str:
+    try:
+        for cat, _t, _c in chartmod.CHART_CATEGORIES:
+            for it in chart_cache.items(cat):
+                g = it.get("guid")
+                if g and (media_guid(g) == mg or video_guid(g) == mg):
+                    return g
+    except Exception:
+        return ""
+    return ""
+
+
+# 普通库片“补齐全网同名线路”的后台状态（与榜单绑定分开，避免误判失败）：
+# og -> 上次尝试时间。成功合并更多线路后线路已在记录内，可短周期复查新源。
+_LINE_FILL_TS: dict[str, float] = {}
+_LINE_FILL_TTL = 10 * 60
+_LINE_FILL_MIN = 6   # 记录内线路数达到该值即视为已较全，不再补
+
+
+def start_fill_lines(og: str) -> None:
+    """播放普通库片时，后台按片名全网聚合，把同名同部影片的更多 CMS 线路并入
+    当前记录（让非热门库也能像热门库一样显示完整、名称规范的线路菜单）。
+
+    非阻塞：第一次请求先用记录内既有线路秒播，聚合完成后下次取 preset/重开菜单
+    即看到完整线路。只补标准 CMS 直链源（fast），不触碰网盘/加固慢源。"""
+    if not og or chart_cache.is_chart_guid(og):
+        return
+    now = time.time()
+    if now - _LINE_FILL_TS.get(og, 0) < _LINE_FILL_TTL:
+        return
+    cur = store.get_title_by_guid(og) or {}
+    if len(cur.get("lines") or {}) >= _LINE_FILL_MIN:
+        _LINE_FILL_TS[og] = now
+        return
+    _LINE_FILL_TS[og] = now
+
+    async def work():
+        try:
+            title = cur.get("title") or ""
+            want_year = str(cur.get("year") or "")
+            want = _norm_title(title)
+            if not want:
+                return
+            briefs = await asyncio.wait_for(
+                _aggregate_briefs(title, maxn=20, fast_only=True,
+                                  soft_timeout=6.0), timeout=12)
+            # 选同名同部：规范名【完全相等】；年份强一致——当前记录有年份时只接受
+            # 同年候选（候选缺年份也不并入），双方都缺年份才放宽，防止同名不同片串源。
+            pick = None
+            for b in briefs:
+                nb = _norm_title(b.get("title", ""))
+                by = str(b.get("year") or "")
+                if nb != want:
+                    continue
+                if (want_year or by) and by != want_year:
+                    continue
+                if pick is None or len(b.get("lines") or {}) > \
+                        len(pick.get("lines") or {}):
+                    pick = b
+            if not pick:
+                return
+            merged = dict(cur)
+            lines = dict(cur.get("lines") or {})
+            added = 0
+            for lk, eps in (pick.get("lines") or {}).items():
+                if not eps or lk in lines:
+                    continue
+                lines[lk] = eps
+                added += 1
+            if not added:
+                return
+            merged["lines"] = lines
+            # 保持当前记录身份（og 不变，播放链/历史不断），只扩充线路
+            merged["guid"] = og
+            store.remember_merged([merged])
+            _log.info("补线: 《%s》 +%d 条 (共 %d 条线路)",
+                      title, added, len(lines))
+        except Exception:
+            _log.info("补线失败 og=%s", og, exc_info=True)
+
+    asyncio.create_task(work())
 
 
 async def resolve_chart_by_media(mg: str) -> dict | None:
@@ -910,13 +1036,10 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
             year_votes[nt][t.year] = year_votes[nt].get(t.year, 0) + 1
 
     def _group_key_for(ntitle: str, year: str) -> tuple:
-        if year:
-            return (ntitle, year)
-        votes = year_votes.get(ntitle)
-        if votes:
-            best_year = max(votes, key=votes.get)
-            return (ntitle, best_year)
-        return (ntitle, year)
+        # 年份是不同版本/同名片的硬边界。缺年份的源只与其他【同样缺年份】的同名
+        # 结果合并（独立成组），绝不再乐观并入“有年份且票数最多”的组——否则同名的
+        # 老片/短片/不同版本会被并进同一菜单，切线路就播成与海报不符的另一部片。
+        return (ntitle, year or "")
 
     for t, nt, playable in cand:
         key = _group_key_for(nt, t.year)
@@ -959,32 +1082,7 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
             return (base[0], -grade, lines_n, -fail, -avg_lat)
         return base
 
-    ranked_groups = sorted(groups.values(), key=_group_key, reverse=True)
-
-    def _is_pansou_group(g) -> bool:
-        return any("pansou" in str(k).lower() for k in (g.get("lines") or {}))
-
-    # fast 全局搜索里给网盘聚合（PanSou）设名额上限：默认最多占一半，
-    # 避免高权重网盘组把所有 CMS 秒播直链源挤出前 N；剩余名额回填网盘组。
-    # 非 fast（榜单补源/全网回源）不限制。
-    pan_quota = maxn if not fast_only else max(1, maxn // 2)
-    ordered: list = []
-    _skipped_pan: list = []
-    for g in ranked_groups:
-        if len(ordered) >= maxn:
-            break
-        if _is_pansou_group(g):
-            npan = sum(1 for x in ordered if _is_pansou_group(x))
-            if npan >= pan_quota:
-                _skipped_pan.append(g)
-                continue
-        ordered.append(g)
-    # 名额有余（CMS 不足）时用网盘组补齐
-    for g in _skipped_pan:
-        if len(ordered) >= maxn:
-            break
-        ordered.append(g)
-
+    ordered = sorted(groups.values(), key=_group_key, reverse=True)[:maxn]
     briefs = []
     for g in ordered:
         brief = inj.brief_of(g["rep"])
@@ -1752,6 +1850,19 @@ async def item_list(request: Request):
     page_size, start, end = _page_args(body, len(all_rows))
     out_rows = all_rows[start:end]
     out_rows = clientmod.normalize_cards(out_rows, client)
+    # 浏览热门库本页卡片时，后台提前搜源绑定（不阻塞列表）。这样用户点进某部片时
+    # 多数已绑定，preset/main 不必现场等 9~25s 的榜单匹配，实现热门库也“秒播”。
+    # 仅预解析首页前若干张（通常就是屏幕可见区），避免一次性压垮聚合源。
+    try:
+        if start == 0:
+            _pre = [r.get("guid") for r in out_rows[:12] if r.get("guid")]
+            for g in _pre:
+                if chart_cache.is_chart_guid(g) and not store.get_title_by_guid(g) \
+                        and g not in _chart_resolving \
+                        and time.time() - _CHART_FAILED_TS.get(g, 0) >= _CHART_FAILED_TTL:
+                    start_resolve_chart(g, prefetch=True)
+    except Exception:
+        pass
     _payload = {"code": 0, "msg": "", "data": {
         "mdb_name": mdb_name,
         "mdb_category": mdb_cat,
@@ -2440,6 +2551,22 @@ async def media_range(mg: str, request: Request):
     _wrapper, is_hls = _guess_wrapper(target)
     q = urllib.parse.urlencode({"line": target["line"], "index": target["index"]})
     if is_hls:
+        # 普通库片：后台按片名补齐全网同名 CMS 线路（非阻塞），让线路菜单和热门库
+        # 一样完整、名称规范；本次仍用记录内既有线路秒播。
+        try:
+            _og = target.get("online_guid")
+            if _og and not chart_cache.is_chart_guid(_og):
+                start_fill_lines(_og)
+        except Exception:
+            pass
+        # 与 play/play 一致：后台立刻预热默认线路（解析+播放列表）。App 经 302 到
+        # preset 再到 auto main，这段时间足够把默认线清单抓热，首次 main 命中缓存
+        # 即秒播；否则冷启动要在竞速后才抓清单，首字节可能超过客户端~3s 超时
+        #（表现为首次播放失败、点重试才播）。
+        try:
+            _warm_playlist(mg, target, request)
+        except Exception:
+            pass
         return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{q}",
                                 status_code=302)
     return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/direct?{q}", status_code=302)
@@ -2491,8 +2618,9 @@ async def play_play(request: Request):
                 target = base_target
     else:
         target = base_target
-    # 起播体验：普通慢源此处【不同步解析】，先瞬时返回 HLS 让播放器进入加载页，
-    # 真正解析延迟到取 main.m3u8 / direct 时再做。
+    # 起播体验：此处【不再同步解析】播放页/302/专有解码（慢源要 1~3 秒，会把用户
+    # 卡在海报墙像“点了没反应”）。先瞬时返回播放地址让播放器立刻进入加载页转圈，
+    # 真正的解析延迟到播放器内部取 main.m3u8 / direct 时再做（那里本就有加载指示）。
     wrapper, is_hls = _guess_wrapper(target)
     q = urllib.parse.urlencode({"line": target["line"], "index": target["index"]})
     if is_hls:
@@ -2514,15 +2642,26 @@ async def play_play(request: Request):
         "not_supported_resolution": "", "supported_highest_resolution": ""}})
 
 
-@app.api_route(f"{ONLINE_PREFIX}/{{mg}}/direct", methods=["GET", "HEAD"])
+@app.get(f"{ONLINE_PREFIX}/{{mg}}/direct")
+def _direct_to_placeholder(mg: str, request: Request) -> RedirectResponse:
+    """直链(mp4)取流失败：302 回占位 master，播放器不弹错、线路菜单可手动切换。
+    带 ph=1，preset 见此标记直接回占位（不再给同一条坏线，避免重定向环）。"""
+    didx = int(request.query_params.get("index", 0) or 0)
+    return RedirectResponse(
+        f"{ONLINE_PREFIX}/{mg}/preset.m3u8?index={didx}&ph=1", status_code=302,
+        headers={"Cache-Control": "no-store", "X-fnmedia-Placeholder": "1"})
+
+
 async def direct_proxy(mg: str, request: Request):
     """mp4 等非 HLS 直链代理：同源、带 Range 支持（播放器 seek）。"""
     failed_g = await _await_pending_chart(mg)
     target = store.resolve_media_guid(mg)
     if not target:
-        if failed_g:
-            return Response("暂无可用在线片源", status_code=503)
-        return Response("not found", status_code=404)
+        # 未绑定/无源：302 到占位 master（HLS），保持播放器存活、菜单可切，不报硬错误
+        didx = int(request.query_params.get("index", 0) or 0)
+        return RedirectResponse(
+            f"{ONLINE_PREFIX}/{mg}/preset.m3u8?index={didx}", status_code=302,
+            headers={"Cache-Control": "no-store", "X-fnmedia-Placeholder": "1"})
     # direct 的 query 会显式带线路（HLS 预判为 MP4 时回跳而来）；必须解析该线路，
     # 不能沿用默认线路，否则可能拿到另一资源站的 HLS 而再次弹回，形成重定向环。
     qline = request.query_params.get("line")
@@ -2547,92 +2686,6 @@ async def direct_proxy(mg: str, request: Request):
                                     "index": target.get("index", 0)})
         return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{q}",
                                 status_code=302)
-    # 网盘原画直出 mp4（/v/api/ext/pan/<key>/play?fid=…）：不要在本端点二次流式
-    # 转发——StreamingResponse 会把 206 变成 Transfer-Encoding: chunked（丢
-    # Content-Length），飞牛播放器无法按 Range 解析时长/拖动，表现为有 206 字节
-    # 却不出画。直接 302 到该自有播放端点（同源，由它注入网盘 Cookie 并返回带
-    # Content-Length 的标准 206）。相对 Location 飞牛按当前域解析即可。
-    raw_src = target.get("url", "") or ""
-    if target.get("pan") and not target.get("m3u8") \
-            and raw_src.startswith("/v/api/ext/pan/"):
-        # 解析后 fid 已确定：实时问一次该文件是原画 mp4 还是只有转码 m3u8。
-        # 转码清单必须走 HLS 管道，否则 MP4 播放器拿到 #EXTM3U 文本无法播。
-        _meta = None
-        try:
-            _m = re.search(r"/pan/(?:([a-z]+)/)?play", raw_src)
-            _pkey = _m.group(1) or "quark"
-            _fid = urllib.parse.parse_qs(
-                urllib.parse.urlparse(raw_src).query).get("fid", [""])[0]
-            _pmod = None
-            if _fid:
-                pass  # lite 剥离下面的网盘模块导入后保留合法空体
-            if _pmod is not None:
-                _meta = await asyncio.to_thread(_pmod.playable, _fid)
-                if _meta.get("m3u8") or ".m3u8" in (
-                        _meta.get("url") or "").split("?", 1)[0].lower():
-                    qq = urllib.parse.urlencode(
-                        {"line": target["line"], "index": target.get("index", 0)})
-                    return RedirectResponse(
-                        f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{qq}", status_code=302,
-                        headers={"Cache-Control": "no-store"})
-        except Exception:
-            # 探测失败按原画 mp4 处理，交给 pan/play 自身内容协商
-            _meta = None
-        # HEAD：播放器常先探测总长度。用 1 字节 Range GET 从 content-range 取总长，
-        # 不下整片，回 200 + 正确 Content-Length + Accept-Ranges。
-        if request.method == "HEAD":
-            try:
-                async with httpx.AsyncClient(
-                        verify=False, trust_env=False,
-                        timeout=httpx.Timeout(40.0),
-                        follow_redirects=True) as _hc:
-                    _hr = await _hc.send(_hc.build_request(
-                        "GET", _self_url(raw_src), headers={"Range": "bytes=0-0"}),
-                        stream=True)
-                    _cr = _hr.headers.get("content-range", "")
-                    await _hr.aclose()
-                _tot = int(_cr.rsplit("/", 1)[-1]) if "/" in _cr else 0
-                return Response(
-                    status_code=200,
-                    headers={"Content-Length": str(_tot or 0),
-                             "Accept-Ranges": "bytes",
-                             "Content-Type": "video/mp4",
-                             "Access-Control-Allow-Origin": "*"})
-            except Exception:
-                return Response(status_code=200,
-                                headers={"Accept-Ranges": "bytes"})
-        # 原画 mp4：回环内联流式拉取 /pan/play（由它注入网盘 Cookie），并显式
-        # 回传 Content-Length / Content-Range。不要 302 过去——部分播放器跨二次
-        # 跳转处理相对 Location / 重带 Range 不一致，会拿到 206 却不出画。
-        try:
-            _h = {}
-            if request.headers.get("range"):
-                _h["Range"] = request.headers["range"]
-            _pcli = httpx.AsyncClient(verify=False, trust_env=False,
-                                     timeout=httpx.Timeout(60.0),
-                                     follow_redirects=True)
-            _up = await _pcli.send(
-                _pcli.build_request("GET", _self_url(raw_src),
-                                    headers=_h), stream=True)
-        except Exception as exc:  # noqa: BLE001
-            return Response(f"pan direct fail {type(exc).__name__}", status_code=502)
-        _keep = ("content-type", "content-length", "content-range",
-                 "accept-ranges", "last-modified", "etag")
-        _hh = {k: v for k, v in _up.headers.items() if k.lower() in _keep}
-        _hh["Access-Control-Allow-Origin"] = "*"
-
-        async def _pan_pump(_c=_pcli, _u=_up):
-            try:
-                async for _ch in _u.aiter_raw():
-                    yield _ch
-            finally:
-                await _u.aclose()
-                await _c.aclose()
-
-        return StreamingResponse(_pan_pump(), status_code=_up.status_code,
-                                 headers=_hh,
-                                 media_type=_up.headers.get("content-type",
-                                                            "video/mp4"))
     # 网盘原画直出 mp4：src 是本服务根相对地址，经回环自调用（注入网盘 Cookie）
     src_url = _self_url(src_url)
     fwd = dict(target.get("headers") or {})
@@ -2666,12 +2719,11 @@ async def direct_proxy(mg: str, request: Request):
                         "GET", target["url"], headers=fwd)
                     r = await ext_client(request).send(req, stream=True)
                 except Exception as exc2:
-                    return Response(f"direct fail {type(exc2).__name__}",
-                                    status_code=502)
+                    return _direct_to_placeholder(mg, request)
             else:
-                return Response(f"direct fail {type(exc).__name__}", status_code=502)
+                return _direct_to_placeholder(mg, request)
         else:
-            return Response(f"direct fail {type(exc).__name__}", status_code=502)
+            return _direct_to_placeholder(mg, request)
     # 上游明确 4xx/5xx（文件被删/鉴权失败）：记忆坏线，换线重定向重试
     if r.status_code >= 400 and _autofail_on():
         await r.aclose()
@@ -2687,7 +2739,7 @@ async def direct_proxy(mg: str, request: Request):
                                             "index": alt.get("index", 0)})
                 return RedirectResponse(
                     f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{q}", status_code=302)
-        return Response(f"direct upstream {r.status_code}", status_code=502)
+        return _direct_to_placeholder(mg, request)
     h = _safe_response_headers(r.headers, {"content-security-policy"})
     h["Access-Control-Allow-Origin"] = "*"
 
@@ -3090,34 +3142,6 @@ async def _probe_latency(cand: dict, request: Request,
         # 网盘播放代理按 fid 实时换链：转码档返回清单、原画直出 mp4，URL 无后缀，
         # 直接交给播放列表构建（build_hls）或轻量抓清单判定，避免误走 Range 探测。
         is_pan_proxy = "/v/api/ext/pan/" in url
-        # 网盘原画直出 mp4（pan=True 且非 m3u8）：用轻量 Range 验活，绝不能走下面
-        # 的 HLS 清单抓取（不带 Range 会整片下载，导致超时误判线路死）。
-        if is_pan_proxy and cand.get("pan") and not cand.get("m3u8"):
-            try:
-                req = cli.build_request(
-                    "GET", url, headers={**headers, "Range": _PROBE_RANGE})
-                r = await cli.send(req, follow_redirects=True)
-                try:
-                    status = r.status_code
-                    ctype = (r.headers.get("content-type") or "").lower()
-                    body = b""
-                    try:
-                        body = await r.aread()
-                    except Exception:
-                        pass
-                finally:
-                    try:
-                        await r.aclose()
-                    except Exception:
-                        pass
-            except Exception:
-                return None
-            if status >= 400:
-                return None
-            # 错误页/JSON 假活判死；正常 video/octet-stream 2xx/206 即可播
-            if "json" in ctype or "html" in ctype or body[:1] in (b"{", b"[", b"<"):
-                return None
-            return time.time() - t0
         if not is_m3u8 and not is_pan_proxy:
             try:
                 req = cli.build_request(
@@ -3504,21 +3528,40 @@ async def _race_fastest(picked: dict, request: Request) -> dict | None:
     try:
         timeout = float(config.get().get("line_fastest_timeout", 4.0))
         prefer = float(config.get().get("line_fastest_prefer", 0.25))
+        # 竞速【总预算】：绝不能等最慢的候选。飞牛客户端首字节约 3s 超时，
+        # 旧实现 gather 等全部候选(6条/并发4/单条4s)，遇慢线最坏~8s，导致首次
+        # 起播超时失败、重试才命中缓存秒回。总预算到点即用已完成候选里最快者。
+        budget = float(config.get().get("line_fastest_budget", 2.0))
     except Exception:
-        timeout, prefer = 4.0, 0.25
+        timeout, prefer, budget = 4.0, 0.25, 2.0
+    budget = min(budget, timeout)
     sem = asyncio.Semaphore(_RACE_CONCURRENCY)
 
     async def run(cand: dict):
         async with sem:
             lat = await asyncio.wait_for(
                 _probe_latency(cand, request, build_hls=False),
-                timeout=timeout)
+                timeout=budget)
         return cand, lat
 
-    results = await asyncio.gather(*[run(c) for c in cands],
-                                   return_exceptions=True)
-    ok = [(c, lat) for r in results
-          if isinstance(r, tuple) for (c, lat) in [r] if lat is not None]
+    tasks = [asyncio.ensure_future(run(c)) for c in cands]
+    try:
+        await asyncio.wait(tasks, timeout=budget,
+                           return_when=asyncio.ALL_COMPLETED)
+    finally:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+    ok = []
+    for t in tasks:
+        if not t.done():
+            continue
+        try:
+            r = t.result()
+        except Exception:
+            continue
+        if isinstance(r, tuple) and r[1] is not None:
+            ok.append(r)
     for c, _ in ok:
         _LINE_BAD.pop(_line_bad_key(c), None)  # 探活成功，清掉可能的旧坏线标记
     if not ok:
@@ -3623,6 +3666,30 @@ _PLAYLIST_CACHE: dict[str, tuple[float, str]] = {}
 _PLAYLIST_TTL = 120.0
 # 单飞：同一「集+线路」只允许一次在途抓取，预热与真正取 main 共用同一个 Future
 _PLAYLIST_FUT: dict[str, asyncio.Future] = {}
+# main 整条“解析+换线+建清单”的在途服务任务（mg|line|index -> Future）：慢源首个
+# 请求只等到预算，超时回占位但后台任务继续跑完并写播放列表缓存，后续轮询直接命中。
+_MAIN_SERVE_FUT: dict[str, asyncio.Future] = {}
+# 仅【慢源】（加固/爬虫/drpy/专有解码/小雅，常需十几秒解析）才用短预算先占位；普通
+# CMS 直链不用预算、直接等出正片（恢复秒播），只在真正抓不到时才回占位。
+try:
+    _MAIN_SLOW_BUDGET = float(config.get().get("main_ready_budget", 2.4))
+except Exception:
+    _MAIN_SLOW_BUDGET = 2.4
+_MAIN_SLOW_BUDGET = min(max(_MAIN_SLOW_BUDGET, 0.8), 2.8)
+
+
+def _is_slow_line(p: dict) -> bool:
+    """是否为解析很慢的非标准源（加固/爬虫/drpy/专有解码/小雅），需先占位后台自愈。
+    普通 CMS 直链（暴风/量子等 m3u8）返回 False，走直接秒播。"""
+    if not isinstance(p, dict):
+        return False
+    if p.get("guard") or p.get("spider_src") or p.get("drpy") \
+            or p.get("catvod"):
+        return True
+    if p.get("xsrc"):
+        return True
+    ln = str(p.get("line") or "")
+    return ln.startswith(("guard-", "spider-", "drpy-"))
 
 # 紧凑分片注册表：夸克/UC 转码 HLS 的签名分片 URL 极长（~600 字符，base64 后近千），
 # 一部 90 分钟的片子上千分片会撑出 1MB+ 的清单，且每个分片 URL 超长，经外网网关
@@ -3669,13 +3736,6 @@ async def _build_playlist_body(mg: str, picked: dict, request: Request):
     was_redirect = bool(picked.get("redirect"))
     await _resolve_if_needed(picked, request)
     src_url = _self_url(picked["url"])
-    # 网盘转存原画直出（/v/api/ext/pan/.../play?fid=…，URL 无后缀）：解析后已带
-    # pan=True 且 m3u8=False，必须【在抓取前】直接判非 HLS。否则 _fetch_playlist
-    # 不带 Range 去拉，等于下载整片（可达 1GB+），15s 超时→误判线路死→换线，
-    # 表现为播放器长时间转圈后报错。转码档 m3u8=True 才需要继续抓清单。
-    if picked.get("pan") and not picked.get("m3u8") \
-            and "/v/api/ext/pan/" in src_url:
-        return _NOT_HLS, None
     # 解析后若发现其实是 mp4 直链（wrapper 预判为 HLS 时的兜底），交由调用方 302
     if not re.search(r"\.m3u8(\?|$)", src_url, re.I) \
             and re.search(r"\.mp4(\?|$)", src_url, re.I):
@@ -3881,66 +3941,74 @@ def _warm_playlist(mg: str, picked: dict, request: Request) -> None:
     asyncio.create_task(_get_playlist_cached(mg, picked, request))
 
 
-def _warm_pan_resolve(picked: dict) -> None:
-    """后台预热网盘分享转存（单飞，复用 _resolve_guard 的结果缓存/在途表）。
-    play/play 不阻塞等待；播放器随后取 direct 时大概率已解析好，秒出。"""
-    if not picked or picked.get("pan"):
-        return  # 已是可播 fid，无需再转存
-    vod = str(picked.get("url", "") or "")
-    pv = _pan_match(vod)
-    if not pv:
-        return
-    key = "pan|%s|%s|%s" % (pv.get("key", ""), vod.split("?")[0],
-                           int(picked.get("index", 0) or 0))
-    if key in _GUARD_RES_CACHE or key in _GUARD_RES_INFLIGHT \
-            or key in _PAN_WARMING:
-        return
-
-    async def _do():
-        try:
-            p = dict(picked)
-            await asyncio.wait_for(_resolve_guard(p), timeout=40.0)
-            # 转存解析成功（拿到 /v/api/ext/pan/.../play?fid=）后立刻启动 ffmpeg
-            # 转封装会话预热首片，使播放器随后取 main.m3u8 时基本零等待。
-            if p.get("pan") and not p.get("m3u8"):
-                _u = str(p.get("url") or "")
-                _mm = re.search(r"/pan/(?:([a-z]+)/)?play", _u)
-                _ff = urllib.parse.parse_qs(
-                    urllib.parse.urlparse(_u).query).get("fid", [""])[0]
-                if _mm and _ff:
-                    try:
-                        pass  # lite 剥离后保留合法空体
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        finally:
-            _PAN_WARMING.discard(key)
-
-    _PAN_WARMING.add(key)
-    asyncio.create_task(_do())
-
-
 @app.get(f"{ONLINE_PREFIX}/{{mg}}/preset.m3u8")
 async def hls_preset(mg: str, request: Request):
-    failed_g = await _await_pending_chart(mg)
+    idx0 = int(request.query_params.get("index", 0) or 0)
+    # direct/mp4 取流失败回跳入口：直接给占位 master，不再枚举可能同样失效的线路
+    if request.query_params.get("ph") == "1":
+        return _placeholder_master_response(idx0)
+    # 榜单片可能尚未绑定：确保后台绑定任务已启动，但 preset【绝不长时间等待】
+    #（搜索最坏 25s，会先撞上客户端~3s 首字节超时，导致连占位都拿不到）。仅极短
+    # 等一下，未就绪立刻回占位 master，由 main(phwait) 继续等待并自动切正片。
+    _cg = chart_guid_by_media(mg)
+    if _cg and not store.resolve_media_guid(mg):
+        start_resolve_chart(_cg)
     picked = _pick_episode(mg, request)
     if not picked:
-        if failed_g:
-            return Response("暂无可用在线片源", status_code=503)
-        return Response("not found", status_code=404)
+        return _placeholder_master_response(idx0)
     # 起播即跳过已知坏线（用户显式选线除外）
     picked = _dodge_known_bad(picked, request)
     # 注意：此处不 await _resolve_if_needed —— preset 只输出线路变体菜单，
     # 播放页/跳转/专有解码延迟到该线路被选中取 main 时再做，避免拖慢首屏。
     # play/play 选定线路后会带 line/index；此时只输出该线路，避免与清晰度菜单重复
     explicit_line = request.query_params.get("line")
-    if explicit_line:
+    # 普通库片（非榜单、非手动选线）：后台按片名补齐全网同名 CMS 线路，使线路菜单
+    # 与热门库一样完整、名称规范。非阻塞，本次先用既有线路秒播，下次取菜单即完整。
+    if not explicit_line:
+        try:
+            _og = picked.get("online_guid") or store.online_guid_by_media(mg)
+            if _og:
+                start_fill_lines(_og)
+        except Exception:
+            pass
+    # 用户手动指定 PanSou 高清线：只输出这一条（真正搜索+转存延迟到取 main）。
+    if explicit_line == PANSOU_LINE:
+        # 标记“用户显式选择”：只有这条路径（线路菜单手点）才允许触发搜索/转存，
+        # 区别于 HLS 自适应码率自动选到 PanSou 变体。
+        _pansou_mark_user_pick(mg)
+        targets = [{
+            "url": "pansou://manual", "line": PANSOU_LINE,
+            "index": int(request.query_params.get("index", 0) or 0),
+            "headers": {}, "xsrc": True, "guard": False,
+            "_pansou_manual": True,
+        }]
+    elif explicit_line:
         # _pick_episode 已按 line/index 解析出该线路完整 target（含
-        # redirect/resolve/xsrc 标志）；这里原样使用，真正解析推迟到取 main 时。
-        targets = [picked]
+        # redirect/resolve/xsrc 标志）。App/Flutter 起播的 302 总会带显式 line，
+        # 若只回这一条，播放器线路菜单就只有当前线、也没有网盘高清线。因此枚举该
+        # 片全部 CMS 线路（选中线置顶），与不带 line 时一致；真正解析仍推迟到取
+        # 该线 main 时。
+        all_t = [t for t in store.target_lines(picked)
+                 if t.get("line") != explicit_line]
+        targets = [picked] + all_t
     else:
         targets = store.target_lines(picked)
+    # 菜单末尾追加一条“网盘高清（PanSou）”手动线（完整版且启用 PanSou 时）。
+    # 无论起播是否带显式线路（App/Flutter 的 302 总会带 line）都要追加，否则该端
+    # 线路菜单里永远看不到网盘高清线。它不参与自动起播、不触发任何搜索，只有用户
+    # 手动切到它才搜索转存。
+    if not any(t.get("_pansou_manual") for t in targets):
+        try:
+            import pansou as _ps
+            if _ps.available():
+                targets.append({
+                    "url": "pansou://manual", "line": PANSOU_LINE,
+                    "index": int(picked.get("index", 0) or 0),
+                    "headers": {}, "xsrc": True, "guard": False,
+                    "_pansou_manual": True,
+                })
+        except Exception:
+            pass
     # 起播速度优先：preset 只枚举候选线路，不在关键路径解析播放页/302/专有解码，
     # 那些动作延迟到该线路真正被选中取 main 时才做。
     hls_targets = []
@@ -3955,13 +4023,17 @@ async def hls_preset(mg: str, request: Request):
                 or t.get("resolve") or t.get("redirect") or _need_resolve(t):
             hls_targets.append(t)
     if not hls_targets:
-        return Response("no hls line", status_code=404)
+        return _placeholder_master_response(idx0)
 
     # 分辨率探测模块已搁置：线路菜单只显示线路名，不追加分辨率标签。
     idx = int(picked.get("index", 0) or 0)
 
     # 自动起播：把上一次竞速选出的最快线排到首位（稳定用线）；用户显式选线时不动顺序
     auto_mode = (not explicit_line) and _fastest_on()
+
+    def _is_manual_pansou(t: dict) -> bool:
+        return bool(t.get("_pansou_manual")) or t.get("line") == PANSOU_LINE
+
     if auto_mode:
         fast = remembered_fast_line(picked)
         if fast:
@@ -3970,12 +4042,13 @@ async def hls_preset(mg: str, request: Request):
         # 手动/菜单模式：网盘线（高质量原画）排在在线线之前，便于直接选到网盘资源
         hls_targets.sort(key=lambda t: 0 if _pan_match(str(t.get("url") or ""))
                          else 1)
+    # 无论如何：手动 PanSou 高清线永远排最后，且不作为自动首选（默认不触发搜索）
+    hls_targets.sort(key=lambda t: 1 if _is_manual_pansou(t) else 0)
 
     def variant_uri(t: dict, is_auto_first: bool = False) -> str:
         q = {"index": idx, "line": t["line"]}
-        # 仅播放器自动起播的首选变体带 auto=1（取 main 时触发竞速选最快线）；
-        # 用户手动切到的其它变体不带，严格尊重其选择
-        if is_auto_first:
+        # 手动 PanSou 线即使排首位也绝不带 auto=1（它必须由用户主动选择才触发搜索）
+        if is_auto_first and not _is_manual_pansou(t):
             q["auto"] = "1"
         return "main.m3u8?" + urllib.parse.urlencode(q)
 
@@ -3987,10 +4060,16 @@ async def hls_preset(mg: str, request: Request):
     else:
         # 多线路：无 RESOLUTION 的变体，飞牛 HLS 播放器呈现为可切换「线路」
         out = ["#EXTM3U", "#EXT-X-VERSION:3"]
+        # PanSou 变体给极低码率（自适应码率不会自动选它，只能靠用户按名称手动切）；
+        # 普通 CMS 线给递增码率并避开 1，二者不冲突。
         for i, t in enumerate(hls_targets):
             name = _line_display_name(t)
+            if _is_manual_pansou(t):
+                bw = 1
+            else:
+                bw = 1_000_000 + i * 100_000
             # NAME 供支持的播放器显示线路名；BANDWIDTH 差异化避免变体被合并
-            out.append(f'#EXT-X-STREAM-INF:BANDWIDTH={1000000 + i * 100000},'
+            out.append(f'#EXT-X-STREAM-INF:BANDWIDTH={bw},'
                        f'PROGRAM-ID=1,NAME="{name}"')
             # 仅首个（自动起播）变体带 auto=1
             out.append(variant_uri(t, auto_mode and i == 0))
@@ -4051,6 +4130,8 @@ def _line_display_name(t: dict) -> str:
     的中文可读部分（去掉 ┃多线 等装饰与 emoji 源前缀）。"""
     line = t.get("line", "")
     url = str(t.get("url") or "")
+    if t.get("_pansou_manual") or line == PANSOU_LINE:
+        return "🎞️网盘高清（PanSou）"
     pv = _pan_match(url) if url else None
     if pv is not None:
         tag = pv.get("name", "网盘").replace("网盘", "")
@@ -4064,6 +4145,20 @@ def _line_display_name(t: dict) -> str:
 
 def _is_media_playlist(text: str) -> bool:
     return "#EXTINF" in text or "#EXT-X-TARGETDURATION" in text
+
+
+def _playlist_has_segment(text: str) -> bool:
+    """改写后的媒体清单是否真的含至少一条可播分片/子清单 URI。
+
+    上游冷启动可能回 200 但体为空、只有 #EXT 头、是 JSON 错误页或广告过滤后
+    不剩任何分片——这种“200 空清单”会让播放器无分片可拉、直接判播放失败。"""
+    if not text or not _is_media_playlist(text):
+        return False
+    for raw in text.splitlines():
+        s = raw.strip()
+        if s and not s.startswith("#"):
+            return True
+    return False
 
 
 def _first_variant(text: str, base: str) -> str | None:
@@ -4106,86 +4201,162 @@ async def _fetch_playlist(request: Request, url: str, headers: dict,
 
 @app.get(f"{ONLINE_PREFIX}/{{mg}}/main.m3u8")
 async def hls_main(mg: str, request: Request):
+    phwait = request.query_params.get("phwait") == "1"
+    # 占位自修复通道：preset 尚未拿到任何线路时让播放器进入占位，本端点负责等待
+    # 后台绑定/找线；期间一律回占位 HLS（200），绝不返回 4xx/5xx 锁死菜单。
+    if phwait:
+        og = chart_guid_by_media(mg)
+        if og and not store.resolve_media_guid(mg):
+            start_resolve_chart(og)
+            try:
+                await asyncio.wait_for(resolve_chart(og), timeout=6.0)
+            except Exception:
+                pass
+        if not _pick_episode(mg, request):
+            # 非榜单片也给一次后台按片名找线机会（由 preset/点击侧已触发则复用）
+            return _placeholder_playlist_response(mg)
+        # 已绑定：落入正常流程（继续按下面的 query 决定线路；phwait 不指定具体线，
+        # 走默认/竞速），播放真实清单。
+
     failed_g = await _await_pending_chart(mg)
     picked = _pick_episode(mg, request)
     if not picked:
-        if failed_g:
-            return Response("暂无可用在线片源", status_code=503)
-        return Response("not found", status_code=404)
+        # 任何入口取不到可播线路：都回占位，保持播放器存活、菜单可切（替代旧 503/404）
+        return _placeholder_playlist_response(mg)
 
     # 线路健康探测 + 自动选最快线
     explicit_line = request.query_params.get("line")
     auto_play = request.query_params.get("auto") == "1" and not explicit_line
     request.state._play_mg = mg  # 供探测复用播放列表构建、填充缓存
+
+    # ===== 手动 PanSou 高清线：仅【用户显式选择】时才搜索网盘并自动转存原画 =====
+    # HLS 自适应码率(ABR)可能因 PanSou 变体存在而自动请求它（用户并未手点）。这种请求
+    # 绝不能占位/转存，否则会把正在播的正片顶成占位并偷偷触发网盘转存。只有经
+    # preset?line=PanSou（线路菜单手点）置位过用户意图，才走 PanSou 流程。
+    _pansou_user = _pansou_is_user_pick(mg)
+    if explicit_line == PANSOU_LINE and _pansou_user:
+        base = store.resolve_media_guid(mg)
+        title = (base or {}).get("title") or (base or {}).get("ep_title") or ""
+        pidx = int(request.query_params.get("index", (base or {}).get("index", 0)) or 0)
+        st = _pansou_manual_state(mg)
+        if st != "ready":
+            # 仅待命、记录片名，绝不在这里搜索/转存（main 会被菜单预取）。
+            # 真正触发发生在用户切到该线、播放器拉占位分片时（placeholder kick）。
+            _pansou_manual_arm(mg, title, pidx)
+            return _placeholder_playlist_response(mg)
+        snap = _PANSOU_MAN_SNAP.get(mg)
+        if not snap:
+            return _placeholder_playlist_response(mg)
+        picked = dict(snap, index=pidx)
+        request.state._failover_picked = picked
+        request.state._play_mg = mg
+        # 走正常管道：回环抓取（转码档会把夸克 CDN 分片改写成经本代理 /seg，
+        # 自动注入 Cookie；裸连 CDN 会 412）。若解析为 mp4 原画(_NOT_HLS)再 302。
+        body = await _get_playlist_cached(mg, picked, request)
+        if body and (body is _NOT_HLS or _playlist_has_segment(body)):
+            if body is _NOT_HLS:
+                return RedirectResponse(picked["url"], status_code=302,
+                                        headers={"Cache-Control": "no-store"})
+            return Response(body, media_type="application/vnd.apple.mpegurl",
+                            headers={"Cache-Control": "no-cache",
+                                     "Access-Control-Allow-Origin": "*"})
+        # 抓取瞬间失败/空清单：回占位等下次轮询，不弹错误锁菜单
+        return _placeholder_playlist_response(mg)
+
+    if explicit_line == PANSOU_LINE and not _pansou_user:
+        # ABR 自动选到 PanSou 变体（用户没手点）：不占位、不转存，改播该片默认 CMS
+        # 最快线的真实清单，保证正在播放的正片不会被占位顶掉。
+        _base = store.resolve_media_guid(mg)
+        if _base:
+            try:
+                _didx = int(request.query_params.get("index",
+                                                     _base.get("index", 0)) or 0)
+            except ValueError:
+                _didx = int(_base.get("index", 0) or 0)
+            _def_line = store.best_line(_base["online_guid"])
+            if _def_line and _def_line != PANSOU_LINE:
+                _rt = store.resolve_episode(_base["online_guid"], _def_line, _didx)
+                if _rt:
+                    picked = dict(_rt, online_guid=_base["online_guid"],
+                                  kind=_base.get("kind", "title"))
+                    explicit_line = picked.get("line")
+                    auto_play = False
+
     # 起播即跳过已知坏线（用户显式选线除外），避免无谓探测延迟
     picked = _dodge_known_bad(picked, request)
-    if _autofail_on():
-        picked = await _ensure_playable(picked, request, auto=auto_play)
-        # 若自动换到了别的线路，后续 _pick_episode 仍按 query 的旧线解析；用换好的目标
-        request.state._failover_picked = picked
 
-
-    body = await _get_playlist_cached(mg, picked, request)
-    if body is None:
-        # 当前线抓取失败：记忆并自动换一条已探测可用的线路重试一次
+    async def _serve_normal(_p: dict):
+        # 线路健康探测 + 自动选最快线（含为胜者建清单，可能耗时）：必须在总预算内，
+        # 否则自动竞速慢源时首个 main 仍可能超过客户端~3s 超时。
         if _autofail_on():
-            _mark_line_bad(picked)
-            alt = await _find_playable(picked, request, skip_current=True)
-            if alt is not None:
-                _log.info("播放列表抓取失败，自动换线 %s -> %s",
-                          picked.get("line"), alt.get("line"))
-                picked = alt
-                request.state._failover_picked = alt
-                # 小雅等非 HLS 直链
-                body = await _get_playlist_cached(mg, picked, request)
-    if body is None:
-        return Response("fetch fail upstream", status_code=502)
-    if body is _NOT_HLS:
-        # 解析网盘播放端点（变量定义留在私有块外，供下方 lite 兜底分支使用）
-        _pu = str(picked.get("url") or "")
-        _pm = re.search(r"/pan/(?:([a-z]+)/)?play", _pu)
-        _pfid = urllib.parse.parse_qs(
-            urllib.parse.urlparse(_pu).query).get("fid", [""])[0]
-        # 网盘原画 mp4（转存后的本服务播放端点）：只做【一次】302，直接跳到
-        # /v/api/ext/pan/.../play，由它注入网盘 Cookie 并回标准 206（带
-        # Content-Length）。若先跳 direct 再二次跳 pan/play，部分播放器跨两次
-        # 跳转不会正确重带 Range，导致拖动/起播失败。
-        if picked.get("pan") and not picked.get("m3u8") \
-                and _pu.startswith("/v/api/ext/pan/"):
-            return RedirectResponse(_pu, status_code=302,
-                                    headers={"Cache-Control": "no-store",
-                                             "Access-Control-Allow-Origin": "*"})
-        # 其它预判为 HLS、解析后实为 mp4：302 到直链代理（direct 复用已解析结果）
-        q = urllib.parse.urlencode({"line": picked["line"], "index": picked["index"]})
-        return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/direct?{q}", status_code=302)
-    # 清单活、分片死（如某源 CDN 删流）：先在已解析清单上验首个分片，失败则
-    # 标记坏线，并启动「按片名全网回源」后台任务。回源较慢，首个请求不阻塞到
-    # 网关超时，而是让客户端（本就每 3 秒重试）在后台找到可播源后的下一次请求
-    # 经 _MEDIA_REDIRECT 命中新记录。
-    if _autofail_on() and not await _verify_rewritten_first_seg(body, request, picked):
-        _mark_line_bad(picked)
-        status = await _resurrect_start(picked, mg)
-        if status == "ok":
-            alt = _pick_episode(mg, request)
-            if alt:
-                body2 = await _get_playlist_cached(mg, alt, request)
-                if body2 and body2 is not _NOT_HLS:
-                    return Response(body2, media_type="application/vnd.apple.mpegurl",
-                                    headers={"Cache-Control": "no-cache",
-                                             "Access-Control-Allow-Origin": "*"})
-        if status == "fail":
-            return Response("暂无可播线路（该源分片已失效，且未找到其他可用源）",
-                            status_code=502)
-        # running：让客户端稍候重试，不返回错误清单
-        return Response("正在为你寻找可用线路…", status_code=503,
-                        headers={"Retry-After": "3",
+            _p = await _ensure_playable(_p, request, auto=auto_play)
+            # 若自动换到了别的线路，后续 _pick_episode 仍按 query 的旧线解析；用换好的目标
+            request.state._failover_picked = _p
+
+        body = await _get_playlist_cached(mg, _p, request)
+        if body is not None and body is not _NOT_HLS and not _playlist_has_segment(body):
+            # 200 空/畸形清单（上游冷返回、广告过滤后无分片等）：等同抓流失败处理，
+            # 避免播放器拿到无分片清单直接判“播放失败”。
+            _log.info("清单无分片，按抓流失败处理: %s", _p.get("line"))
+            body = None
+        if body is None:
+            # 当前线抓取失败：记忆并自动换一条已探测可用的线路重试一次
+            if _autofail_on():
+                _mark_line_bad(_p)
+                alt = await _find_playable(_p, request, skip_current=True)
+                if alt is not None:
+                    _log.info("播放列表抓取失败，自动换线 %s -> %s",
+                              _p.get("line"), alt.get("line"))
+                    _p = alt
+                    request.state._failover_picked = alt
+                    body = await _get_playlist_cached(mg, _p, request)
+        if body is None:
+            # 抓流失败：回占位保持播放器存活，后台 resurrect 找到新源后下次轮询自动恢复
+            return _placeholder_playlist_response(mg)
+        if body is _NOT_HLS:
+            # 预判为 HLS、解析后实为 mp4：302 到直链代理（direct 复用已解析结果）
+            q = urllib.parse.urlencode({"line": _p["line"], "index": _p["index"]})
+            return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/direct?{q}", status_code=302)
+        # 清单活、分片死（如某源 CDN 删流）：验首片失败则标坏线 + 后台按片名全网回源。
+        if _autofail_on() and not await _verify_rewritten_first_seg(body, request, _p):
+            _mark_line_bad(_p)
+            status = await _resurrect_start(_p, mg)
+            if status == "ok":
+                alt = _pick_episode(mg, request)
+                if alt:
+                    body2 = await _get_playlist_cached(mg, alt, request)
+                    if body2 and body2 is not _NOT_HLS \
+                            and _playlist_has_segment(body2):
+                        return Response(body2, media_type="application/vnd.apple.mpegurl",
+                                        headers={"Cache-Control": "no-cache",
+                                                 "Access-Control-Allow-Origin": "*"})
+            # fail / running 都回占位：播放器不锁死、菜单可切，后台找源后下次轮询恢复
+            return _placeholder_playlist_response(mg)
+        _sk = sourcehealth.source_key_of(_p.get("line"), _p)
+        if _sk:
+            sourcehealth.record(_sk, True)
+        return Response(body, media_type="application/vnd.apple.mpegurl",
+                        headers={"Cache-Control": "no-cache",
                                  "Access-Control-Allow-Origin": "*"})
-    _sk = sourcehealth.source_key_of(picked.get("line"), picked)
-    if _sk:
-        sourcehealth.record(_sk, True)
-    return Response(body, media_type="application/vnd.apple.mpegurl",
-                    headers={"Cache-Control": "no-cache",
-                             "Access-Control-Allow-Origin": "*"})
+
+    # 起播策略：普通 CMS 直链直接等出正片（秒播，绝不为它们先弹占位）；只有加固/爬虫/
+    # drpy/专有解码/小雅这类慢源（解析常十几秒）才用短预算——到点先回占位、后台继续跑
+    # 并写缓存，播放器周期性重拉时自动转正片。
+    bk = f"{mg}|{picked.get('line')}|{picked.get('index', 0)}"
+    fut = _MAIN_SERVE_FUT.get(bk)
+    if fut is None:
+        fut = asyncio.ensure_future(_serve_normal(picked))
+        _MAIN_SERVE_FUT[bk] = fut
+        fut.add_done_callback(lambda _f: _MAIN_SERVE_FUT.pop(bk, None))
+    if _is_slow_line(picked):
+        try:
+            return await asyncio.wait_for(asyncio.shield(fut),
+                                          timeout=_MAIN_SLOW_BUDGET)
+        except asyncio.TimeoutError:
+            return _placeholder_playlist_response(mg)
+    # 普通 CMS：直接等真实结果（内部竞速本身有 2s 预算），成功即秒播；只有真正抓不到
+    # 时 _serve_normal 才返回占位。
+    return await fut
 
 
 def _cors_preflight() -> Response:
@@ -4206,6 +4377,71 @@ async def hls_cors_preflight(rest: str):
     return _cors_preflight()
 
 
+# ---- 线路未就绪占位视频（保持播放器存活、线路菜单可切，不弹“播放出错”）----
+_PH_DIR = Path(__file__).resolve().parent / "assets" / "placeholder"
+_PH_SEG_TS = "_placeholder/placeholder.ts"
+_PH_SEG_DUR = 8.0
+_PH_WIN = 3  # 直播式滑动窗口分片数
+
+
+def _placeholder_playlist_response(mg: str = "", live: bool = True) -> Response:
+    """返回循环提示 HLS（HTTP 200）。飞牛对 4xx/5xx 清单会弹“播放出错”并锁死
+    线路菜单；200 的有效 HLS 让播放器停在提示画面、菜单仍可切换。
+
+    用直播式滑动窗口（无 ENDLIST、带 MEDIA-SEQUENCE）：客户端只预取窗口内少数分片
+    并周期性重拉 main，后台转存/搜索完成后下一次轮询即可自动切回正片。分片用相对
+    路径，相对 /{mg}/main.m3u8 解析为 /{mg}/_placeholder/placeholder.ts。"""
+    seq = int(time.time() // int(_PH_SEG_DUR))
+    lines = ["#EXTM3U", "#EXT-X-VERSION:3",
+             "#EXT-X-TARGETDURATION:8",
+             f"#EXT-X-MEDIA-SEQUENCE:{seq}",
+             "#EXT-X-DISCONTINUITY-SEQUENCE:0"]
+    for i in range(_PH_WIN):
+        lines.append("#EXTINF:8.000,")
+        lines.append(f"{_PH_SEG_TS}?n={seq + i}")
+    body = "\n".join(lines) + "\n"
+    return Response(content=body, media_type="application/vnd.apple.mpegurl",
+                    headers={"Cache-Control": "no-store",
+                             "Access-Control-Allow-Origin": "*",
+                             "X-fnmedia-Placeholder": "1"})
+
+
+def _placeholder_master_response(idx: int = 0) -> Response:
+    """线路未就绪时的【master】占位（HTTP 200）。返回单变体，其 main 带 phwait=1，
+    hls_main 见到该标记会持续返回占位媒体清单（不挑线路、不报 4xx/5xx），后台绑定/
+    找线完成后由后续正常请求自动切回正片。保证任何情况下播放器都不弹“播放出错”、
+    线路菜单不被锁死。"""
+    q = urllib.parse.urlencode({"index": idx, "phwait": "1"})
+    body = ("#EXTM3U\n#EXT-X-VERSION:3\n"
+            '#EXT-X-STREAM-INF:BANDWIDTH=1000000,PROGRAM-ID=1,NAME="正在准备线路…"\n'
+            f"main.m3u8?{q}\n")
+    return Response(content=body, media_type="application/vnd.apple.mpegurl",
+                    headers={"Cache-Control": "no-store",
+                             "Access-Control-Allow-Origin": "*",
+                             "X-fnmedia-Placeholder": "1"})
+
+
+def _placeholder_ts_response() -> Response:
+    p = _PH_DIR / "placeholder.ts"
+    if not p.exists():
+        return Response("not found", status_code=404)
+    return FileResponse(p, media_type="video/mp2t",
+                        headers={"Cache-Control": "public, max-age=86400",
+                                 "Access-Control-Allow-Origin": "*"})
+
+
+@app.get(f"{ONLINE_PREFIX}/{{mg}}/_placeholder/placeholder.ts")
+async def placeholder_ts(mg: str, request: Request):
+    # 播放器真正拉占位分片=用户已切到 PanSou 高清线播放：此刻才触发搜索+转存。
+    # （仅 GET 触发；菜单预取只发 HEAD/只取 main，不会误触发。）
+    # 必须确认是【用户显式选择】，防止 HLS 自适应码率自动选到 PanSou 变体时
+    # 拉到占位分片而误触发网盘搜索/转存。
+    try:
+        if _pansou_is_user_pick(mg):
+            _pansou_manual_kick(mg)
+    except Exception:
+        pass
+    return _placeholder_ts_response()
 
 
 @app.get(f"{ONLINE_PREFIX}/{{mg}}/seg")
@@ -4856,7 +5092,8 @@ async def ext_set_config(request: Request):
         "prefer_quality_source",
         "auto_best_source",
         "line_fastest", "line_fastest_max", "line_fastest_timeout",
-        "line_fastest_prefer", "line_autofail",
+        "line_fastest_prefer", "line_fastest_budget", "main_ready_budget",
+        "line_autofail",
         "update_proxy",
     }
     patch = {k: v for k, v in body.items() if k in allowed}
