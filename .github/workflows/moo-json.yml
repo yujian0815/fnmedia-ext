@@ -86,9 +86,13 @@ jobs:
           ls -la
       - name: Update moo.json
         run: |
+          # 文件不存在则先创建空文件，脚本就不会报找不到
+          if [ ! -f "$MOO_JSON" ]; then
+            touch "$MOO_JSON"
+          fi
           ARGS=""
           if [ -s /tmp/notes.md ]; then ARGS="--changelog-file /tmp/notes.md"; fi
-          python3 /tmp/u.py --create --file "$MOO_JSON" --tag "${{ steps.t.outputs.tag }}" --fpk /tmp/fpk/*.fpk --keep "${KEEP:-2}" $ARGS
+          python3 /tmp/u.py --file "$MOO_JSON" --tag "${{ steps.t.outputs.tag }}" --fpk /tmp/fpk/*.fpk --keep "${KEEP:-2}" $ARGS
       - name: Commit
         run: |
           git diff --quiet -- "$MOO_JSON" && exit 0
