@@ -119,6 +119,8 @@ _CHART_FAILED_TS: dict[str, float] = {}
 _CHART_FAILED_TTL = 10 * 60
 # 快源未命中、慢源兜底仍在进行时的短冷却（秒）：避免反复压源站，但不把播放页锁死。
 _CHART_FAST_MISS_TTL = 45.0
+# 榜单绑定的聚合候选窗口：比全局搜索的 12 宽，避免兜底热榜长剧挤掉同名真片。
+_CHART_BIND_MAXN = 60
 # 失败等级：""=快源未命中(短冷却,慢源兜底中) / "dead"=快源+全源均确认无源(长冷却)
 _CHART_FAIL_LEVEL: dict[str, str] = {}
 # 正在跑“慢源兜底”的榜单 guid，避免对同一卡片重复起全源搜索
@@ -340,8 +342,11 @@ def start_resolve_chart(guid: str, *, prefetch: bool = False,
             #    绝大多数热门片在此即绑定，冷点击也能秒播；
             # 2) 快源里无严格同名同年结果时，再跑一次全源（含加固慢源）兜底，
             #    避免“只有慢源有该片”时永远占位。
+            # 榜单绑定知道确切片名，给较宽候选窗口再严格同名同年筛选：部分资源站
+            # 搜不到时会回吐全站热榜（动辄上千集的无关长剧），按直链总数排序会把
+            # 真正同名的组挤出全局搜索的前 12，导致热门片误判“无源”一直占位。
             briefs = await asyncio.wait_for(
-                _aggregate_briefs(item["title"], 12, fast_only=True,
+                _aggregate_briefs(item["title"], _CHART_BIND_MAXN, fast_only=True,
                                   soft_timeout=6.0, include_t4=False), timeout=9)
             # 严格防串片：规范片名必须【完全相等】，且榜单有年份时年份必须一致。
             # 不做子串包含、不做 briefs[0] 宽松兜底——同名老片/短片/不同版本曾因此
@@ -368,7 +373,8 @@ def start_resolve_chart(guid: str, *, prefetch: bool = False,
                         if store.get_title_by_guid(guid):
                             return
                         fb = await asyncio.wait_for(
-                            _aggregate_briefs(item["title"], 12), timeout=25)
+                            _aggregate_briefs(item["title"], _CHART_BIND_MAXN,
+                                              include_t4=False), timeout=25)
                         fs = [b for b in fb if _same_title_year(b)]
                         if fs and not store.get_title_by_guid(guid):
                             fb_best = fs[0]
@@ -443,7 +449,10 @@ async def resolve_chart(guid: str, *, force: bool = False) -> dict | None:
 
 
 def chart_guid_by_media(mg: str) -> str:
-    """识别 media_guid 是否属于榜单/热门片（包括秒进时尚未绑定完成的）。"""
+    """识别请求路径里的 mg 是否属于榜单/热门片。mg 可能【本身就是 chart guid】
+    （媒体库直进），也可能是其确定性 media_guid（详情页进入/已绑定），二者都要认。"""
+    if mg and chart_cache.is_chart_guid(mg):
+        return mg
     og = _PENDING_MEDIA_CHART.get(mg) or store.online_guid_by_media(mg)
     if og and chart_cache.is_chart_guid(og):
         return og
@@ -3424,6 +3433,12 @@ def _line_key_match(want: str, got: str) -> bool:
 
 
 def _pick_episode(mg: str, request: Request) -> dict | None:
+    # mg 本身是 chart guid（媒体库直进）：绑定记录挂在其确定性 media guid 上，
+    # 先按 media guid 取集；取不到再落入下面的常规解析（兼容旧记录/回源）。
+    if mg and chart_cache.is_chart_guid(mg) and not store.resolve_media_guid(mg):
+        _t = _pick_episode(media_guid(mg), request)
+        if _t:
+            return _t
     # 全网回源别名：内置线路全死、已按片名找到别的可播记录时，原 mg 改指新记录
     alt_og = _MEDIA_REDIRECT.get(mg)
     if alt_og:
@@ -4883,7 +4898,11 @@ async def hls_main(mg: str, request: Request):
     # 后台绑定/找线；期间一律回占位 HLS（200），绝不返回 4xx/5xx 锁死菜单。
     if phwait:
         og = chart_guid_by_media(mg)
-        if og and not store.resolve_media_guid(mg):
+        # mg 本身是 chart guid（媒体库直进）时，绑定记录挂在其 media guid 上
+        mg_eff = media_guid(og) if (og and og == mg) else mg
+        already = store.resolve_media_guid(mg) or (
+            og and og == mg and store.resolve_media_guid(mg_eff))
+        if og and not already:
             # 播放页即时绑定：不限流（信号量只限制浏览预取）。冷却已过即重新解析：
             # 快源未命中 45s 后可重试（慢源可能已就绪），dead(全无源) 10 分钟后再试。
             force = _chart_cooldown_left(og) <= 0
@@ -4893,7 +4912,8 @@ async def hls_main(mg: str, request: Request):
                                        timeout=_budget_left())
             except Exception:
                 pass
-        if not _pick_episode(mg, request):
+        if not (_pick_episode(mg, request)
+                or (og == mg and _pick_episode(mg_eff, request))):
             # 非榜单片也给一次后台按片名找线机会（由 preset/点击侧已触发则复用）。
             # 始终回【直播式】占位（无 ENDLIST，播放器持续重拉不报错）。
             return _placeholder_playlist_response(mg)
