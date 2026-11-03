@@ -56,7 +56,7 @@ def direct_count(t: providers.OnlineTitle) -> int:
 async def fetch_source_hot(client: httpx.AsyncClient, source: dict,
                            limit: int, pages: int = 2) -> list[providers.OnlineTitle]:
     """取一个资源站的最近更新详情。苹果 CMS 多数接口固定每页约 20 条。"""
-    if not source.get("enabled", True):
+    if not source.get("enabled", True) or source.get("kind") == "t4":
         return []
     out: list[providers.OnlineTitle] = []
     seen: set[tuple[str, str]] = set()
@@ -354,7 +354,7 @@ class HotCache:
                     result = self.get()
                 self._task.set_result(result)
                 return result
-            sources = config.enabled_sources()
+            sources = [s for s in config.enabled_sources() if s.get("kind") != "t4"]
             old = self.get()
             data = await asyncio.wait_for(
                 collect_hot(

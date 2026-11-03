@@ -35,6 +35,11 @@ import features
 import netutil
 import providers
 import sourcehealth
+import t4
+from t4_service import T4Service
+from t4_media import T4Media
+import t4_metadata
+from t4_browser import T4Browser, LIB_GUID as T4_LIB_GUID, LIB_TITLE as T4_LIB_TITLE
 import client as clientmod
 import live as livemod
 import inject as inj
@@ -56,6 +61,48 @@ import updater
 from store import (store, make_guid, media_guid, video_guid, is_online_guid,
                    season_guid, episode_guid, ep_media_guid, ep_video_guid)
 
+t4_service = None
+t4_media = None
+t4_browser = None
+
+
+def _get_t4_service():
+    global t4_service
+    if t4_service is None:
+        t4_service = T4Service(store, config)
+    return t4_service
+
+
+def _get_t4_media():
+    global t4_media
+    if t4_media is None:
+        t4_media = T4Media()
+    return t4_media
+
+
+def _get_t4_browser():
+    global t4_browser
+    if t4_browser is None:
+        t4_browser = T4Browser(store, config)
+    return t4_browser
+
+
+def _t4_sources():
+    if not config.get().get("t4_library_enabled", True):
+        return []
+    return [source for source in config.enabled_sources() if source.get("kind") == "t4"]
+
+
+def _t4_node(guid):
+    if not guid:
+        return None
+    if t4_browser is not None:
+        return t4_browser.node(guid)
+    if not any(source.get("kind") == "t4" for source in config.enabled_sources()):
+        return None
+    return _get_t4_browser().node(guid)
+
+
 UPSTREAM_SOCK = os.environ.get("FNMEDIA_UPSTREAM_SOCK",
                                "/var/run/trim_media_upstream.sock")
 # 本服务回环基址：网盘原画/转码播放地址是根相对路径，HLS 探测/改写需经本机
@@ -72,6 +119,7 @@ def _self_url(url: str) -> str:
 _search_cache: dict[str, tuple[float, list]] = {}
 _search_inflight: dict[str, asyncio.Future] = {}
 CACHE_TTL = 120
+T4_STREAM_READY_BUDGET = 8.0
 # 在线热门按内容拆成 4 个虚拟媒体库。guid 由固定串 md5 派生，保持稳定。
 HOT_CATEGORIES = [
     ("movie",   "🌐在线电影", "Movie"),
@@ -152,15 +200,14 @@ def _vkey_for_guid(guid: str) -> str | None:
     """虚拟库 guid → 稳定库键（含动态库现场反查）；非虚拟库返回 None。"""
     if not guid:
         return None
+    if _t4_node(guid):
+        return vlibs.K_T4
     k = vlibs.key_of_guid(guid)
     if k:
         return k
     sid = standalone_source_of(guid)
     if sid:
         return vlibs.make_key(vlibs.K_STANDALONE, sid)
-    xc = _xlib_cat(guid)
-    if xc:
-        return vlibs.make_key(vlibs.K_XLIB, xc.get("id", ""))
     return None
 
 
@@ -192,7 +239,7 @@ def catalog_enabled() -> bool:
 
 
 def any_virtual_lib_enabled() -> bool:
-    if charts_enabled() or catalog_enabled():
+    if charts_enabled() or catalog_enabled() or _t4_sources():
         return True
     return False
 
@@ -309,7 +356,7 @@ def start_resolve_chart(guid: str, *, prefetch: bool = False) -> asyncio.Future 
                 fut.set_result(None)
                 return
             briefs = await asyncio.wait_for(
-                _aggregate_briefs(item["title"], 12), timeout=25)
+                _aggregate_briefs(item["title"], 12, include_t4=False), timeout=25)
             # 严格防串片：规范片名必须【完全相等】，且榜单有年份时年份必须一致。
             # 不做子串包含、不做 briefs[0] 宽松兜底——同名老片/短片/不同版本曾因此
             # 被绑到榜单卡片，切线路播出与海报不符的另一部片。
@@ -608,6 +655,8 @@ async def lifespan(app: FastAPI):
             await app.state.update_task
         except (asyncio.CancelledError, Exception):
             pass
+        if t4_media is not None:
+            await t4_media.metadata.close()
         await app.state.up.aclose()
         await app.state.ext.aclose()
         # 关闭前把防抖未落盘的在线资源缓存同步写一次（issue #42 异步落盘配套）
@@ -658,8 +707,16 @@ for _noisy in ("httpx", "httpcore", "httpcore.http11", "httpcore.connection",
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 
+def _diagnostic_query(request: Request) -> str:
+    return urllib.parse.urlencode([
+        (k, "<redacted>" if k.lower() in (
+            "playlink", "play-link", "token", "authorization") else v)
+        for k, v in request.query_params.multi_items()])
+
+
 @app.middleware("http")
 async def _access(request: Request, call_next):
+    started = time.monotonic()
     # 在线播放历史按飞牛账号分区（issue #5）：为本次请求设置当前用户上下文。
     # fnusers 带 30s 缓存，识别失败/无 token 落到全局分区，行为同旧版。
     _hist_tokens = None
@@ -679,9 +736,11 @@ async def _access(request: Request, call_next):
             histmod.reset_current_user(_hist_tokens)
     p = request.url.path
     if "/api/" in p or p.startswith(ONLINE_PREFIX) or p.startswith("/v/media"):
-        _log.info("%s %s -> %s", request.method,
-                  (p + ("?" + request.url.query if request.url.query else ""))[:120],
-                  resp.status_code)
+        query = _diagnostic_query(request)
+        _log.info("%s %s -> %s client=%s elapsed_ms=%d", request.method,
+                  (p + ("?" + query if query else ""))[:120],
+                  resp.status_code, _client_of(request).label,
+                  int((time.monotonic() - started) * 1000))
     _live_record(request, resp.status_code, p)
     return resp
 
@@ -762,7 +821,7 @@ def _live_record(request: Request, status: int, path: str) -> None:
                     500: "服务端错误", 502: "上游抓取失败",
                     503: "暂无可播片源", 504: "上游超时"}.get(status, "请求失败")
         livemod.record(request.headers.get("user-agent", ""), ip,
-                       request.method, path, request.url.query, status,
+                       request.method, path, _diagnostic_query(request), status,
                        origin, title=title, stage=stage, note=note)
     except Exception:
         pass  # 诊断本身绝不影响正常请求
@@ -990,13 +1049,15 @@ async def forward_upstream_streaming(request: Request) -> Response:
 
 async def _aggregate_briefs(keyword: str, maxn: int | None = None,
                             fast_only: bool = False,
-                            soft_timeout: float | None = None) -> list[dict]:
+                            soft_timeout: float | None = None,
+                            *, include_t4: bool = True) -> list[dict]:
     """聚合搜索所有启用源 → 跨源合并 → 去噪/去无直链 → brief 列表（已入库）。
     fast_only=True 时只查秒回的标准 CMS 直链源（跳过加固/drpy 等慢源），供播放
     失败时快速回源，避免被 redroid 慢源拖到网关超时。"""
     # 可选特性源不进入全局搜索（公开构建下该开关恒关，等价于不过滤）。
     sources = [s for s in config.enabled_sources()
-               if not (features.ADULT and s.get("adult"))]
+               if not (features.ADULT and s.get("adult"))
+               and (include_t4 or s.get("kind") != "t4")]
     if fast_only:
         sources = [s for s in sources
                    if not s.get("guard") and not s.get("spider_src")
@@ -1004,12 +1065,19 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
                    and s.get("api")
                    and s.get("id") not in ("dduo", "xiaoya")]
     titles = await providers.search_all(keyword, sources,
-                                        soft_timeout=soft_timeout)
+                                        soft_timeout=soft_timeout,
+                                        budget=5.0 if any(
+                                            s.get("kind") == "t4" for s in sources) else None)
     if maxn is None:
         maxn = int(config.get().get("max_per_keyword", 12))
     # 跨源同名合并：同 规范化片名+年份 聚成一个条目，每个来源各成一条
     # 播放线路（供播放器「切换线路」）；过滤解说/预告/无直链。
     loose_ids = {s["id"] for s in sources if s.get("loose_filter")}
+    # T4 search cards intentionally have no episode list. Never merge them by name.
+    remote = [inj.brief_of(t) for t in titles if t.locator.get("kind") == "t4"
+              and not catalogmod.is_redline(t.title, t.remarks)
+              and (t.provider in loose_ids or not config.is_junk(t.title, t.remarks))]
+    titles = [t for t in titles if t.locator.get("kind") != "t4"]
     groups: dict[tuple, dict] = {}
 
     # 预筛可分组标题，并统计每个规范片名的年份（加固/爬虫源常缺年份）。
@@ -1095,7 +1163,7 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
         except Exception:  # noqa: BLE001
             pass
         briefs.append(brief)
-    return store.remember_merged(briefs)
+    return store.remember_merged((remote + briefs)[:maxn])
 
 
 async def online_search(keyword: str, client: httpx.AsyncClient,
@@ -1121,7 +1189,9 @@ async def online_search(keyword: str, client: httpx.AsyncClient,
                     # 软超时略小于搜索路由 6s 硬窗口：到时返回已完成源的部分
                     # 结果，避免 gather 全有或全无导致个别慢源拖空整个在线结果。
                     soft_timeout=5.2 if fast_only else None)
-                items = [inj.search_item(b) for b in briefs]
+                items = [_get_t4_browser().media_card(b) if
+                         b.get("locator", {}).get("kind") == "t4" else inj.search_item(b)
+                         for b in briefs]
                 _search_cache[cache_key] = (time.time(), items)
                 if not fut.done():
                     fut.set_result(items)
@@ -1434,7 +1504,8 @@ async def mediadb_list(request: Request):
     payload = await _json_from_upstream(upstream)
     dbs = payload.get("data") if payload else None
     vlib_guids = (set(CHART_LIB_GUIDS.values()) | set(CATALOG_LIB_GUIDS.values())
-                  | {standalone_lib_guid(s["id"]) for s in config.all_sources()})
+                  | {standalone_lib_guid(s["id"]) for s in config.all_sources()}
+                  | {T4_LIB_GUID})
     # 始终由插件重建虚拟库列表：需要按账号授权 / 手动隐藏 / 自定义顺序过滤，不能直接
     # 透传可能已含“旧虚拟库”的上游响应。先剥掉上游里残留的我们自己的虚拟库，再统一注入。
     if isinstance(dbs, list):
@@ -1446,6 +1517,8 @@ async def mediadb_list(request: Request):
             return upstream
     try:
         inserts = []
+        if _t4_sources():
+            inserts.append(_get_t4_browser().library())
         # 1) 豆瓣真实榜单四库（独立开关 hot_library_enabled）
         if charts_enabled():
             for cat, _t, _c in chartmod.CHART_CATEGORIES:
@@ -1513,12 +1586,11 @@ async def mediadb_list(request: Request):
 
         # 5) 小雅分类媒体库（电影/剧集/综艺/动漫/纪录片/短剧 各一张卡片）
         # —— 统一：为每张虚拟库建立 guid→稳定库键 映射（供显隐/授权/排序）——
-        guid2key: dict[str, str] = {}
+        guid2key: dict[str, str] = {T4_LIB_GUID: vlibs.K_T4}
         for cat, g in CHART_LIB_GUIDS.items():
             guid2key[g] = vlibs.make_key(vlibs.K_CHART, cat)
         for cat, g in CATALOG_LIB_GUIDS.items():
             guid2key[g] = vlibs.make_key(vlibs.K_CATALOG, cat)
-        guid2key[GUARD_NATIVE_GUID] = vlibs.K_GUARD_NATIVE
         for s in standalone_sources_active():
             guid2key[standalone_lib_guid(s["id"])] = vlibs.make_key(vlibs.K_STANDALONE, s["id"])
 
@@ -1596,6 +1668,10 @@ async def mdb_detail(guid: str, request: Request):
     if not _viewer_can_open_lib(request, guid):
         return JSONResponse({"code": -6, "msg": "此媒体库不存在", "data": None})
 
+    if guid == T4_LIB_GUID:
+        if not _t4_sources():
+            return JSONResponse({"code": -6, "msg": "T4 library unavailable", "data": None})
+        return JSONResponse({"code": 0, "msg": "", "data": _get_t4_browser().library(detail=True)})
     async def posters_for(items: list[str], n: int = 8) -> list[str]:
         ps = []
         for cover in items:
@@ -1710,6 +1786,10 @@ async def mediadb_sum(request: Request):
     if not payload or not isinstance(payload.get("data"), dict):
         return upstream
     total_added = 0
+    if _t4_sources() and _viewer_can_open_lib(request, T4_LIB_GUID):
+        count = len(_t4_sources())
+        payload["data"][T4_LIB_GUID] = count
+        total_added += count
     if charts_enabled():
         for cat, _t, _c in chartmod.CHART_CATEGORIES:
             n = len(chart_cache.items(cat))
@@ -1753,8 +1833,38 @@ async def item_list(request: Request):
     client = _client_of(request)
 
     # 子账号无权限 / 被隐藏的虚拟库：直接透传官方（官方不认识该 guid → 库不存在）
-    if aguid and not _viewer_can_open_lib(request, aguid):
+    parent = body.get("parent_guid") or aguid
+    if any(g and not _viewer_can_open_lib(request, g) for g in (aguid, parent)):
         return await forward_upstream(request)
+    if aguid == T4_LIB_GUID or parent == T4_LIB_GUID or _t4_node(parent):
+        node = _t4_node(parent)
+        if node is None and not _t4_sources():
+            return JSONResponse({"code": 0, "msg": "", "data": {
+                "mdb_name": T4_LIB_TITLE, "mdb_category": "Mix", "top_dir": "",
+                "dir": T4_LIB_TITLE, "jump_list": [], "total": 0, "list": []}})
+        started = time.monotonic()
+        try:
+            if node and node["kind"] == "title":
+                await asyncio.wait_for(_get_t4_service().ensure_detail(
+                    ext_client(request), node["target_guid"]), timeout=35)
+            data = await asyncio.wait_for(
+                _get_t4_browser().listing(ext_client(request), parent or T4_LIB_GUID, body),
+                timeout=35)
+        except asyncio.TimeoutError:
+            _log.warning(
+                "T4 browse timeout source=%s node=%s kind=%s page=%s elapsed_ms=%d",
+                (node or {}).get("source_id", ""), parent,
+                (node or {}).get("kind", "root"), body.get("page", 1),
+                int((time.monotonic() - started) * 1000))
+            return JSONResponse({"code": -1, "msg": "T4 浏览超时，请稍后重新进入",
+                                 "data": None}, status_code=504)
+        except t4.T4Error as exc:
+            _log.warning("T4 browse failed: %s", exc)
+            return JSONResponse({"code": -1, "msg": str(exc), "data": None},
+                                status_code=502)
+        data["list"] = clientmod.normalize_cards(
+            [_apply_marks(row) for row in data["list"]], client)
+        return JSONResponse({"code": 0, "msg": "", "data": data})
 
     # —— TVBox 加固源专区库 ——
 
@@ -1913,8 +2023,126 @@ async def search_list(request: Request):
 
 # ------------------------------------------------------------- 详情 / 播放
 
+async def _load_t4_detail(guid: str, request: Request):
+    ep = store.get_episode(guid)
+    if ep:
+        guid = ep["online_guid"]
+    brief = store.get_title_by_guid(guid)
+    if not brief:
+        meta = store.get_season(guid)
+        if meta:
+            guid = meta["online_guid"]
+            brief = store.get_title_by_guid(guid)
+    if not brief or brief.get("locator", {}).get("kind") != "t4":
+        return None
+    try:
+        await _get_t4_service().ensure_detail(ext_client(request), guid)
+    except t4.T4Error as exc:
+        _log.warning("T4 detail %s: %s", guid, exc)
+        return JSONResponse({"code": -1, "msg": str(exc), "data": None},
+                            status_code=502)
+    return None
+
+
+def _t4_media_url(request: Request, mg: str, **params) -> str:
+    # Native STRM players consume this URL without the browser's origin resolution.
+    scheme = request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
+    if scheme not in ("http", "https"):
+        scheme = request.url.scheme
+    host = request.headers.get("x-forwarded-host", "").split(",")[0].strip()
+    host = host or request.url.netloc
+    return urllib.parse.urlunsplit((
+        scheme, host, f"{ONLINE_PREFIX}/{mg}/t4",
+        urllib.parse.urlencode(params), ""))
+
+
+async def _t4_play_response(mg: str, target: dict, body: dict, request: Request):
+    try:
+        result = await _get_t4_service().resolve(ext_client(request), target)
+        await _get_t4_media().identify(ext_client(request), result)
+        if result.wrapper == "DASH":
+            raise t4.T4Error("当前飞牛适配尚未验证 DASH/双轨播放，未改写为 HLS")
+    except t4.T4Error as exc:
+        _log.warning("T4 play %s: %s", mg, exc)
+        return JSONResponse({"code": -1, "msg": str(exc), "data": None},
+                            status_code=502)
+    # Headers stay server-side; unsigned public results need no extra media hop.
+    if result.wrapper == "HLS":
+        session = _get_t4_service().create_session(mg, target)
+        link = _t4_media_url(request, mg, session=session)
+    else:
+        link = _t4_media_url(request, mg, line=target["line"]) \
+            if result.needs_proxy else result.url
+    _log.info("T4 handoff media=%s client=%s wrapper=%s delivery=%s absolute=%s",
+              mg, _client_of(request).label, result.wrapper,
+              "server" if result.needs_proxy else "direct",
+              bool(urllib.parse.urlsplit(link).netloc))
+    return JSONResponse({"code": 0, "msg": "", "data": {
+        "audio_guid": "", "audio_index": -1, "hls_time": 6,
+        "is_subtitle_external": 0, "media_guid": mg, "play_link": link,
+        "subtitle_guid": "", "subtitle_index": -1, "subtitle_link": "",
+        "video_guid": body.get("video_guid", vg_for(mg)), "video_index": 0,
+        "wrapper": result.wrapper, "non_fatal_errno": None, "video_encoder": "",
+        "not_supported_resolution": "", "supported_highest_resolution": ""}})
+
+
+@app.api_route(f"{ONLINE_PREFIX}/{{mg}}/t4", methods=["GET", "HEAD"])
+async def t4_range(mg: str, request: Request):
+    target = store.resolve_media_guid(mg)
+    if not target or not target.get("t4"):
+        return Response("not found", status_code=404)
+    if request.query_params.get("session"):
+        target = _get_t4_service().session_target(mg, request.query_params["session"])
+        if target is None:
+            return Response("播放会话已过期，请重新播放", status_code=410)
+    try:
+        target = _t4_selected_target(mg, target, request.query_params, request)
+    except t4.T4Error as exc:
+        return Response(str(exc), status_code=400)
+    try:
+        result = await _get_t4_service().resolve(ext_client(request), target)
+        await _get_t4_media().identify(ext_client(request), result)
+        if result.wrapper == "DASH":
+            raise t4.T4Error("当前飞牛适配尚未验证 DASH/双轨播放")
+    except t4.T4Error as exc:
+        return Response(str(exc), status_code=502)
+    response = await _get_t4_media().deliver(ext_client(request), result.url, result, request)
+    if response.status_code >= 400:
+        _get_t4_service().invalidate_playback(target)
+    return response
+
+
+@app.api_route("/v/media/t4-resource/{token}", methods=["GET", "HEAD"])
+async def t4_resource(token: str, request: Request):
+    if t4_media is None:
+        return Response("T4 session expired", status_code=410)
+    return await t4_media.resource_response(ext_client(request), token, request)
+
+
 @app.get("/v/api/v1/item/{guid}")
 async def item_detail(guid: str, request: Request):
+    if guid == T4_LIB_GUID or _t4_node(guid):
+        if guid == T4_LIB_GUID and not _t4_sources():
+            return JSONResponse({"code": -6, "msg": "T4 library unavailable", "data": None})
+        if not _viewer_can_open_lib(request, guid):
+            return JSONResponse({"code": -6, "msg": "此媒体库不存在", "data": None})
+        if guid == T4_LIB_GUID:
+            data = inj._base_item(guid=guid, type="MediaDB", title=T4_LIB_TITLE,
+                                  ancestor_guid="", ancestor_name="", ancestor_category="",
+                                  can_play=0, play_item_guid="", play_error="", logic_type=0)
+        else:
+            node = _t4_node(guid)
+            try:
+                _get_t4_browser().source(node["source_id"])
+            except t4.T4Error as exc:
+                return JSONResponse({"code": -1, "msg": str(exc), "data": None},
+                                    status_code=502)
+            data = _get_t4_browser().card(guid)
+        return JSONResponse({"code": 0, "msg": "", "data":
+                             clientmod.normalize_detail(data, _client_of(request))})
+    error = await _load_t4_detail(guid, request)
+    if error is not None:
+        return error
     client = _client_of(request)
     # 单源独立媒体库根节点
     sscope = standalone_source_of(guid)
@@ -2019,30 +2247,15 @@ async def item_detail(guid: str, request: Request):
     # 伪造的 Season / Episode 节点
     if store.get_episode(guid):
         ep = store.get_episode(guid)
-        data = inj._base_item(
-            guid=guid, type="Episode", title=ep["ep_title"],
-            parent_guid=ep["season_guid"], parent_title="第 1 季",
-            tv_title=ep["title"], season_number=1, episode_number=ep["index"] + 1,
-            number_of_seasons=1, can_play=1,
-            media_guid=ep_media_guid(guid), video_guid=ep_video_guid(guid))
+        data = inj.episode_item(ep)
         _apply_marks(data)
         return JSONResponse({"code": 0, "msg": "",
                              "data": clientmod.normalize_detail(data, client)})
-    from store import season_guid as _sg
-    # 反查 season guid
-    tv = None
-    for g in store._titles:
-        if _sg(g) == guid:
-            tv = g
-            break
-    if tv:
+    season = store.get_season(guid)
+    if season:
+        tv = season["online_guid"]
         brief = store.get_title_by_guid(tv)
-        data = inj._base_item(
-            guid=guid, type="Season", title="第 1 季", parent_guid=tv,
-            parent_title=brief["title"], tv_title=brief["title"],
-            season_number=1, number_of_seasons=1,
-            number_of_episodes=store.episode_count(tv), can_play=None,
-            poster=inj._poster(brief.get("poster")))
+        data = inj.season_item(brief, dict(season, guid=guid))
         return JSONResponse({"code": 0, "msg": "",
                              "data": clientmod.normalize_detail(data, client)})
     brief = store.get_title_by_guid(guid)
@@ -2056,6 +2269,9 @@ async def item_detail(guid: str, request: Request):
 
 @app.get("/v/api/v1/season/list/{guid}")
 async def season_list_route(guid: str, request: Request):
+    error = await _load_t4_detail(guid, request)
+    if error is not None:
+        return error
     brief = store.get_title_by_guid(guid)
     if not brief or not inj.is_tv(brief):
         return await forward_upstream(request)
@@ -2067,26 +2283,29 @@ async def season_list_route(guid: str, request: Request):
 @app.get("/v/api/v1/episode/list/{guid}")
 async def episode_list_route(guid: str, request: Request):
     # guid 可能是伪造的 season guid，也可能是 tv guid
-    tv = None
-    from store import season_guid as _sg
-    for g in store._titles:
-        if _sg(g) == guid:
-            tv = g
-            break
+    season = store.get_season(guid)
+    tv = season["online_guid"] if season else None
     if not tv:
         brief = store.get_title_by_guid(guid)
         if brief and inj.is_tv(brief):
             tv = guid
     if not tv:
         return await forward_upstream(request)
+    error = await _load_t4_detail(tv, request)
+    if error is not None:
+        return error
     client = _client_of(request)
     return JSONResponse({"code": 0, "msg": "",
                          "data": clientmod.normalize_cards(
-                             inj.episode_list(store.get_title_by_guid(tv)), client)})
+                             inj.episode_list(store.get_title_by_guid(tv),
+                                              season["season"] if season else None), client)})
 
 
 @app.get("/v/api/v1/stream/list/{guid}")
 async def stream_list(guid: str, request: Request):
+    error = await _load_t4_detail(guid, request)
+    if error is not None:
+        return error
     ep = store.get_episode(guid)
     target = None
     if ep:
@@ -2108,12 +2327,18 @@ async def stream_list(guid: str, request: Request):
         sl = inj.stream_list(brief)
         if inj.is_tv(brief):
             # 标题播放键实际播放智能续播集，线路菜单也以该集为准
-            egs = store.tv_episode_guids(guid)
+            egs = store.tv_episode_guids(guid, regular_only=True)
             if egs:
-                target = store.get_episode_target(egs[0])
+                resume_guid, _ = history.resume_episode(egs, latest_interaction=True)
+                target = store.get_episode_target(resume_guid)
         else:
             target = store.resolve_media_guid(media_guid(guid))
     quals = _qualities(target) if target else []
+    if target and target.get("t4"):
+        # Menus never start a media probe. Reuse an exact episode/line result.
+        playback = _get_t4_service().cached_playback(target)
+        metadata = _get_t4_media().metadata.cached(playback) if playback else None
+        t4_metadata.apply(sl, playback.wrapper if playback else "", metadata)
     if quals:
         sl["video_streams"][0]["resolution_type"] = quals[0]["resolution"]
         sl["video_streams"][0]["bps"] = quals[0]["bitrate"]
@@ -2335,9 +2560,10 @@ def _online_play_info(guid: str, request: Request) -> dict | None:
         return None
     rec = history.get(guid)
     if inj.is_tv(brief):
-        ep_guids = store.tv_episode_guids(guid)
+        ep_guids = store.tv_episode_guids(guid, regular_only=True)
         if ep_guids:
-            target_eg, resume_ts = history.resume_episode(ep_guids)
+            target_eg, resume_ts = history.resume_episode(
+                ep_guids, latest_interaction=brief.get("locator", {}).get("kind") == "t4")
             if target_eg:
                 ep = store.get_episode(target_eg)
                 if ep:
@@ -2356,6 +2582,9 @@ async def play_info(request: Request):
     body = json.loads(await request.body() or b"{}")
     guid = body.get("item_guid", "")
     client = _client_of(request)
+    error = await _load_t4_detail(guid, request)
+    if error is not None:
+        return error
 
 
     def _prewarm_from_info(info: dict):
@@ -2430,8 +2659,11 @@ async def play_info(request: Request):
 
 def _line_choices(target: dict) -> list[dict]:
     """该播放目标可切换的线路：按资源站去重（同一站直链优先于 share 页），
-    当前播放线路排第一。"""
+    当前播放线路排第一；T4 保持稳定菜单顺序，防止切线后序号漂移。"""
     raw = store.target_lines(target)
+    if target.get("t4"):
+        # Stable menu indices even when a session has selected another line.
+        return [{**choice, "label": choice["line"]} for choice in raw]
     cur = target.get("line")
     # 当前线路置顶，其余直链在前、可解析页在后
     raw.sort(key=lambda t: (t["line"] != cur, not t["m3u8"]
@@ -2494,6 +2726,48 @@ def _qualities(target: dict) -> list[dict]:
     return out
 
 
+def _t4_selected_target(mg: str, target: dict, selection, request: Request) -> dict:
+    """Use the same episode/line identity for stream, play and native Range."""
+    choices = _line_choices(target)
+    names = [choice["line"] for choice in choices]
+    line = selection.get("line")
+    index = selection.get("direct_link_quality_index")
+    if not line and index is not None:
+        try:
+            number = int(index)
+        except (TypeError, ValueError):
+            raise t4.T4Error("T4 线路序号无效，请重新选择线路") from None
+        if not 0 <= number < len(names):
+            raise t4.T4Error("T4 线路序号已失效，请重新打开详情")
+        line = names[number]
+    if not line:
+        line = _line_of_bitrate(selection.get("bitrate"), names)
+    if not line:
+        link = selection.get("playlink") or request.headers.get("Play-Link", "")
+        try:
+            parsed = urllib.parse.urlsplit(link)
+        except ValueError:
+            raise t4.T4Error("播放地址格式无效，请重新播放") from None
+        # Read only our own media selector, never fetch a client-supplied URL.
+        if parsed.path == f"{ONLINE_PREFIX}/{mg}/t4":
+            params = urllib.parse.parse_qs(parsed.query)
+            line = params.get("line", [None])[0]
+            session = params.get("session", [""])[0]
+            if not line and session:
+                target = _get_t4_service().session_target(mg, session)
+                if target is None:
+                    raise t4.T4Error("播放会话已过期，请重新播放")
+        elif parsed.path.startswith(f"{ONLINE_PREFIX}/"):
+            raise t4.T4Error("播放地址与当前分集不一致，请重新选择分集")
+        elif link:
+            line = _get_t4_service().cached_line_for_url(target, link)
+    if not line:
+        return target
+    if line not in names:
+        raise t4.T4Error("T4 线路已失效或缺少该分集，请重新打开详情")
+    return next(choice for choice in choices if choice["line"] == line)
+
+
 @app.post("/v/api/v1/stream")
 async def stream_post(request: Request):
     import json
@@ -2507,6 +2781,73 @@ async def stream_post(request: Request):
         return _instant_stream_response(mg)
     if not target:
         return await forward_upstream(request)
+    if target.get("t4"):
+        started = time.monotonic()
+        _log.info("T4 stream start media=%s client=%s",
+                  mg, _client_of(request).label)
+        menu_target = target
+        choices = _line_choices(target)
+        try:
+            target = _t4_selected_target(mg, target, body, request)
+        except t4.T4Error as exc:
+            _log.warning("T4 stream failed media=%s client=%s stage=selection",
+                         mg, _client_of(request).label)
+            return JSONResponse({"code": -1, "msg": str(exc), "data": None},
+                                status_code=400)
+        try:
+            playback = await _get_t4_service().resolve(ext_client(request), target)
+            await _get_t4_media().identify(ext_client(request), playback)
+            if playback.wrapper == "DASH":
+                raise t4.T4Error("当前飞牛适配尚未验证 DASH/双轨播放")
+        except t4.T4Error as exc:
+            _log.warning("T4 stream failed media=%s client=%s stage=resolve elapsed_ms=%d",
+                         mg, _client_of(request).label,
+                         int((time.monotonic() - started) * 1000))
+            return JSONResponse({"code": -1, "msg": str(exc), "data": None},
+                                status_code=502)
+        if target.get("kind") == "episode":
+            sl = inj.episode_stream_list(target)
+        else:
+            sl = inj.stream_list(store.get_title_by_guid(target["online_guid"]))
+        metadata = await _get_t4_media().metadata.for_playback(
+            ext_client(request), playback,
+            wait=max(0.0, T4_STREAM_READY_BUDGET - (time.monotonic() - started)))
+        t4_metadata.apply(sl, playback.wrapper, metadata)
+        f, v = sl["files"][0], sl["video_streams"][0]
+        if not f["size"]:
+            f["size"] = playback.size
+        qualities = _qualities(menu_target)
+        names = [choice["line"] for choice in choices]
+        if len(choices) > 1:
+            # These codes select sources in the official quality menu, not encoders.
+            v.update(resolution_type=target.get("label") or target["line"],
+                     bps=_line_bitrate(target["line"], names))
+        else:
+            # Native players also require a ready original-quality entry for one source.
+            qualities = [{
+                "resolution": v["resolution_type"] or "原画",
+                "bitrate": v["bps"],
+                "progressive": True,
+                "is_m3u8": False,
+            }]
+        data = {"file_stream": f, "video_stream": v, "audio_streams": sl["audio_streams"],
+                "subtitle_streams": [], "qualities": qualities, "cloud_storage_info": None}
+        if playback.wrapper != "HLS":
+            # trim.media 0.9.8 uses 9001 for remote raw-file/STRM delivery.
+            # This is a response contract only; no STRM file or DB row is created.
+            raw = [{
+                **quality,
+                "url": _t4_media_url(request, mg, line=choice["line"]),
+            } for choice, quality in zip(choices, qualities)]
+            data.update(cloud_storage_info={"cloud_storage_type": 9001},
+                        direct_link_qualities=raw)
+        _log.info("T4 stream media=%s client=%s wrapper=%s delivery=%s lines=%d "
+                  "qualities=%d audio=%d elapsed_ms=%d",
+                  mg, _client_of(request).label, playback.wrapper,
+                  "server" if playback.needs_proxy else "direct", len(choices),
+                  len(qualities), len(sl["audio_streams"]),
+                  int((time.monotonic() - started) * 1000))
+        return JSONResponse({"code": 0, "msg": "", "data": data})
     if target.get("kind") == "episode":
         sl = inj.episode_stream_list(target)
     else:
@@ -2525,13 +2866,13 @@ async def stream_post(request: Request):
         "qualities": quals, "cloud_storage_info": None}})
 
 
-@app.get("/v/api/v1/media/range/{mg}")
+@app.api_route("/v/api/v1/media/range/{mg}", methods=["GET", "HEAD"])
 async def media_range(mg: str, request: Request):
     """App（Flutter 原生播放器）不走 /play/play，而是直接 GET /media/range/<mg>。
 
     官方后端对我们的虚拟 mg 无本地文件记录，会返回 403（App 提示“文件权限不足”）。
-    这里识别在线 mg：按实际源类型把它引导到既有的 HLS 或直链代理（302），
-    非在线 mg 原样透传官方。
+    T4 直接流式交付，保留 Range 和线路选择；CMS 引导到既有代理（302）。
+    非在线 mg 原样流式透传官方。
     """
     target = store.resolve_media_guid(mg)
     chart_g = "" if target else chart_guid_by_media(mg)
@@ -2546,6 +2887,8 @@ async def media_range(mg: str, request: Request):
         # 本地真实媒体字节（Flutter 原生播放器 Range 请求）：必须流式透传，
         # 不能整包缓冲几 GB 的影片，否则打满内存/swap 拖死整机。
         return await forward_upstream_streaming(request)
+    if target.get("t4"):
+        return await t4_range(mg, request)
     # 同样【不在此同步解析】（会卡 App 起播、像点了没反应）：先瞬时 302 到对应代理，
     # 由 preset/main、direct 内部在播放加载阶段解析，并有双向 302 兜底。
     _wrapper, is_hls = _guess_wrapper(target)
@@ -2599,6 +2942,13 @@ async def play_play(request: Request):
         return _instant_play_response(mg, body.get("video_guid", ""))
     if not base_target:
         return await forward_upstream(request)
+    if base_target.get("t4"):
+        try:
+            target = _t4_selected_target(mg, base_target, body, request)
+        except t4.T4Error as exc:
+            return JSONResponse({"code": -1, "msg": str(exc), "data": None},
+                                status_code=400)
+        return await _t4_play_response(mg, target, body, request)
     # 播放器「清晰度/线路」菜单切换时会带我们编码的 bitrate，据此选线路
     choices = _line_choices(base_target)
     chosen_line = None
@@ -2860,7 +3210,7 @@ async def play_list(request: Request):
         headers={"Content-Type": "application/json; charset=utf-8"})
 
 
-# media/p 的 RPC（quit/checkPlayLink 等）对在线 playLink 直接回 succ
+# 在线 RPC 不交给官方文件任务；T4 HLS 切线更新独立播放会话。
 @app.post("/v/api/v1/media/p")
 async def media_p(request: Request):
     import json
@@ -2869,8 +3219,43 @@ async def media_p(request: Request):
     except Exception:
         body = {}
     link = body.get("playLink", "")
-    if isinstance(link, str) and link.startswith(ONLINE_PREFIX):
-        # 在线播放的清晰度/线路切换（resetQuality）等无官方媒体任务，直接成功
+    try:
+        parsed = urllib.parse.urlsplit(link) if isinstance(link, str) else None
+    except ValueError:
+        parsed = None
+    online = bool(parsed and parsed.path.startswith(ONLINE_PREFIX + "/"))
+    if online:
+        parts = parsed.path.removeprefix(ONLINE_PREFIX + "/").split("/")
+        session = urllib.parse.parse_qs(parsed.query).get("session", [""])[0]
+        if len(parts) == 2 and parts[1] == "t4" and session:
+            mg = parts[0]
+            if t4_service is None:
+                return JSONResponse({"code": -1, "msg": "T4 session expired",
+                                     "data": {"result": "fail"}}, status_code=410)
+            target = _get_t4_service().session_target(mg, session)
+            if target is None:
+                return JSONResponse({"code": -1, "msg": "播放会话已过期，请重新播放",
+                                     "data": {"result": "fail"}}, status_code=410)
+            if body.get("req") == "media.resetQuality":
+                try:
+                    quality = body.get("quality") or {}
+                    names = [choice["line"] for choice in _line_choices(target)]
+                    line = _line_of_bitrate(quality.get("bitrate"), names)
+                    if line is None:
+                        raise t4.T4Error("请选择 T4 源线路，不支持服务端转码清晰度")
+                    target = _t4_selected_target(mg, target, {"line": line}, request)
+                    playback = await _get_t4_service().resolve(ext_client(request), target)
+                    await _get_t4_media().identify(ext_client(request), playback)
+                    if playback.wrapper != "HLS":
+                        raise t4.T4Error("线路媒体格式不同，请重新进入播放")
+                    _get_t4_service().set_session_target(mg, session, target)
+                except t4.T4Error as exc:
+                    return JSONResponse({"code": -1, "msg": str(exc),
+                                         "data": {"result": "fail"}}, status_code=502)
+            elif body.get("req") == "media.quit":
+                _get_t4_service().close_session(mg, session)
+    if isinstance(link, str) and link and (
+            online or (t4_service is not None and t4_service.owns_playback_url(link))):
         return JSONResponse({"code": 0, "msg": "",
                              "data": {"reqid": body.get("reqid", ""), "result": "succ"}})
     return await forward_upstream(request)
@@ -3932,6 +4317,8 @@ async def _get_playlist_cached(mg: str, picked: dict, request: Request):
 
 def _warm_playlist(mg: str, picked: dict, request: Request) -> None:
     """点击播放时后台预热默认线路播放列表（单飞，真正取 main 时并入同一任务）。"""
+    if picked.get("t4"):
+        return
     key = _playlist_cache_key(picked)
     hit = _PLAYLIST_CACHE.get(key)
     if hit and time.time() - hit[0] < _PLAYLIST_TTL:
@@ -4895,6 +5282,9 @@ async def ext_source_priority(request: Request):
 def _virtual_lib_list() -> list[dict]:
     """供管理台展示的虚拟媒体库清单（榜单/海量/单源/加固/网盘），含显隐与排序。"""
     out = []
+    out.append({"guid": T4_LIB_GUID, "key": "t4", "title": T4_LIB_TITLE,
+                "kind": "t4", "group": "t4", "group_on": bool(_t4_sources()),
+                "count": len(_t4_sources())})
     # 榜单四库
     for cat, title, _c in chartmod.CHART_CATEGORIES:
         out.append({"guid": CHART_LIB_GUIDS[cat],
@@ -5089,6 +5479,7 @@ async def ext_set_config(request: Request):
         "titles_cache_max_entries", "titles_cache_max_mb",
         "titles_flush_debounce",
         "catalog_library_enabled",
+        "t4_library_enabled",
         "prefer_quality_source",
         "auto_best_source",
         "line_fastest", "line_fastest_max", "line_fastest_timeout",
@@ -5138,7 +5529,7 @@ async def ext_set_config(request: Request):
                     sources_changed = True
                 if isinstance(ch.get("standalone"), bool) and \
                         bool(cur[sid].get("standalone")) != ch["standalone"]:
-                    cur[sid]["standalone"] = ch["standalone"]
+                    cur[sid]["standalone"] = ch["standalone"] and cur[sid].get("kind") != "t4"
                     sources_changed = True
                 if isinstance(ch.get("loose_filter"), bool):
                     cur[sid]["loose_filter"] = ch["loose_filter"]
@@ -5344,13 +5735,13 @@ async def ext_source_test(request: Request):
     body = await request.json()
     api = (body.get("api") or "").strip()
     sid = body.get("id")
+    src = next((s for s in config.all_sources() if s["id"] == sid), None)
     if not api and sid:
-        src = next((s for s in config.all_sources() if s["id"] == sid), None)
         if not src:
             return JSONResponse({"code": 404, "msg": "源不存在"}, status_code=404)
         api = src["api"]
     keyword = (body.get("keyword") or "庆余年").strip()
-    result = await providers.probe_source(api, keyword=keyword)
+    result = await providers.probe_source(api, keyword=keyword, source=src)
     return {"code": 0, "msg": "", "data": result}
 
 
@@ -5358,7 +5749,7 @@ async def ext_source_test(request: Request):
 async def ext_source_test_all(request: Request):
     """并发探测全部源，返回 [{id,name,...result}]。"""
     async def one(s):
-        r = await providers.probe_source(s["api"])
+        r = await providers.probe_source(s["api"], source=s)
         r.update(id=s["id"], name=s["name"], enabled=bool(s.get("enabled")),
                  builtin=bool(s.get("builtin")))
         return r
@@ -5370,10 +5761,10 @@ async def ext_source_test_all(request: Request):
 
 @app.post("/v/api/ext/source/import-tvbox")
 async def ext_import_tvbox(request: Request):
-    """导入 TVBox/影视仓/OK影视配置中的标准苹果CMS JSON/XML 源。
+    """导入 TVBox 配置中的 CMS 与远程 T4 源。
 
     入参：{url?} 或 {text?}，外加 standalone（可选）。对候选源做轻量探测，
-    通过者加入自定义源；爬虫 jar / 网盘 / 直播源跳过。
+    CMS 探测通过后导入；T4 只登记来源，不预运行插件。
     """
     import tvbox as tvboxmod
     body = await request.json()
@@ -5394,10 +5785,14 @@ async def ext_import_tvbox(request: Request):
                             status_code=502)
 
     candidates: list[dict] = []
+    t4_candidates: list[dict] = []
     seen_api: set[str] = set()
     skipped: list[str] = []
     for s in sites:
         status, norm = tvboxmod.classify_site(s)
+        if status == "add_t4":
+            t4_candidates.append(norm)
+            continue
         if not norm:
             nm = str(s.get("name") or s.get("key") or s.get("api") or "未命名")
             if nm not in skipped:
@@ -5440,7 +5835,8 @@ async def ext_import_tvbox(request: Request):
             dup += 1
         if len(added_names) >= 40:
             break
-    if added_names:
+    t4_report = config.import_t4_sources(t4_candidates)
+    if added_names or t4_report["added"]:
         _search_cache.clear()
         if standalone:
             _schedule_routes_refresh()
@@ -5450,8 +5846,9 @@ async def ext_import_tvbox(request: Request):
     return {"code": 0, "msg": "", "data": {
         "scanned": len(sites),
         "candidates": len(candidates),
-        "added": len(added_names),
-        "added_names": added_names,
+        "added": len(added_names) + t4_report["added"],
+        "added_names": added_names + t4_report["added_names"],
+        "t4": t4_report,
         "duplicate": dup,
         "skipped": len(skipped),
         "skipped_detail": skipped[:40],
@@ -5516,6 +5913,7 @@ async def ext_import_subscription(request: Request):
         _log.info("merge ad rules failed", exc_info=True)
 
     groups = tvboxmod.classify_subscription(raw_sites, _spider, _base)
+    t4_report = config.import_t4_sources(groups.get("t4", []))
     cms_cands = groups["cms"]
     guard_sites = groups["guard"]
     csp_items = groups.get("csp", [])
@@ -5569,7 +5967,7 @@ async def ext_import_subscription(request: Request):
     csp_report = None
     drpy_report = None
 
-    if cms_added or (guard_report and guard_report.get("enabled_count")) \
+    if cms_added or t4_report["added"] or (guard_report and guard_report.get("enabled_count")) \
             or (csp_report and csp_report.get("added")) \
             or (drpy_report and drpy_report.get("added")):
         _search_cache.clear()
@@ -5578,6 +5976,7 @@ async def ext_import_subscription(request: Request):
     return {"code": 0, "msg": "", "data": {
         "scanned": len(raw_sites),
         "subscriptions": _subs,
+        "t4": t4_report,
         "cms": {
             "candidates": len(cms_cands),
             "added": len(cms_added),

@@ -187,7 +187,8 @@ class History:
             return [dict(r) for r in bucket.values()]
 
     def resume_episode(self, ep_guids: list[str],
-                       user: str | None = None) -> tuple[str | None, int]:
+                       user: str | None = None, *,
+                       latest_interaction: bool = False) -> tuple[str | None, int]:
         """给定一部剧按顺序的全部集 guid，决定"该播哪一集"。
 
         - 从没看过 → 第一集（ts=0）
@@ -207,11 +208,12 @@ class History:
                        if g in bucket]
             if not watched:
                 return (ep_guids[0] if ep_guids else None), 0
-            # 找未看完的，取集序最大（最近在追）的一集
             unfinished = [(i, r) for i, r in watched
                           if not self._finished(r)]
             if unfinished:
-                i, r = max(unfinished, key=lambda x: x[0])
+                # T4 opts into rewatch semantics; CMS retains episode-order resume.
+                i, r = max(unfinished, key=lambda x: (
+                    x[1].get("updated_at", 0) if latest_interaction else x[0]))
                 return ep_guids[i], int(r.get("ts", 0) or 0)
             # 都看完了 → 下一集
             last_i = max(i for i, _ in watched)
