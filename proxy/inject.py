@@ -50,6 +50,13 @@ _MOVIE_TYPE_WORDS = ("电影", "影片", "剧情片", "动作片", "喜剧片", 
                      "恐怖片", "纪录片")
 
 
+def media_type_name(primary: str, fallback: str = "") -> str:
+    for value in (primary, fallback):
+        if any(word in (value or "") for word in _MOVIE_TYPE_WORDS + _TV_TYPE_WORDS):
+            return value
+    return primary or fallback or ""
+
+
 def is_tv(b: dict) -> bool:
     typ = (b.get("type_name") or "").strip()
     # 明确的电影类型（含动画电影、纪录片等）一律作为单部电影点开即播。

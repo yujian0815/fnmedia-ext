@@ -90,6 +90,8 @@ class Episode:
     # play_from 是该集所属线路标识，解码必须一并上送（公开构建下恒为 False）
     xsrc: bool = False
     play_from: str = ""
+    t4: bool = False
+    episode_key: str = ""
 
 
 @dataclass
@@ -108,6 +110,7 @@ class OnlineTitle:
     actor: str
     director: str
     sources: dict          # {播放线路名: [Episode,...]}
+    locator: dict = field(default_factory=dict)
 
     @property
     def online_id(self) -> str:
