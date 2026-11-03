@@ -74,11 +74,21 @@ jobs:
             curl -fsSL --max-time 60 "https://raw.githubusercontent.com/Blue-Mink/moo/${SCRIPT_REF}/tools/update_moo_json.py" -o /tmp/u.py || curl -fsSL --max-time 60 "https://cdn.jsdelivr.net/gh/Blue-Mink/moo@${SCRIPT_REF}/tools/update_moo_json.py" -o /tmp/u.py
           fi
           python3 /tmp/u.py --help >/dev/null
+      - name: Debug check files
+        run: |
+          echo "===== PWD ====="
+          pwd
+          echo "===== MOO_JSON ====="
+          echo "$MOO_JSON"
+          echo "===== git tracked files ====="
+          git ls-files | grep -i moo
+          echo "===== all files ====="
+          ls -la
       - name: Update moo.json
         run: |
           ARGS=""
           if [ -s /tmp/notes.md ]; then ARGS="--changelog-file /tmp/notes.md"; fi
-          python3 /tmp/u.py --file "$MOO_JSON" --tag "${{ steps.t.outputs.tag }}" --fpk /tmp/fpk/*.fpk --keep "${KEEP:-2}" $ARGS
+          python3 /tmp/u.py --create --file "$MOO_JSON" --tag "${{ steps.t.outputs.tag }}" --fpk /tmp/fpk/*.fpk --keep "${KEEP:-2}" $ARGS
       - name: Commit
         run: |
           git diff --quiet -- "$MOO_JSON" && exit 0
