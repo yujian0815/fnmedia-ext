@@ -36,6 +36,7 @@ _STANDALONE_PREFIX = "fnmedia-standalone:"
 _GUARD_LIB_PREFIX = "fnmedia-guard:"
 _GUARD_NATIVE_GUID = hashlib.md5(b"fnmedia-guardnative:root").hexdigest()
 _XLIB_LIB_PREFIX = "fnmedia-xlib:"
+_T4_GUID = hashlib.md5(b"fnmedia-t4-browse").hexdigest()
 
 # 库类型（固定/组开关）与 key 前缀
 K_CHART = "chart"        # 豆瓣真实榜单四库
@@ -44,6 +45,7 @@ K_GUARD_NATIVE = "guard-native"
 K_STANDALONE = "standalone"
 K_GUARD = "guard"
 K_XLIB = "xlib"
+K_T4 = "t4"
 
 
 def standalone_guid(source_id: str) -> str:
@@ -66,6 +68,8 @@ def key_of_guid(guid: str) -> str | None:
     """guid 反查稳定库键；非虚拟库返回 None。动态库需要现场遍历（见 catalog 函数）。"""
     if not guid:
         return None
+    if guid == _T4_GUID:
+        return K_T4
     for cat, g in CHART_LIB_GUIDS.items():
         if g == guid:
             return make_key(K_CHART, cat)
