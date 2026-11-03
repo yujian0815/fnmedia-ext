@@ -207,11 +207,11 @@ class History:
                        if g in bucket]
             if not watched:
                 return (ep_guids[0] if ep_guids else None), 0
-            # 找未看完的，取集序最大（最近在追）的一集
+            # 回看较早一集时，也要恢复到最近一次交互的进度
             unfinished = [(i, r) for i, r in watched
                           if not self._finished(r)]
             if unfinished:
-                i, r = max(unfinished, key=lambda x: x[0])
+                i, r = max(unfinished, key=lambda x: x[1].get("updated_at", 0))
                 return ep_guids[i], int(r.get("ts", 0) or 0)
             # 都看完了 → 下一集
             last_i = max(i for i, _ in watched)

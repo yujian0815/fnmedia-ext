@@ -219,6 +219,8 @@ class Catalog:
 
     # -------------------------------------------------- 分类表 / 路由
     async def refresh_routes(self, sources: list[dict]) -> dict[str, Any]:
+        # T4 浏览不是 CMS 深翻，绝不预展开云插件
+        sources = [s for s in sources if s.get("kind") != "t4"]
         if self._refreshing:
             return self.status()
         self._refreshing = True

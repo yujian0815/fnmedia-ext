@@ -41,10 +41,25 @@ DEFAULTS = {
     "line_fastest_timeout": 4.0,
     # 默认线（高质量源）领先优势（秒）：它在该优势内返回就算赢，避免无谓抖动
     "line_fastest_prefer": 0.25,
+    # —— 全局源测速（speedbench）：后台周期性实测各启用源的搜索+首分片延迟并排名，
+    # 播放自动选线 / 线路菜单据此直接选最快源，免去每次播放都多线竞速 ——
+    # 总开关
+    "speedbench_enabled": True,
+    # 自动测速间隔（分钟）。>=30 才自动跑；0=只手动测，不自动跑
+    "speedbench_interval_min": 60,
+    # 是否把测速最快的源置顶（线路菜单 + 竞速候选优先级）。起播最终仍以本片实测
+    # 最快线为准（源级样例测速代表不了每部片各自的分片 CDN），并缓存 1 小时免重复测速
+    "speedbench_pin_menu": True,
+    # 网盘转存缓存自动清理：开启后按“最后一次播放时间”清理插件转存目录中超时的
+    # 视频，防止网盘容量被不断转存占满。默认保留 6 小时；后台每小时检查一次。
+    "pan_cache_cleanup_enabled": True,
+    "pan_cache_ttl_hours": 6,
     # 虚拟“热门榜单”四库媒体库（豆瓣真实周榜/标签榜）
     "hot_library_enabled": True,
     # 虚拟“海量分类”四库媒体库（苹果 CMS 分类深翻）。与热门榜单相互独立开关。
     "catalog_library_enabled": True,
+    # T4 远程订阅源的「T4 选片」聚合库（云端插件按需浏览/播放，非 CMS 深翻）
+    "t4_library_enabled": True,
     # 是否把每个启用的 TVBox 加固源（csp_*Guard，如比特/糯米/花花）生成为一张
     # 独立“专区媒体库”卡片。默认关闭：加固源只作为播放时可切换的线路/搜索源，
     # 不在媒体库列表里产生空库。需要专区墙时可在管理页打开。
@@ -169,6 +184,11 @@ class Config:
                 m["standalone"] = bool(s.get("standalone", False))
                 m["loose_filter"] = bool(s.get("loose_filter", False))
                 m["builtin"] = bool(s.get("builtin", False))
+                # T4 远程订阅源的透传字段
+                for key in ("kind", "site_key", "ext", "searchable",
+                            "filterable", "indexs", "method"):
+                    if key in s:
+                        m[key] = s[key]
                 merged.append(m)
             cfg["sources"] = merged
             cfg["removed_ids"] = sorted(removed)
@@ -274,6 +294,26 @@ class Config:
     def source_priorities(self) -> dict:
         with _LOCK:
             return dict(self.get().get("source_priority") or {})
+
+    def import_t4_sources(self, sources: list[dict]) -> dict:
+        import t4
+        with _LOCK:
+            cfg = self.get()
+            existing = {s["id"] for s in cfg["sources"]}
+            added, duplicate = [], 0
+            for source in sources:
+                sid = t4.source_id(source["api"], source.get("ext"))
+                if sid in existing:
+                    duplicate += 1
+                    continue
+                cfg["sources"].append(dict(
+                    source, id=sid, kind="t4", builtin=False, standalone=False))
+                existing.add(sid)
+                added.append(source["name"])
+            if added:
+                self._persist(cfg)
+            return {"candidates": len(sources), "added": len(added),
+                    "added_names": added, "duplicate": duplicate}
 
     def set_source_priority(self, mapping: dict) -> tuple[bool, str]:
         """整体保存源优先级（id -> 整数权重），忽略未知源与非法值。"""
@@ -388,6 +428,8 @@ class Config:
             target = next((s for s in cfg["sources"] if s["id"] == sid), None)
             if not target:
                 return False, "源不存在"
+            if target.get("kind") == "t4" and on:
+                return False, "T4 来源统一显示在「T4 选片」，无需逐插件建立独立库"
             target["standalone"] = bool(on)
             self._persist(cfg)
             return True, "ok"

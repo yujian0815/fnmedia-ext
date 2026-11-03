@@ -24,6 +24,7 @@ from __future__ import annotations
 import re
 
 from dataclasses import dataclass
+from datetime import date, datetime
 
 # 端类别常量
 TV = "tv"            # 电视 / 盒子（Flutter，严格模型）
@@ -113,16 +114,15 @@ def _strict_date(v) -> str:
     s = str(v if v is not None else "").strip()
     if not s or s.lower() in ("0", "none", "null", "-", "nan"):
         return ""
-    m = re.match(r"^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?", s)
-    if not m:
-        return ""
+    m = re.fullmatch(r"(\d{4})(?:-(\d{1,2})(?:-(\d{1,2}))?)?", s)
     try:
-        y, mo, d = int(m.group(1)), int(m.group(2) or 1), int(m.group(3) or 1)
-        if not (1 <= mo <= 12 and 1 <= d <= 31):
-            return ""
+        if m:
+            return date(int(m[1]), int(m[2] or 1), int(m[3] or 1)).isoformat()
+        if re.match(r"^\d{4}-\d{2}-\d{2}[T ]", s):
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).date().isoformat()
     except (TypeError, ValueError):
         return ""
-    return f"{y:04d}-{mo:02d}-{d:02d}"
+    return ""
 
 
 def normalize_card(row: dict, client: Client) -> dict:
@@ -172,7 +172,7 @@ def normalize_detail(obj, client: Client):
 
     与列表卡不同：详情模型依赖 can_play/play_item_guid/play_error/posters 等大量字段
     才能进入播放页，故这里【绝不裁剪字段】，只把 TV 严格端会解析失败的形态归一：
-      * 4 位年份 -> yyyy-MM-dd；缺键不动（不写 "None"）。
+      * 年份/日期/空值 -> 合法 yyyy-MM-dd 或空串，状态与列表枚举一致。
       * 递归处理内嵌的 item / Episode / Season 对象与列表。
     手机/iOS/Web 原样返回。返回新对象，不修改入参。
     """
@@ -183,8 +183,10 @@ def normalize_detail(obj, client: Client):
         if isinstance(o, dict):
             x = {}
             for k, v in o.items():
-                if k in _DATE_KEYS and isinstance(v, str) and v:
+                if k in _DATE_KEYS:
                     x[k] = _strict_date(v)
+                elif k == "status":
+                    x[k] = "1"
                 else:
                     x[k] = _norm(v)
             return x

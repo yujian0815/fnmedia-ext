@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""TVBox / 影视仓 / OK影视 配置解析（只取标准苹果CMS 源）。
+"""TVBox 配置解析：苹果 CMS 与远程 T4，不在本进程运行爬虫。
 
 这三家（及大量换皮 App）共用同一套配置结构：一个 JSON，核心是 sites[]，
 每个站点含 key/name/type/api。我们只导入其中能被本插件直接使用的：
 
 - type 1（JSON）且 api 指向苹果CMS provide/vod 的站点；
 - type 0（XML）的苹果CMS站点（接口地址在播放链路上可被识别）。
+- type 4 的远程 T4 服务（含网盘，依赖由 T4 服务端承担）。
 
 明确不支持、直接跳过：
 - type 3 Spider（csp_*，依赖 Android jar/JS 爬虫运行时）；
-- 网盘（夸克/阿里/115/百度/UC 等）、嗅探解析、直播/电台源；
+- 本地网盘运行时、嗅探解析、直播/电台源；
 - 加密且无法解出 JSON 的强混淆订阅。
 
 支持的容器形态：单 JSON、base64 包裹、{"sites":[...]}、
@@ -269,6 +270,19 @@ def classify_site(site: dict) -> tuple[str, dict | None]:
     searchable = site.get("searchable", 1)
     if not api or not api.startswith(("http://", "https://")):
         return "skip", None
+    if t == "4":
+        import t4
+        return "add_t4", {
+            "name": name or site.get("key") or "T4",
+            "api": api, "kind": "t4", "site_key": str(site.get("key") or ""),
+            "ext": site.get("ext"),
+            "enabled": t4.switch(site.get("enabled")),
+            "searchable": t4.switch(searchable),
+            "filterable": t4.switch(site.get("filterable"), False),
+            "indexs": t4.switch(site.get("indexs")),
+            "method": "POST" if str(site.get("method", "")).upper() == "POST" else "GET",
+            "raw_type": t,
+        }
     low = api.lower()
     if t == "3" or api.startswith(_SPIDER_PREFIX) or "csp_" in low:
         return "skip", None
@@ -350,7 +364,7 @@ async def fetch_text(client: httpx.AsyncClient, url: str) -> str:
 
 async def load_remote(url: str) -> tuple[list[dict], int]:
     """拉取订阅（含多订阅聚合），返回 (sites, 子订阅数)。"""
-    sites, sub, _spider = await load_subscription(url=url)
+    sites, sub, _spider, _base = await load_subscription(url=url)
     return sites, sub
 
 
@@ -446,6 +460,8 @@ def classify_subscription(sites: list[dict], spider: str = "",
     guard: list[dict] = []
     csp: list[dict] = []
     drpy: list[dict] = []
+    t4_sites: list[dict] = []
+    seen_t4: set[str] = set()
     skipped: list[dict] = []
     seen_cms: set[str] = set()
     seen_guard: set[str] = set()
@@ -468,6 +484,17 @@ def classify_subscription(sites: list[dict], spider: str = "",
         name = str(s.get("name") or s.get("key") or s.get("api") or "").strip()
         api = str(s.get("api") or "").strip()
         t = str(s.get("type", 1))
+        if t == "4":
+            _status, normalized = classify_site(s)
+            if not normalized:
+                _skip(name, "T4 接口地址非 http(s)")
+                continue
+            import t4
+            identity = t4.source_id(normalized["api"], normalized.get("ext"))
+            if identity not in seen_t4:
+                seen_t4.add(identity)
+                t4_sites.append(normalized)
+            continue
 
         # 1) 加固爬虫 csp_*Guard
         if is_guard_site(s):
@@ -559,7 +586,7 @@ def classify_subscription(sites: list[dict], spider: str = "",
         norm["transport"] = "json" if status == "add_json" else "xml"
         cms.append(norm)
 
-    return {"cms": cms, "guard": guard, "csp": csp, "drpy": drpy,
+    return {"cms": cms, "t4": t4_sites, "guard": guard, "csp": csp, "drpy": drpy,
             "skipped": skipped, "jar_url": jar_url}
 
 
@@ -596,6 +623,8 @@ async def load_subscription_full(url: str | None = None,
         sub_jar = _spider_jar_url(sub_spider, sub_base)
         for st in extract_sites(cfg):
             if isinstance(st, dict):
+                if str(st.get("type")) == "4" and sub_base and st.get("api"):
+                    st["api"] = urljoin(sub_base, str(st.get("api") or ""))
                 if sub_jar and not st.get("_spider_jar"):
                     st["_spider_jar"] = sub_jar
                 # 站点自带 jar（饭太硬部分源用伪装成 PNG 的独立 jar），优先级高于全局。

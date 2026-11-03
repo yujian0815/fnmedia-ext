@@ -404,6 +404,14 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div class="hint" style="margin:6px 0">选择账号后勾选其允许观看的媒体库；勾选「在线搜索」才会注入在线片源：</div>
         <div id="aclBox" class="acl-box"></div>
       </div>
+      <div class="card">
+        <div class="card-title">T4 选片</div>
+        <div class="lib-grid" id="t4Libs"></div>
+        <label class="switch-row">
+          <input type="checkbox" id="t4Enabled" onchange="saveT4Cfg()"/>
+          <span>在飞牛影视媒体库显示 T4 选片</span>
+        </label>
+      </div>
     </section>
 
     <!-- ============ 片源质量 ============ -->
@@ -481,6 +489,38 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
 
       <div class="card">
+        <div class="card-title">⚡ 源测速与最快线
+          <span class="hint" style="font-weight:400">后台按间隔实测各源搜索+首分片速度并排名，最快源线路菜单置顶、首播优先参与竞速；本片最快线缓存复用，免去重复测速</span>
+          <button class="small" style="margin-left:auto" onclick="loadSpeedbench()">刷新</button>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin:4px 0 10px">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+            <input type="checkbox" id="sbEnabled" style="width:15px;height:15px;accent-color:var(--accent)"/>启用周期测速</label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+            <input type="checkbox" id="sbPinMenu" style="width:15px;height:15px;accent-color:var(--accent)"/>最快源置顶 / 优先参与竞速</label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px">间隔
+            <select id="sbInterval" style="font-size:12px;padding:4px 6px">
+              <option value="0">只手动</option>
+              <option value="30">30 分钟</option>
+              <option value="60" selected>1 小时</option>
+              <option value="120">2 小时</option>
+              <option value="360">6 小时</option>
+            </select></label>
+          <button class="small" onclick="saveSpeedbenchCfg()">保存设置</button>
+          <button class="primary small" onclick="runSpeedbench()">立即测速</button>
+        </div>
+        <div class="hint" style="margin:0 0 8px">结果 6 小时内有效。播放起播以<b>每部片实测最快的线路</b>为准（源测速用固定样例，代表不了各片分片 CDN）：首次播放做一次 2 秒内的多线竞速，验证后该线缓存 1 小时，期间直接走它、不再测速；该线失效会自动换线。</div>
+        <div class="longbox">
+        <table>
+          <thead><tr><th style="width:56px">排名</th><th>源</th>
+            <th style="width:100px">搜索延迟</th><th style="width:110px">首分片延迟</th>
+            <th style="width:80px">状态</th><th style="width:150px">测速时间</th></tr></thead>
+          <tbody id="sbRows"><tr><td colspan="6" class="muted">尚未测速，点「立即测速」或等后台自动测。</td></tr></tbody>
+        </table>
+        </div>
+      </div>
+
+      <div class="card">
         <div class="card-title">源健康画像
           <span class="hint" style="font-weight:400">按真实播放探测统计成功率/延迟，死源自动降权 15 分钟</span>
           <button class="small" style="margin-left:auto" onclick="loadHealth()">刷新</button>
@@ -550,11 +590,11 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div id="adfStatus" class="muted sm" style="margin-top:6px">正在加载去广告规则…</div>
       </div>
       <div class="card">
-        <div class="card-title">TVBox / 影视仓 / OK影视 订阅</div>
+        <div class="card-title">TVBox / T4 订阅</div>
         <p class="card-sub">自动识别并分类：标准苹果CMS影视站（type 0/1）
           能直接播放的<strong>自动启用</strong>；P2P/磁力/云盘等慢源与 jar/脚本暂未就绪的源导入后默认关闭，可在结果里开启或补传；
           网盘/直播/无法识别的源跳过并说明原因。</p>
-        <div class="row"><input type="text" id="subUrl" placeholder="配置订阅 URL（支持 base64 与多订阅聚合）" style="flex:2"/>
+        <div class="row"><input type="text" id="subUrl" placeholder="配置订阅 URL（支持 T4 / base64 / 多订阅聚合）" style="flex:2"/>
           <button class="primary small" onclick="importSubscription('url')">按 URL 导入</button>
         </div>
         <div class="row">
@@ -758,7 +798,7 @@ async function switchPage(page){
   if(page==="overview"){renderOverview();startLivePoll();}
   if(page==="library"){loadLibs().then(renderLibrary);}
   if(page==="quality")renderQuality();
-  if(page==="sources"){try{loadHealth();}catch(e){}try{loadCacheStatus();}catch(e){}}
+  if(page==="sources"){try{loadHealth();}catch(e){}try{loadSpeedbench();}catch(e){}try{loadCacheStatus();}catch(e){}}
   if(page==="tvbox"){try{loadGuardZone();}catch(e){}try{gbInit();}catch(e){}}
   if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{if(typeof initSrcProxy==="function")initSrcProxy();}catch(e){}try{loadAdfilter();}catch(e){}try{if(typeof loadSpiderMgmt==="function")loadSpiderMgmt();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}}
   if(page==="about"){loadUpdate(false);}
@@ -1057,7 +1097,7 @@ function catKeyOf(title){
 function libCardHtml(L,ic){
   return `<div class="lib" data-g="${L.guid}"><div class="ic">${ic}</div>
     <div style="flex:1;min-width:0"><div class="t">${esc(L.title)}</div>
-      <div class="c">${L.kind==="chart"?(L.count+" 条"):(L.count?("路由 "+L.count):"可用")}</div></div>
+      <div class="c">${L.kind==="t4"?(L.count+" 个插件"):L.kind==="chart"?(L.count+" 条"):(L.count?("路由 "+L.count):"可用")}</div></div>
     <label class="pin" title="在飞牛影视媒体库列表中置顶">
       <input type="checkbox" ${L.pinned?"checked":""} onchange="togglePin('${L.guid}',this)"/>置顶</label>
   </div>`;
@@ -1191,6 +1231,8 @@ function renderLibrary(){
     $("anchorWrap").style.display=(LIBMETA.placement==="after")?"":"none";
     if(LIBMETA.placement==="after")loadLocalLibs();
   }
+  $("t4Enabled").checked=CFG.t4_library_enabled!==false;
+  $("t4Libs").innerHTML=LIBS.filter(x=>x.kind==="t4").map(L=>libCardHtml(L,"")).join("");
   $("hotInterval").value=Math.round((CFG.hot_refresh_interval||21600)/3600);
   if($("titlesMaxEntries"))$("titlesMaxEntries").value=CFG.titles_cache_max_entries??4000;
   if($("titlesMaxMb"))$("titlesMaxMb").value=(CFG.titles_cache_max_mb??4);
@@ -1252,6 +1294,12 @@ async function saveCatCfg(){
   const body={catalog_library_enabled:$("catEnabled").checked};
   const r=await jpost("/v/api/ext/config",body);
   if(r.code===0){Object.assign(CFG,body);toast("海量四库设置已保存");await loadLibs();renderLibrary();}
+  else toast(r.msg||"保存失败","fail");
+}
+async function saveT4Cfg(){
+  const body={t4_library_enabled:$("t4Enabled").checked};
+  const r=await jpost("/v/api/ext/config",body);
+  if(r.code===0){Object.assign(CFG,body);toast("T4 选片设置已保存");await loadLibs();renderLibrary();}
   else toast(r.msg||"保存失败","fail");
 }
 async function refreshHot(){
@@ -1316,8 +1364,8 @@ function renderSources(){
     $("srcCollapseTxt").textContent=collapsed?`展开完整列表（${srcs.length} 个）`:"收起列表";}
   $("srcGrid").innerHTML=view.map(src=>{
     let adultOpt="",extraTag="";
-    const canLib=(src.enabled&&!(FEAT_DDUO&&src.xsrc));
-    const tags=(src.builtin?'':'<span class="tag amber">自定义</span>')+(src.standalone?'<span class="tag">媒体库</span>':'')+extraTag;
+    const canLib=(src.enabled&&src.kind!=="t4"&&!(FEAT_DDUO&&src.xsrc));
+    const tags=(src.kind==="t4"?'<span class="tag">T4</span>':'')+(src.builtin?'':'<span class="tag amber">自定义</span>')+(src.standalone?'<span class="tag">媒体库</span>':'')+extraTag;
     return `<div class="src-card ${src.enabled?'on':'off'}" data-id="${src.id}">
       <div class="src-head">
         <label class="src-switch" title="启用/停用"><input type="checkbox" class="en" ${src.enabled?"checked":""}/><span class="sl"></span></label>
@@ -1460,6 +1508,40 @@ async function loadHealth(){
 }
 async function resetHealth(key){
   await jpost("/v/api/ext/source-health/reset",{key});loadHealth();
+}
+// ---------- 全局源测速 speedbench ----------
+function fmtMs(v){return (v===null||v===undefined)?"—":(v<1000?v+" ms":(v/1000).toFixed(2)+" s");}
+function fmtTs(ts){if(!ts)return "—";const d=new Date(ts*1000);
+  return d.getMonth()+1+"/"+d.getDate()+" "+String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0");}
+async function loadSpeedbench(){
+  const box=$("sbRows");if(!box)return;
+  try{
+    const r=await jget("/v/api/ext/speedbench");const d=r.data||{};const c=d.config||{};
+    $("sbEnabled").checked=!!c.enabled;
+    $("sbPinMenu").checked=!!c.pin_menu;$("sbInterval").value=String(c.interval_min||0);
+    const rows=d.rows||[];
+    if(!rows.length){box.innerHTML='<tr><td colspan="6" class="muted">尚未测速，点「立即测速」或等后台自动测。</td></tr>';return;}
+    box.innerHTML=rows.map(s=>{
+      const st=s.ok?'<span class="st ok">可用</span>':'<span class="st bad">不可用</span>';
+      return `<tr><td>${s.ok?s.rank:"—"}</td><td>${s.name||s.id}${s.enabled?"":' <span class="hint">(停用)</span>'}</td>
+        <td>${fmtMs(s.search_ms)}</td><td>${fmtMs(s.play_ms)}</td>
+        <td>${st}${s.error?' <span class="hint">'+s.error+'</span>':''}</td>
+        <td>${fmtTs(s.ts)}</td></tr>`;
+    }).join("");
+  }catch(e){box.innerHTML='<tr><td colspan="6" class="muted">读取失败</td></tr>';}
+}
+async function saveSpeedbenchCfg(){
+  const body={enabled:$("sbEnabled").checked,
+    pin_menu:$("sbPinMenu").checked,interval_min:parseInt($("sbInterval").value||"60",10)};
+  const r=await jpost("/v/api/ext/speedbench/config",body);
+  if(r.code===0){toast("已保存");loadSpeedbench();}else toast(r.msg||"保存失败","fail");
+}
+async function runSpeedbench(){
+  toast("正在测速，请稍候…");
+  try{
+    const r=await jpost("/v/api/ext/speedbench/run",{});
+    if(r.code===0){toast("测速完成");loadSpeedbench();}else toast(r.msg||"测速失败","fail");
+  }catch(e){toast("测速失败："+e,"fail");}
 }
 async function addSource(){
   const name=$("addName").value.trim(),api=$("addApi").value.trim(),standalone=$("addStandalone").checked;
@@ -1700,7 +1782,7 @@ async function importCatLite(){
   }
 }
 function renderSubResult(d){
-  const cms=d.cms||{},g=d.guard||{},rt=d.runtime,skips=d.skipped_detail||[];
+  const cms=d.cms||{},t4=d.t4||{},g=d.guard||{},rt=d.runtime,skips=d.skipped_detail||[];
   let h="";
   // 运行时引导（加固源已登记但运行时未就绪 / 公开构建）
   if(g && !g.skipped_build && g.items && g.items.length && rt && !rt.ready){
@@ -1717,13 +1799,18 @@ function renderSubResult(d){
   const csp=d.csp||{}, dr=d.drpy||{};
   const cspOk=(csp.items||[]).filter(x=>x.enabled).length;
   const drOk=(dr.items||[]).filter(x=>x.enabled).length;
-  const totalOk=cmsOk+gOk+cspOk+drOk;
+  const totalOk=cmsOk+gOk+cspOk+drOk+(t4.added||0);
   h+='<div style="margin:8px 0;font-weight:600">共扫描 '+(d.scanned||0)+' 个站点'
-    +(d.subscriptions?('（含 '+d.subscriptions+' 个子订阅）'):'')+'，新增可直接使用 <b style="color:var(--ok,#3a9)">'+totalOk+'</b> 个。</div>';
+    +(d.subscriptions?('（含 '+d.subscriptions+' 个子订阅）'):'')+'，新增登记 <b style="color:var(--ok,#3a9)">'+totalOk+'</b> 个。</div>';
   // 苹果CMS
   if(cms.candidates||cms.added||cms.duplicate){
     h+='<div class="subgrp"><div class="subgrp-t">🍿 苹果CMS影视站　新增 '+cmsOk+' · 已存在 '+(cms.duplicate||0)+'</div>';
     (cms.added_names||[]).forEach(n=>{h+='<div class="subrow ok"><span>＋ '+esc(n)+'</span><span class="tag">已启用</span></div>';});
+    h+='</div>';
+  }
+  if(t4.candidates||t4.added||t4.duplicate){
+    h+='<div class="subgrp"><div class="subgrp-t">T4 远程源　新增 '+(t4.added||0)+' · 已存在 '+(t4.duplicate||0)+'</div>';
+    (t4.added_names||[]).forEach(n=>{h+='<div class="subrow ok"><span>＋ '+esc(n)+'</span><span class="tag">已登记</span></div>';});
     h+='</div>';
   }
   // 加固
