@@ -1,69 +1,79 @@
-# Generated from https://github.com/Blue-Mink/moo/blob/main/templates/moo-autoupdate.yml
-# Auto-update moo.json after a stable release. Edit the env block if needed.
+# 正式发布（非 prerelease 的 GitHub Release）后，按 Moo 应用源协议
+# （https://github.com/Blue-Mink/moo）从该 Release 资产更新仓库根的 moo.json，
+# 并提交回 main，供 Moo 应用源检测更新。本地发布脚本(publish-public.sh)也会做
+# 同样的事；本工作流是双保险（例如在网页上补发 Release 时）。
 name: Update moo.json
+
 on:
   release:
     types: [published]
-  push:
-    paths:
-      - ".github/workflows/moo-json.yml"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to sync (empty = the one that triggered this run)"
+        description: "要同步的 Release tag（留空=触发本次运行的 release）"
         required: false
+        type: string
+
 permissions:
   contents: write
+
 concurrency:
   group: moo-json-${{ github.ref }}
   cancel-in-progress: false
+
 jobs:
   update:
+    # 只处理正式版 Release；手动派发不受限
     if: ${{ github.event_name != 'release' || github.event.release.prerelease == false }}
     runs-on: ubuntu-latest
-    env:
-      FPK_ARTIFACT: "fpk.zip"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: Resolve tag
         id: tag
         run: |
           if [[ -n "${{ github.inputs.tag }}" ]]; then
-            echo "tag=${{ github.inputs.tag }}" >> $GITHUB_OUTPUT
+            echo "tag=${{ github.inputs.tag }}" >> "$GITHUB_OUTPUT"
           elif [[ "${{ github.event_name }}" == "release" ]]; then
-            echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
           else
-            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           fi
-      - name: Release notes
-        run: echo "TAG=${{ steps.tag.outputs.tag }}"
-      - name: Download FPK
-        # 这里保留你原来下载逻辑
-        run: echo "Download fpk"
-      - name: Verify digest
-        run: echo "verify"
-      - name: Fetch updater
-        run: echo "fetch updater"
-      - name: Debug check files
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Generate moo.json
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          ls -la
-          cat moo.json || echo "moo.json not exist"
-      - name: Update moo.json
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          VER="${TAG#v}"
+          # 公开轻量包（裸名资产，即 lite 版，与自更新下载一致）
+          ASSET="fnmedia-ext-${VER}.fpk"
+          echo "同步 $TAG -> 资产 $ASSET"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets[].name' | grep -Fx "$ASSET"
+          python3 tools/gen-moo-json.py \
+            --repo "$GITHUB_REPOSITORY" --tag "$TAG" \
+            --asset "$ASSET" --out moo.json
+          python3 -c "import json;d=json.load(open('moo.json'));assert d['apps']['fnmedia-ext']['version']=='$VER';print('moo.json OK', d['apps']['fnmedia-ext']['version'])"
+
+      - name: Commit & push
         run: |
-          # 重点修复：不存在就写入 {}，不是touch空文件
-          if [ ! -f moo.json ]; then
-            echo '{}' > moo.json
-          fi
-          # 下面放你原来更新json、jq修改字段的逻辑
-          # 示例 jq 写法参考：
-          # jq --arg t "${{ steps.tag.outputs.tag }}" '.version = $t' moo.json > tmp.json && mv tmp.json moo.json
-      - name: Commit
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add moo.json
-          git commit -m "Auto update moo.json for ${{ steps.tag.outputs.tag }}" || echo "No changes to commit"
-          git push
+          if git diff --cached --quiet; then
+            echo "moo.json 无变化，跳过提交"
+          else
+            git commit -m "chore: 更新 moo.json 至 ${{ steps.tag.outputs.tag }}"
+            git push origin HEAD:main
+          fi
