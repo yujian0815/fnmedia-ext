@@ -105,11 +105,12 @@ def badge(poster_bytes: bytes, pan_label: str = "",
         draw.text((x0 + pad, y0 + pad - int(2 * scale)), text,
                   fill=(20, 16, 4, 255), font=f)
 
-    # —— 右上：健康点 ——
+    # —— 右下角：速度/健康点（1快绿 / 2中黄 / 3慢橙 / 0优绿）——
     if health_grade is not None and health_grade in _HEALTH_COLOR:
         color, _cn = _HEALTH_COLOR[health_grade]
         r = int(11 * scale)
-        cx, cy = w - int(12 * scale) - r, int(12 * scale) + r
+        m = int(12 * scale)
+        cx, cy = w - m - r, h - m - r
         draw.ellipse((cx - r, cy - r, cx + r, cy + r),
                      fill=color + (235,), outline=(0, 0, 0, 160),
                      width=max(1, int(2 * scale)))

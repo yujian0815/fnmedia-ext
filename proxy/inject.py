@@ -20,15 +20,16 @@ def _poster(url: str) -> str:
 
 
 def _poster_badged(url: str, pan_label: str = "",
-                   health_grade: int | None = None) -> str:
-    """带角标的海报：token 编码 JSON{u:图床, p:网盘名, h:健康等级}。
+                   health_grade: int | None = None,
+                   speed_grade: int | None = None) -> str:
+    """带角标的海报：token 编码 JSON{u:图床, p:网盘名, h:健康等级, s:本片速度档}。
 
     无任何角标时退化为普通 _poster（保持与旧缓存/旧链接兼容）。"""
     if not url:
         return ""
     if not url.startswith("http"):
         return url
-    if not pan_label and health_grade is None:
+    if not pan_label and health_grade is None and speed_grade is None:
         return _poster(url)
     import json as _json
     payload = {"u": url}
@@ -36,6 +37,8 @@ def _poster_badged(url: str, pan_label: str = "",
         payload["p"] = pan_label
     if health_grade is not None:
         payload["h"] = int(health_grade)
+    if speed_grade is not None:
+        payload["s"] = int(speed_grade)
     tok = _b64.urlsafe_b64encode(
         _json.dumps(payload, ensure_ascii=False).encode()
     ).decode().rstrip("=")
@@ -162,14 +165,18 @@ def _poster_for_brief(b: dict) -> str:
     cover = _f(b, "poster")
     if not cover.startswith("http"):
         return _poster(cover)
-    pan, hg = _f(b, "_pan"), b.get("_health")
+    pan, hg, sg = _f(b, "_pan"), b.get("_health"), None
     if (not pan) and hg is None and _badge_provider is not None:
         try:
-            pan, hg = _badge_provider(b)
+            flags = _badge_provider(b)
+            pan, hg = flags[0], flags[1]
+            sg = flags[2] if len(flags) > 2 else None
         except Exception:  # noqa: BLE001
-            pan, hg = "", None
-    if pan or hg is not None:
-        return _poster_badged(cover, pan, hg if isinstance(hg, int) else None)
+            pan, hg, sg = "", None, None
+    if pan or hg is not None or sg is not None:
+        return _poster_badged(cover, pan,
+                              hg if isinstance(hg, int) else None,
+                              sg if isinstance(sg, int) else None)
     return _poster(cover)
 
 
@@ -322,17 +329,22 @@ def episode_item(ep: dict, b: dict | None = None) -> dict:
         can_play=1, play_item_guid=eg, play_error="",
         media_guid=ep_media_guid(eg), video_guid=ep_video_guid(eg),
         audio_guid="", subtitle_guid="")
-    if b:
+    # 仅 T4 真实剧集附加系列 metadata（含 posters/backdrops/简介）；普通 CMS 集卡保持精简
+    if b and b.get("locator", {}).get("kind") == "t4":
         data.update(_series_metadata(b))
     return data
 
 
 def season_item(b: dict, season: dict) -> dict:
+    # 普通扁平 CMS 片的“季”是合成包装：集数由客户端从 episode/list 自行统计，这里报 0
+    # 以保持原 CMS 负载形状（避免某些端把包装季当真实季而隐藏集列表）。仅 T4 这类带
+    # 真实季元数据的 locator 才在季卡上给出实际集数。
+    is_t4 = b.get("locator", {}).get("kind") == "t4"
     data = _base_item(
         guid=season["guid"], type="Season", title=season_title(season["season"]),
         parent_guid=b["guid"], parent_title=_f(b, "title"), tv_title=_f(b, "title"),
         season_number=season["season"], episode_number=0,
-        number_of_episodes=len(season["episode_guids"]), can_play=None)
+        number_of_episodes=len(season["episode_guids"]) if is_t4 else 0, can_play=None)
     data.update(_series_metadata(b))
     return data
 
@@ -363,8 +375,11 @@ def episode_list(b: dict, season: int | None = None) -> list[dict]:
         eps = [e for e in b["lines"].get(line, [])
                if e.get("direct") or e.get("resolve")]
     out = []
+    is_t4 = b.get("locator", {}).get("kind") == "t4"
     season_count = _season_count(b)
-    metadata = _series_metadata(b)
+    # 普通 CMS 剧集卡保持精简负载（不附 posters/backdrops/系列简介），与原 CMS 形状一致；
+    # 仅 T4 真实剧集附加系列 metadata（季元数据需要）。
+    metadata = _series_metadata(b) if is_t4 else None
     for i, e in enumerate(eps):
         eg = e.get("ep_guid") or _st.store.episode_guid_at(guid, i)
         sn = e.get("season", 1)
@@ -377,7 +392,8 @@ def episode_list(b: dict, season: int | None = None) -> list[dict]:
             number_of_seasons=season_count, can_play=1, poster=_poster(_f(b, "poster")),
             media_guid=ep_media_guid(eg), video_guid=ep_video_guid(eg),
             audio_guid="", subtitle_guid=""))
-        out[-1].update(metadata)
+        if metadata is not None:
+            out[-1].update(metadata)
     return out
 
 

@@ -385,14 +385,53 @@ async def probe_source(api: str, keyword: str = "庆余年",
 
 
 
+def _is_heavy_search_source(s: dict) -> bool:
+    """是否为需要并发保护/专有调度的源：远程 T4 或加固/爬虫/drpy/小雅等私有专有源。
+
+    普通苹果 CMS 直链源（纯 HTTP、无 jar/无真机）很轻，不该被并发上限拖累。"""
+    if s.get("kind") == "t4":
+        return True
+    return bool(s.get("catvod") or s.get("drpy") or s.get("guard")
+                or s.get("spider_src") or s.get("xsrc"))
+
+
+async def _search_cms(keyword: str, sources,
+                            soft_timeout: float | None = None) -> list[OnlineTitle]:
+    """纯普通 CMS 源：不限并发扇出（保留上游软超时），最大化搜索速度。
+
+    与含 T4/真机源时的 Semaphore(8) 交错调度分开，避免几个慢 CMS 源占满槽位拖死其它源。"""
+    import asyncio
+    enabled = [s for s in sources if s.get("enabled")]
+    async with netutil.async_client() as client:
+        tasks = [search_source(client, s, keyword) for s in enabled]
+        if soft_timeout is None or not tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            per = max(0.5, soft_timeout - 0.3)
+
+            async def cap(coro):
+                try:
+                    return await asyncio.wait_for(coro, timeout=per)
+                except Exception:
+                    return None
+
+            results = await asyncio.gather(
+                *[cap(t) for t in tasks], return_exceptions=True)
+    return [t for r in results if isinstance(r, list) for t in r]
+
+
 async def search_all(keyword: str, sources=None,
                      soft_timeout: float | None = None,
                      *, budget: float | None = None) -> list[OnlineTitle]:
-    """限并发收集搜索结果，保留上游软超时入口并取消未完成请求。"""
+    """搜索扇出：纯普通 CMS 不限并发；含远程 T4/真机私有源时限并发交错调度。"""
     import asyncio
     from itertools import zip_longest
     sources = DEFAULT_SOURCES if sources is None else sources
     enabled = [s for s in sources if s.get("enabled")]
+    # 纯普通 CMS（无 T4、无加固/爬虫/drpy/小雅等需要真机保护的源）：不限并发扇出。
+    if enabled and not any(_is_heavy_search_source(s) for s in enabled):
+        return await _search_cms(
+            keyword, sources, soft_timeout if budget is None else budget)
     # Imported T4 sources must not wait behind every built-in CMS slow request.
     remote = [s for s in enabled if s.get("kind") == "t4"]
     legacy = [s for s in enabled if s.get("kind") != "t4"]

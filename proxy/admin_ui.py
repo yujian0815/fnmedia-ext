@@ -489,33 +489,28 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
 
       <div class="card">
-        <div class="card-title">⚡ 源测速与最快线
-          <span class="hint" style="font-weight:400">后台按间隔实测各源搜索+首分片速度并排名，最快源线路菜单置顶、首播优先参与竞速；本片最快线缓存复用，免去重复测速</span>
-          <button class="small" style="margin-left:auto" onclick="loadSpeedbench()">刷新</button>
+        <div class="card-title">⚡ 本片线路预测（秒播）
+          <span class="hint" style="font-weight:400">浏览海报时对首屏影片的前几条线做轻量探活，预测出<b>每部片自己</b>的最快线；点播放直接走它、零竞速。不做全站定时测速（源级速度代表不了各片分片 CDN）</span>
+          <button class="small" style="margin-left:auto" onclick="loadLinepredict()">刷新</button>
         </div>
         <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin:4px 0 10px">
           <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
-            <input type="checkbox" id="sbEnabled" style="width:15px;height:15px;accent-color:var(--accent)"/>启用周期测速</label>
-          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
-            <input type="checkbox" id="sbPinMenu" style="width:15px;height:15px;accent-color:var(--accent)"/>最快源置顶 / 优先参与竞速</label>
-          <label style="display:flex;align-items:center;gap:6px;font-size:13px">间隔
-            <select id="sbInterval" style="font-size:12px;padding:4px 6px">
-              <option value="0">只手动</option>
-              <option value="30">30 分钟</option>
-              <option value="60" selected>1 小时</option>
-              <option value="120">2 小时</option>
-              <option value="360">6 小时</option>
+            <input type="checkbox" id="lpEnabled" style="width:15px;height:15px;accent-color:var(--accent)"/>海报阶段预热预测</label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px">每片探测线数
+            <select id="lpMaxLines" style="font-size:12px;padding:4px 6px">
+              <option value="1">1（最省）</option>
+              <option value="2" selected>2（推荐）</option>
+              <option value="3">3</option>
             </select></label>
-          <button class="small" onclick="saveSpeedbenchCfg()">保存设置</button>
-          <button class="primary small" onclick="runSpeedbench()">立即测速</button>
+          <button class="small" onclick="saveLinepredictCfg()">保存设置</button>
+          <button class="small" onclick="resetLinepredict()">清空预测记忆</button>
         </div>
-        <div class="hint" style="margin:0 0 8px">结果 6 小时内有效。播放起播以<b>每部片实测最快的线路</b>为准（源测速用固定样例，代表不了各片分片 CDN）：首次播放做一次 2 秒内的多线竞速，验证后该线缓存 1 小时，期间直接走它、不再测速；该线失效会自动换线。</div>
+        <div class="hint" style="margin:0 0 8px">已预测 <b id="lpRemembered">0</b> 部影片，当前在途预热 <b id="lpInflight">0</b> 个；预测记忆 30 分钟有效，失败会自动换线，网盘高清线永不参与。</div>
         <div class="longbox">
         <table>
-          <thead><tr><th style="width:56px">排名</th><th>源</th>
-            <th style="width:100px">搜索延迟</th><th style="width:110px">首分片延迟</th>
-            <th style="width:80px">状态</th><th style="width:150px">测速时间</th></tr></thead>
-          <tbody id="sbRows"><tr><td colspan="6" class="muted">尚未测速，点「立即测速」或等后台自动测。</td></tr></tbody>
+          <thead><tr><th>影片</th><th style="width:180px">预测最快线</th>
+            <th style="width:90px">首字节</th><th style="width:70px">档位</th><th style="width:80px">更新</th></tr></thead>
+          <tbody id="lpRows"><tr><td colspan="5" class="muted">浏览媒体库/搜索结果后自动出现。</td></tr></tbody>
         </table>
         </div>
       </div>
@@ -798,7 +793,7 @@ async function switchPage(page){
   if(page==="overview"){renderOverview();startLivePoll();}
   if(page==="library"){loadLibs().then(renderLibrary);}
   if(page==="quality")renderQuality();
-  if(page==="sources"){try{loadHealth();}catch(e){}try{loadSpeedbench();}catch(e){}try{loadCacheStatus();}catch(e){}}
+  if(page==="sources"){try{loadHealth();}catch(e){}try{loadLinepredict();startLinepredictTimer();}catch(e){}try{loadCacheStatus();}catch(e){}}
   if(page==="tvbox"){try{loadGuardZone();}catch(e){}try{gbInit();}catch(e){}}
   if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{if(typeof initSrcProxy==="function")initSrcProxy();}catch(e){}try{loadAdfilter();}catch(e){}try{if(typeof loadSpiderMgmt==="function")loadSpiderMgmt();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}}
   if(page==="about"){loadUpdate(false);}
@@ -1509,39 +1504,36 @@ async function loadHealth(){
 async function resetHealth(key){
   await jpost("/v/api/ext/source-health/reset",{key});loadHealth();
 }
-// ---------- 全局源测速 speedbench ----------
-function fmtMs(v){return (v===null||v===undefined)?"—":(v<1000?v+" ms":(v/1000).toFixed(2)+" s");}
-function fmtTs(ts){if(!ts)return "—";const d=new Date(ts*1000);
-  return d.getMonth()+1+"/"+d.getDate()+" "+String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0");}
-async function loadSpeedbench(){
-  const box=$("sbRows");if(!box)return;
+// ---------- 本片线路预测 linepredict ----------
+async function loadLinepredict(){
+  if(!$("lpRemembered"))return;
   try{
-    const r=await jget("/v/api/ext/speedbench");const d=r.data||{};const c=d.config||{};
-    $("sbEnabled").checked=!!c.enabled;
-    $("sbPinMenu").checked=!!c.pin_menu;$("sbInterval").value=String(c.interval_min||0);
-    const rows=d.rows||[];
-    if(!rows.length){box.innerHTML='<tr><td colspan="6" class="muted">尚未测速，点「立即测速」或等后台自动测。</td></tr>';return;}
-    box.innerHTML=rows.map(s=>{
-      const st=s.ok?'<span class="st ok">可用</span>':'<span class="st bad">不可用</span>';
-      return `<tr><td>${s.ok?s.rank:"—"}</td><td>${s.name||s.id}${s.enabled?"":' <span class="hint">(停用)</span>'}</td>
-        <td>${fmtMs(s.search_ms)}</td><td>${fmtMs(s.play_ms)}</td>
-        <td>${st}${s.error?' <span class="hint">'+s.error+'</span>':''}</td>
-        <td>${fmtTs(s.ts)}</td></tr>`;
-    }).join("");
-  }catch(e){box.innerHTML='<tr><td colspan="6" class="muted">读取失败</td></tr>';}
+    const r=await jget("/v/api/ext/linepredict");const d=r.data||{};const c=d.config||{};
+    $("lpRemembered").textContent=d.remembered??0;
+    $("lpInflight").textContent=d.inflight??0;
+    $("lpEnabled").checked=c.enabled!==false;
+    $("lpMaxLines").value=String(c.max_lines??2);
+    const rows=d.recent||[]; const box=$("lpRows");
+    if(box){
+      const gc=["","ok","warn","bad"],gt=["","快","中","慢"];
+      box.innerHTML=rows.length?rows.map(r=>`<tr><td>${r.title||(r.og||"").slice(0,12)} #${r.index}</td>
+        <td>${r.line}</td><td>${(r.latency*1000).toFixed(0)} ms</td>
+        <td><span class="st ${gc[r.grade]||""}">${gt[r.grade]||""}</span></td>
+        <td>${r.age}s 前</td></tr>`).join("")
+        :'<tr><td colspan="5" class="muted">浏览媒体库/搜索结果后自动出现。</td></tr>';
+    }
+  }catch(e){}
 }
-async function saveSpeedbenchCfg(){
-  const body={enabled:$("sbEnabled").checked,
-    pin_menu:$("sbPinMenu").checked,interval_min:parseInt($("sbInterval").value||"60",10)};
-  const r=await jpost("/v/api/ext/speedbench/config",body);
-  if(r.code===0){toast("已保存");loadSpeedbench();}else toast(r.msg||"保存失败","fail");
+let _lpTimer=null;
+function startLinepredictTimer(){ if(!_lpTimer)_lpTimer=setInterval(()=>{if(location.hash.includes("sources")||document.getElementById("lpRows"))loadLinepredict();},5000); }
+async function saveLinepredictCfg(){
+  const body={enabled:$("lpEnabled").checked,max_lines:parseInt($("lpMaxLines").value||"2",10)};
+  const r=await jpost("/v/api/ext/linepredict/config",body);
+  if(r.code===0){toast("已保存");loadLinepredict();}else toast(r.msg||"保存失败","fail");
 }
-async function runSpeedbench(){
-  toast("正在测速，请稍候…");
-  try{
-    const r=await jpost("/v/api/ext/speedbench/run",{});
-    if(r.code===0){toast("测速完成");loadSpeedbench();}else toast(r.msg||"测速失败","fail");
-  }catch(e){toast("测速失败："+e,"fail");}
+async function resetLinepredict(){
+  const r=await jpost("/v/api/ext/linepredict/reset",{});
+  if(r.code===0){toast("已清空预测记忆");loadLinepredict();}else toast(r.msg||"操作失败","fail");
 }
 async function addSource(){
   const name=$("addName").value.trim(),api=$("addApi").value.trim(),standalone=$("addStandalone").checked;
