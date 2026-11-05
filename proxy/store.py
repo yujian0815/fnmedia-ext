@@ -687,6 +687,9 @@ class Store:
                 "xsrc": bool(ep.get("xsrc") or ep.get("dduo")),
                 "play_from": ep.get("play_from", ""),
                 "online_guid": guid,
+                # 补 m3u8 标记：_episode_candidates 复用本结果，缺标记会让 .m3u8 直链
+                # 在探测时被当成非 HLS 走 Range 分支、拿到清单文本误判死线（秒播退化根因）。
+                "m3u8": bool(re.search(r"\.m3u8(\?|$)", ep.get("url", ""), re.I)),
                 "ep_title": ep["title"], "title": brief.get("title", "")}
 
     def first_playable(self, guid: str) -> Optional[dict]:

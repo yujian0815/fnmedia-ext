@@ -137,6 +137,82 @@ def _json_loads_dict(text: str) -> dict | None:
     return None
 
 
+def _coerce_site_value(v: str):
+    """XML 属性都是字符串，按 TVBox 配置语义还原常见标量类型。"""
+    if v is None:
+        return ""
+    s = v.strip()
+    if s in ("0", "1") and len(s) == 1:
+        return int(s)
+    low = s.lower()
+    if low in ("true",):
+        return 1
+    if low in ("false",):
+        return 0
+    return s
+
+
+def parse_xml_config(text: str) -> dict | None:
+    """解析 TVBox/影视仓 XML 订阅为与 JSON 配置等价的 dict。
+
+    兼容两种常见形态：
+      1. <sites><site key=.. type=.. api=.. searchable=.. /></sites>
+      2. <config><sites>...</sites><rules>...</rules></config>
+    site 元素的属性映射为站点字段；布尔/数值属性还原为 int。仅做结构转换，
+    后续仍走与 JSON 完全相同的 classify_subscription 分类与导入流程。"""
+    if not text:
+        return None
+    stripped = text.lstrip()
+    if not stripped.startswith("<"):
+        return None
+    try:
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(stripped)
+    except Exception:
+        return None
+
+    def site_elem_to_dict(elem) -> dict:
+        site = {k: _coerce_site_value(v) for k, v in elem.attrib.items()}
+        # 元素内文本型子节点（个别 XML 用 <api>..</api> 而非属性）
+        for child in elem:
+            tag = (child.tag or "").strip().lower()
+            if tag and tag not in site and (child.text or "").strip():
+                site[tag] = child.text.strip()
+        return site
+
+    # 任意层级找 site 元素（根即 site、或包在 sites/config 里都兼容）
+    site_elems = [e for e in root.iter() if (e.tag or "").lower() == "site"]
+    if not site_elems:
+        return None
+    sites = [site_elem_to_dict(e) for e in site_elems]
+
+    cfg: dict = {"sites": sites}
+    # 全局 spider（jar）：根或 config 节点的 spider 属性
+    spider = root.attrib.get("spider")
+    if not spider:
+        for e in root.iter():
+            if (e.tag or "").lower() in ("config", "tvbox", "configuration") \
+                    and e.attrib.get("spider"):
+                spider = e.attrib["spider"]
+                break
+    if spider:
+        cfg["spider"] = spider
+    # 直播/解析等附属 URL（若 XML 提供则保留，缺失也不影响站点导入）
+    for xml_key, json_key in (("lives", "lives"), ("parses", "parses"),
+                              ("flags", "flags"), ("rules", "rules")):
+        node = next((e for e in root.iter() if (e.tag or "").lower() == xml_key), None)
+        if node is not None:
+            children = list(node)
+            if children:
+                cfg[json_key] = [
+                    {k: _coerce_site_value(v) for k, v in c.attrib.items()}
+                    or (c.text.strip() if c.text else "")
+                    for c in children]
+            elif (node.text or "").strip():
+                cfg[json_key] = node.text.strip()
+    return cfg
+
+
 # 伪装成图片（.bmp/.jpg）的订阅：图片字节之后追加 base64 配置。
 _B64_ALPHA = set(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
 _B64_WS = set(b"\r\n\t ")
@@ -241,6 +317,12 @@ def parse_config_text(text: str) -> dict | None:
     cfg = _json_loads_dict(text)
     if cfg is not None:
         return cfg
+    # XML 订阅（<sites><site .../></sites>）：在 base64/加密尝试之前先识别，
+    # 避免被误判为未知格式，转换为与 JSON 等价的 {sites:[...]} 后走同一导入流程。
+    if text.lstrip().startswith("<"):
+        xml_cfg = parse_xml_config(text)
+        if xml_cfg:
+            return xml_cfg
     decoded = _b64_try(text)
     if decoded:
         cfg = _json_loads_dict(decoded)

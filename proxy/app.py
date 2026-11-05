@@ -4241,6 +4241,14 @@ async def _verify_rewritten_first_seg(body: str, request: Request,
     """对已改写的清单做首分片验活：解码 /seg?u= 里的真实上游地址，直接 Range 探测。
     识别“清单活、分片 404/错误页”的死链（如某源 yximgs CDN 删流）。不在进程内
     回环请求自身（会受 worker 并发影响而误判）。探测异常不轻易判死，避免误伤。"""
+    # 本次请求的竞速阶段已对该线做过 Range 分片头验活：直接放行，不重复探测，
+    # 复刻 0.2.17“验活只做一次”，省掉建清单后的又一次串行往返。
+    try:
+        _verified = getattr(request.state, "_race_verified", None)
+        if _verified and picked and picked.get("line") in _verified:
+            return True
+    except Exception:
+        pass
     try:
         first = next((ln.strip() for ln in body.splitlines()
                       if ln.strip() and not ln.lstrip().startswith("#")), "")
@@ -4598,8 +4606,11 @@ async def _race_fastest(picked: dict, request: Request) -> dict | None:
 
     async def run(cand: dict):
         async with sem:
+            # 复刻 v0.2.17：起播竞速只做轻量验活（抓清单 + 2KB 分片头），
+            # 不下载 384KB 测吞吐——多候选在慢网下整段探测会把竞速拖到数秒，
+            # 这正是新版起播比 0.2.17 慢的根因。吞吐惩罚仅用于海报预热阶段。
             lat = await asyncio.wait_for(
-                _probe_latency(cand, request, build_hls=False, measure_seg=True),
+                _probe_latency(cand, request, build_hls=False, measure_seg=False),
                 timeout=timeout)
         return cand, lat
 
@@ -4622,6 +4633,19 @@ async def _race_fastest(picked: dict, request: Request) -> dict | None:
 
     winner, wlat = min(ok, key=eff)
     _remember_fast(picked, winner["line"], wlat)
+    # 竞速阶段已对所有成功候选做过 Range 2KB 分片头验活（轻量探测），登记到请求级
+    # 标记，后续 _verify_rewritten_first_seg 对这些线直接放行，避免重复一次串行 Range
+    # 往返（复刻 0.2.17：验活只做一次，不在建清单后再探一遍）。
+    try:
+        verified = getattr(request.state, "_race_verified", None)
+        if verified is None:
+            verified = set()
+            request.state._race_verified = verified
+        for c, _lat in ok:
+            if c.get("line"):
+                verified.add(c["line"])
+    except Exception:
+        pass
     # 胜者若是 HLS，构建改写后的播放列表供 main 直接取用；标记为冠军清单，
     # 与海报预建一样享 15min stale 保鲜（下次点同片即使过 120s 也秒回旧清单）。
     if re.search(r"\.m3u8(\?|$)", winner.get("url", "").split("?", 1)[0], re.I):
@@ -7068,6 +7092,56 @@ async def ext_source_test(request: Request):
     keyword = (body.get("keyword") or "庆余年").strip()
     result = await providers.probe_source(api, keyword=keyword, source=src)
     return {"code": 0, "msg": "", "data": result}
+
+
+@app.post("/v/api/ext/source/health-check")
+async def ext_source_health_check(request: Request):
+    """用常见热门关键词批量检测纯 CMS 资源站有效性。
+
+    任一热门词搜到结果即有效；全部搜不到才判失效，并把失效源写入源健康画像
+    （record False 累积触发熔断），起播/竞速自动跳过。仅检测纯苹果 CMS 源，
+    加固/爬虫/小雅等专有源不走此检测。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    # 限制并发，避免一次性打爆源站
+    try:
+        concurrency = max(1, min(8, int(body.get("concurrency") or 4)))
+    except (TypeError, ValueError):
+        concurrency = 4
+    targets = [s for s in config.all_sources() if _is_pure_cms(s)]
+    sem = asyncio.Semaphore(concurrency)
+
+    async def one(s):
+        async with sem:
+            try:
+                r = await providers.probe_source_alive(s)
+            except Exception as exc:  # noqa: BLE001
+                r = {"alive": False, "ok": False, "status": 0,
+                     "elapsed_ms": 0, "count": 0, "sample": "",
+                     "error": type(exc).__name__, "hit": "", "tried": []}
+            sk = sourcehealth.source_key_of(s.get("id"), s) or s.get("id", "")
+            # 回写源健康：失效累计失败（达阈值熔断），有效则清零失败计数
+            if sk:
+                sourcehealth.record(sk, bool(r.get("alive")),
+                                    (r.get("elapsed_ms") or 0) / 1000.0)
+            return {
+                "id": s.get("id"), "name": s.get("name", ""),
+                "alive": bool(r.get("alive")), "hit": r.get("hit", ""),
+                "tried": r.get("tried", []), "count": r.get("count", 0),
+                "elapsed_ms": r.get("elapsed_ms", 0),
+                "status": r.get("status", 0), "error": r.get("error", ""),
+                "dead": sourcehealth.is_dead(sk) if sk else False,
+            }
+
+    results = await asyncio.gather(*[one(s) for s in targets])
+    alive_n = sum(1 for r in results if r["alive"])
+    return {"code": 0, "msg": "", "data": {
+        "total": len(results), "alive": alive_n,
+        "dead": len(results) - alive_n,
+        "keywords": list(providers.PROBE_HOT_KEYWORDS),
+        "results": results}}
 
 
 def _is_pure_cms(s: dict) -> bool:
