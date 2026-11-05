@@ -29,6 +29,8 @@ _STATE = Path(__file__).resolve().parent.parent / "state" / "linepredict_fast.js
 _persist_enabled = False
 _flush_timer: "threading.Timer | None" = None
 _FLUSH_DEBOUNCE = 5.0
+_dirty = False  # 仅在有新记忆/变更时才落盘，避免 Timer 永久空转
+_FLUSH_LOCK = threading.Lock()  # 独立于 _LOCK，防止持锁重入死锁
 
 
 def set_persist(enabled: bool) -> None:
@@ -37,7 +39,6 @@ def set_persist(enabled: bool) -> None:
     _persist_enabled = bool(enabled)
     if _persist_enabled:
         load_persisted()
-        _schedule_flush()
 
 
 def load_persisted() -> int:
@@ -77,25 +78,28 @@ def _persist_now() -> None:
 
 
 def _schedule_flush() -> None:
-    global _flush_timer
+    global _dirty, _flush_timer
     if not _persist_enabled:
         return
-    if _flush_timer is not None:
-        return
+    # 用独立锁，避免 remember 已持 _LOCK 时再嵌套获取普通 Lock 造成自死锁
+    with _FLUSH_LOCK:
+        _dirty = True
+        if _flush_timer is not None:
+            return
 
-    def _fire():
-        global _flush_timer
-        with _LOCK:
-            _flush_timer = None
-        _persist_now()
-        # 落盘后若又有新记忆，继续排下一轮
-        if _persist_enabled:
-            _schedule_flush()
+        def _fire():
+            global _flush_timer, _dirty
+            with _FLUSH_LOCK:
+                _flush_timer = None
+                need = _dirty
+                _dirty = False
+            if need:
+                _persist_now()
 
-    t = threading.Timer(_FLUSH_DEBOUNCE, _fire)
-    t.daemon = True
-    _flush_timer = t
-    t.start()
+        t = threading.Timer(_FLUSH_DEBOUNCE, _fire)
+        t.daemon = True
+        _flush_timer = t
+        t.start()
 
 
 # 正在预热的 ep_key，避免同片重复打源

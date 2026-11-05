@@ -572,15 +572,27 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
     async def test_stream_and_play_use_same_selected_t4_line(self):
         _, eg = await self.load_episode()
         mg = storemod.ep_media_guid(eg)
+        # 新编码：bitrate 按线路名稳定哈希（跨片恒定），不再依赖菜单位置序号
+        from proxy.app import _line_bitrate, _line_of_bitrate, _line_choices
+        target = storemod.store.resolve_media_guid(mg)
+        names = [c["line"] for c in _line_choices(target)]
+        line_b = next(n for n in names if n.endswith("B") or n == "B") if \
+            any(n.endswith("B") or n == "B" for n in names) else names[-1]
+        bitrate_b = _line_bitrate(line_b)
+        # 哈希编码在任意菜单里都能稳定解回同一条线
+        self.assertEqual(_line_of_bitrate(bitrate_b, names), line_b)
         response = await self.client.post("/v/api/v1/stream", json={
-            "media_guid": mg, "bitrate": 90010001})
+            "media_guid": mg, "bitrate": bitrate_b})
         self.assertEqual(response.status_code, 200)
         played = [r for r in self.calls if "play" in r.url.params][-1]
         self.assertEqual(played.url.params["play"], "b2")
-        self.assertEqual(response.json()["data"]["video_stream"]["resolution_type"], "B")
-        self.assertEqual(response.json()["data"]["video_stream"]["bps"], 90010001)
+        data = response.json()["data"]
+        self.assertEqual(data["video_stream"]["resolution_type"], "B")
+        # 回显 bps 必须与清晰度菜单里该线路的 bitrate 一致（客户端据此正确高亮）
+        menu_bps = {q["resolution"]: q["bitrate"] for q in data["qualities"]}
+        self.assertEqual(data["video_stream"]["bps"], menu_bps["B"])
         response = await self.client.post("/v/api/v1/play/play", json={
-            "media_guid": mg, "bitrate": 90010001})
+            "media_guid": mg, "bitrate": bitrate_b})
         self.assertEqual(response.json()["data"]["play_link"], "https://media.test/b2.mp4")
 
     async def test_invalid_t4_line_does_not_silently_play_default(self):

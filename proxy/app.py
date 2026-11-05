@@ -3041,13 +3041,27 @@ def _line_choices(target: dict, *, include_pansou: bool = True) -> list[dict]:
     return out
 
 
-def _line_bitrate(line: str, lines: list[str]) -> int:
-    # 用 9000 万段的稳定整数编码线路，避免与真实码率（通常<3000万）冲突
+# 线路码率编码：用 9000 万段的稳定整数，避免与真实码率（通常<3000万）冲突。
+# 旧方案按线路在菜单里的【位置序号】编码，每部片线路数不同→同一 bitrate 跨片映射
+# 到不同线，客户端记住 bitrate 后在新片高亮/选错。改为按【线路名稳定哈希】：同一条
+# 物理线路（如 baofeng::bfzym3u8）在任何片里 bitrate 恒定，跨片记忆不再错位。
+_LINE_BR_BASE = 90_000_000
+_LINE_BR_STEP = 10_001          # 旧位置编码步长（兼容解码用）
+_LINE_BR_HASH_SPAN = 800_000    # 哈希段宽度，避开旧段且 < 9100 万
+
+
+def _line_hash_code(line: str) -> int:
+    """线路名 → 稳定哈希码（同线恒定，跨片一致）。"""
+    return int(hashlib.md5(str(line).encode("utf-8")).hexdigest()[:8], 16) % _LINE_BR_HASH_SPAN
+
+
+def _line_bitrate(line: str, lines: list[str] | None = None) -> int:
+    # 按线路名稳定哈希编码：同一条物理线路在任何片里 bitrate 恒定，跨片记忆不错位。
+    # lines 参数保留以兼容旧调用签名（新编码不再依赖位置）。
     try:
-        idx = lines.index(line)
-    except ValueError:
-        idx = 0
-    return 90_000_000 + idx * 10001
+        return _LINE_BR_BASE + 100_020 + _line_hash_code(line)
+    except Exception:
+        return _LINE_BR_BASE
 
 
 def _line_of_bitrate(br, lines: list[str]) -> str | None:
@@ -3055,10 +3069,19 @@ def _line_of_bitrate(br, lines: list[str]) -> str | None:
         b = int(br or 0)
     except (TypeError, ValueError):
         return None
-    if 90_000_000 <= b < 91_000_000:
-        idx = (b - 90_000_000) // 10001
-        if 0 <= idx < len(lines):
-            return lines[idx]
+    if not (_LINE_BR_BASE <= b < 91_000_000):
+        return None
+    # 1) 新哈希编码：按线路名匹配（跨片稳定）
+    if b >= _LINE_BR_BASE + 100_020:
+        h = b - (_LINE_BR_BASE + 100_020)
+        for ln in lines:
+            if _line_hash_code(ln) == h:
+                return ln
+        return None  # 该片无此线路，交由上层回落默认，绝不瞎选
+    # 2) 旧位置编码兼容（老客户端/升级前记住的 bitrate）
+    idx = (b - _LINE_BR_BASE) // _LINE_BR_STEP
+    if 0 <= idx < len(lines):
+        return lines[idx]
     return None
 
 
@@ -3069,10 +3092,10 @@ def _qualities(target: dict) -> list[dict]:
     if len(lines) < 2:
         return []
     out = []
-    for i, t in enumerate(lines):
+    for t in lines:
         out.append({
             "resolution": t.get("label") or _friendly_line(t["line"]),
-            "bitrate": 90_000_000 + i * 10001,
+            "bitrate": _line_bitrate(t["line"]),
             "progressive": True,
             "is_m3u8": False,  # 置 False 才不会被菜单项置灰
         })
@@ -3210,9 +3233,19 @@ async def stream_post(request: Request):
     v = sl["video_streams"][0]
     quals = _qualities(target)
     if quals:
-        # 默认选中第一条线路，让播放器初始分辨率/码率与之一致
-        v["resolution_type"] = quals[0]["resolution"]
-        v["bps"] = quals[0]["bitrate"]
+        # 高亮必须与【实际播放线路 target.line】一致，不能盲目标第一条，
+        # 否则 auto 竞速/冠军线与菜单首项不同时客户端会高亮错误线路。
+        cur = next((q for q in quals
+                    if _line_of_bitrate(q["bitrate"],
+                                        [c["line"] for c in _line_choices(target)])
+                    == target.get("line")), None)
+        if cur is None:
+            cur = next((q for q in quals
+                        if q["resolution"] == (target.get("label")
+                                               or _friendly_line(target["line"]))),
+                       quals[0])
+        v["resolution_type"] = cur["resolution"]
+        v["bps"] = cur["bitrate"]
     return JSONResponse({"code": 0, "msg": "", "data": {
         "file_stream": f, "video_stream": v,
         "audio_streams": [], "subtitle_streams": [],
@@ -3321,6 +3354,11 @@ async def play_play(request: Request):
     chosen_line = None
     if len(choices) > 1:
         chosen_line = _line_of_bitrate(body.get("bitrate"), [t["line"] for t in choices])
+    # 网盘线永不作跨片默认：App 会记住上一部选的 bitrate 并带到新视频，而 PanSou
+    # 在每部片菜单都存在，导致换新片仍默认网盘。真正手切网盘必先请求
+    # preset?line=PanSou（已对该 mg 登记 user_pick）；无此意图的 bitrate 命中一律回落。
+    if chosen_line == PANSOU_LINE and not _pansou_is_user_pick(mg):
+        chosen_line = None
     # 用户在 App 清晰度/线路菜单手选“网盘高清（PanSou）”：播放地址直挂 PanSou 占位
     # preset（取 main 先待命，播放器拉占位分片时才搜索转存）；不预热、不参与测速。
     if chosen_line == PANSOU_LINE:
@@ -3740,16 +3778,29 @@ def _client_direct_only(t: dict) -> bool:
 
 
 def _dodge_known_bad(picked: dict, request: Request) -> dict:
-    """零成本换线：当前线在坏线记忆中、且用户没有显式指定该线时，换到非坏线候选。
+    """零成本换线：当前线在坏线记忆/源级熔断中、且用户没有显式指定该线时，换到健康候选。
     让“退出重放”不再黏在上一次切坏的线路上（不发起任何探测网络请求）。"""
-    if not picked or not _autofail_on() or not _line_is_bad(picked):
+    if not picked or not _autofail_on():
+        return picked
+
+    def _is_bad(p: dict) -> bool:
+        if _line_is_bad(p):
+            return True
+        # 源级取流熔断（整站取流域名不可达）：同样零成本跳过
+        try:
+            sk = sourcehealth.source_key_of(p.get("line"), p)
+            return bool(sk) and sourcehealth.is_dead(sk)
+        except Exception:
+            return False
+
+    if not _is_bad(picked):
         return picked
     # 用户在播放器里明确选了这条坏线（query 带 line）则尊重其选择，交给探测逻辑
     if request.query_params.get("line"):
         return picked
     for c in _episode_candidates(picked):
-        if not _line_is_bad(c):
-            _log.info("跳过已知坏线 %s -> %s", picked.get("line"), c.get("line"))
+        if not _is_bad(c):
+            _log.info("跳过已知坏线/熔断源 %s -> %s", picked.get("line"), c.get("line"))
             return c
     return picked
 
@@ -4486,19 +4537,31 @@ def _race_candidates(picked: dict) -> list[dict]:
     def _prov(c: dict) -> str:
         return str(c.get("line", "")).split("::", 1)[0]
 
+    def _src_dead(c: dict) -> bool:
+        # 源级取流熔断：某资源站取流域名整片不可达时（搜索域可能仍正常），
+        # 其所有线路在竞速里沉底，避免每部片都先撞长超时再换线（复刻 0.2.17 稳定性）。
+        try:
+            sk = sourcehealth.source_key_of(c.get("line"), c)
+            return bool(sk) and sourcehealth.is_dead(sk)
+        except Exception:
+            return False
+
     def rank(c: dict) -> tuple:
-        return (c["line"] != fast if fast else True,
+        return (_src_dead(c),
+                c["line"] != fast if fast else True,
                 c["line"] != default if default else True)
 
-    # 预测线 + 默认线强制保留在最前
+    # 预测线 + 默认线强制保留在最前（但若其源已熔断则不强制置顶，交给死源沉底）
     pinned = sorted(
-        [c for c in ordered if (fast and c["line"] == fast)
-         or (default and c["line"] == default)], key=rank)
+        [c for c in ordered if ((fast and c["line"] == fast)
+          or (default and c["line"] == default)) and not _src_dead(c)],
+        key=rank)
     pinned_keys = {id(c) for c in pinned}
     rest = [c for c in ordered if id(c) not in pinned_keys]
-    # 剩余名额：直链优先、每源只取一条，尽量覆盖更多源；名额富余再补其余
+    # 剩余名额：健康源在前、直链优先、每源只取一条，尽量覆盖更多源；名额富余再补其余
     picked_list = list(pinned)
     seen = {_prov(c) for c in picked_list}
+    rest.sort(key=lambda c: (_src_dead(c), not _is_direct(c)))
     for prefer_direct in (True, False):
         for c in rest:
             if len(picked_list) >= n:
@@ -4801,6 +4864,16 @@ async def _prewarm_title_task(og: str, index: int, ekey: str) -> None:
                 except Exception:
                     return c, None
             res = await asyncio.gather(*[one(c) for c in cands])
+        # 回写源级健康画像：预热阶段的探测成败累积进 sourcehealth，取流整站不可达
+        # （搜索域正常但播放 CDN 挂）时能在起播前就熔断、零成本跳过，复刻 0.2.17
+        # “快源优先、不被死源拖尾”的稳定性。
+        for c, lat in res:
+            try:
+                sk = sourcehealth.source_key_of(c.get("line"), c)
+                if sk:
+                    sourcehealth.record(sk, lat is not None, lat or 0.0)
+            except Exception:
+                pass
         for c, lat in res:
             if lat is not None and (best is None or lat < best[1]):
                 best = (c, lat)
@@ -5007,7 +5080,9 @@ async def _build_playlist_body(mg: str, picked: dict, request: Request):
     if not re.search(r"\.m3u8(\?|$)", src_url, re.I) \
             and re.search(r"\.mp4(\?|$)", src_url, re.I):
         return _NOT_HLS, None
-    text, cur = await _fetch_playlist(request, src_url, headers)
+    # 网盘转码档已在上面的 pan 分支抓好绝对化清单，勿再回环抓取覆盖
+    if text is None:
+        text, cur = await _fetch_playlist(request, src_url, headers)
     # 跳转型源站极慢且间歇抖动：解析后的真实地址抓取失败时，对原始跳转地址
     # 强制重新解析一次再抓，避免整列表 502。
     if text is None and was_redirect:
@@ -5876,7 +5951,9 @@ async def hls_main(mg: str, request: Request):
 
     # 起播策略（复刻 v0.2.17 的秒播语义）：
     #  - 普通 CMS 直链：【同步等到真清单】，竞速 gather 各候选(单条≤4s)、胜者当场建清单，
-    #    main 一次返回正片，绝不提前回占位（这正是 0.2.17 “非常快”的关键）。
+    #    main 一次返回正片，尽量不提前回占位（这正是 0.2.17 “快且稳”的关键）。给 8s 宽
+    #    预算：覆盖一轮竞速+建清单，仅在极端卡死时才兜底占位，避免早期 3.5s 截断导致大量
+    #    本可一次出片的请求退化为“占位→轮询”，引入额外往返与不稳定。
     #  - 仅加固/爬虫/drpy/专有解码/小雅这类十几秒的慢源：短预算到点先回占位、后台自愈，
     #    播放器周期重拉转正片（全功能版相对公开 0.2.17 必须保留的兜底）。
     slow_source = _is_slow_line(picked)
@@ -5887,11 +5964,9 @@ async def hls_main(mg: str, request: Request):
         _MAIN_SERVE_FUT[bk] = fut
         fut.add_done_callback(lambda _f: _MAIN_SERVE_FUT.pop(bk, None))
     if not slow_source:
-        # 普通 CMS：在有限预算内等竞速+建清单，一次出真片。预算取 ~3.5s：足够多线
-        # 竞速里几十~几百毫秒的快线胜出并建好清单，又不让 TV/App（约 10s 轮询 main）
-        # 每次都干等 8s。超时先回占位、后台 future 继续跑完写缓存，下一次轮询即秒回。
+        # 普通 CMS：宽预算同步等真片（对齐 0.2.17），仅防永久挂死才回占位
         try:
-            return await asyncio.wait_for(asyncio.shield(fut), timeout=3.5)
+            return await asyncio.wait_for(asyncio.shield(fut), timeout=8.0)
         except asyncio.TimeoutError:
             return _placeholder_playlist_response(mg)
     try:

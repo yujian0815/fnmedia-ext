@@ -399,24 +399,61 @@ async def _search_cms(keyword: str, sources,
                             soft_timeout: float | None = None) -> list[OnlineTitle]:
     """纯普通 CMS 源：不限并发扇出（保留上游软超时），最大化搜索速度。
 
-    与含 T4/真机源时的 Semaphore(8) 交错调度分开，避免几个慢 CMS 源占满槽位拖死其它源。"""
+    与含 T4/真机源时的 Semaphore(8) 交错调度分开，避免几个慢 CMS 源占满槽位拖死其它源。
+
+    够快即返回：快源先完成、累计结果达到阈值且过了最小等待后，立即取消仍在途的慢
+    源，不必干等满 soft_timeout（实测个别源 7s+，会把整个搜索拖到 5s 多）。软超时仍
+    作为兜底，保证慢词/冷门词能拿全结果。"""
     import asyncio
     enabled = [s for s in sources if s.get("enabled")]
+    # 提前返回阈值：在线搜索最终去重后只取 max_per_keyword（默认12）组，原始结果
+    # 达到该量级即足以铺满首屏，无需等满软超时被慢源拖尾。
+    early_min_results = 25
+    # 至少等待这么久，避免快源结果太少时过早收手漏掉更多源
+    early_min_wait = 0.8
     async with netutil.async_client() as client:
-        tasks = [search_source(client, s, keyword) for s in enabled]
-        if soft_timeout is None or not tasks:
+        tasks = [asyncio.create_task(search_source(client, s, keyword))
+                 for s in enabled]
+        if not tasks:
+            return []
+        if soft_timeout is None:
             results = await asyncio.gather(*tasks, return_exceptions=True)
         else:
             per = max(0.5, soft_timeout - 0.3)
-
-            async def cap(coro):
-                try:
-                    return await asyncio.wait_for(coro, timeout=per)
-                except Exception:
-                    return None
-
-            results = await asyncio.gather(
-                *[cap(t) for t in tasks], return_exceptions=True)
+            collected: list = []
+            pending = set(tasks)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + per
+            early_gate = loop.time() + min(early_min_wait, per)
+            try:
+                while pending and loop.time() < deadline:
+                    wait_for = min(0.25, deadline - loop.time())
+                    done, pending = await asyncio.wait(
+                        pending, timeout=wait_for,
+                        return_when=asyncio.FIRST_COMPLETED)
+                    for t in done:
+                        try:
+                            r = t.result()
+                            if isinstance(r, list):
+                                collected.append(r)
+                        except Exception:
+                            pass
+                    # 过了最小等待且结果已够多：提前收手，取消在途慢源
+                    total = sum(len(x) for x in collected)
+                    if loop.time() >= early_gate and total >= early_min_results:
+                        break
+            finally:
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+            # 被取消/超时的任务若已产出也尽量回收
+            for t in tasks:
+                if t.done() and not t.cancelled() and t.exception() is None:
+                    r = t.result()
+                    if isinstance(r, list) and r not in collected:
+                        collected.append(r)
+            results = collected
     return [t for r in results if isinstance(r, list) for t in r]
 
 
@@ -457,9 +494,24 @@ async def search_all(keyword: str, sources=None,
                 # 有预算：到点即用已完成源结果，未完成任务取消（单慢源不拖垮全局）。
                 wait_budget = budget if budget is not None else soft_timeout
                 if tasks:
-                    done, _pending = await asyncio.wait(tasks, timeout=wait_budget)
-                    results = [t.result() for t in tasks if t in done
-                               and not t.cancelled() and t.exception() is None]
+                    # 够快即返回：快源结果够多且过了最小等待就提前收手，避免个别
+                    # 慢源（实测有 12s）把整个搜索拖满预算，与 _search_cms 同策略。
+                    early_min_results, early_min_wait = 25, 0.8
+                    loop = asyncio.get_running_loop()
+                    deadline = loop.time() + float(wait_budget)
+                    early_gate = loop.time() + min(early_min_wait, float(wait_budget))
+                    pending = set(tasks)
+                    results = []
+                    while pending and loop.time() < deadline:
+                        done, pending = await asyncio.wait(
+                            pending, timeout=min(0.25, deadline - loop.time()),
+                            return_when=asyncio.FIRST_COMPLETED)
+                        for t in done:
+                            if not t.cancelled() and t.exception() is None:
+                                results.append(t.result())
+                        total = sum(len(x) for x in results if isinstance(x, list))
+                        if loop.time() >= early_gate and total >= early_min_results:
+                            break
                 else:
                     results = []
         finally:
@@ -467,6 +519,12 @@ async def search_all(keyword: str, sources=None,
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            # 取消后回收已产出的结果，避免丢失快源数据
+            for task in tasks:
+                if task.done() and not task.cancelled() and task.exception() is None:
+                    r = task.result()
+                    if isinstance(r, list) and r not in results:
+                        results.append(r)
     titles: list[OnlineTitle] = []
     for r in results:
         if isinstance(r, list):
