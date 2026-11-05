@@ -36,6 +36,14 @@ class BrowseTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(item.stop)
         self.source = next(s for s in self.config.all_sources() if s.get("kind") == "t4")
         self.config.save({"sources": [dict(self.source, searchable=False, filterable=True)]})
+        # 隔离环境不接小雅 / redroid 加固：关掉 0.2.68 之后新增的虚拟库注入，
+        # 让 mediadb/list 的断言只反映热门/海量/T4 三类开关。
+        for name, value in (("guard_native_enabled", lambda *a, **k: False),
+                            ("guard_libs_active", lambda *a, **k: []),
+                            ("_xlib_active_cats", lambda *a, **k: [])):
+            p = patch.object(appmod, name, value)
+            p.start()
+            self.addCleanup(p.stop)
         self.filters = {}
         self.no_metadata = False
         self.broken = False

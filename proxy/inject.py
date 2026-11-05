@@ -159,24 +159,22 @@ def set_badge_provider(fn) -> None:
 
 
 def _poster_for_brief(b: dict) -> str:
-    """海报路径：按 brief 线路生成带角标海报（网盘资源 ☁ / 源健康点）。
+    """海报路径：只保留网盘资源 ☁ 角标。
 
-    优先用 brief 上预算好的 _pan/_health；否则实时调用注入的角标提供者。"""
-    cover = _f(b, "poster")
+    不再烧录源健康/测速圆点（逐张 Pillow 合成重编码会拖慢海报墙），速度由
+    播放时自动竞速/线路预测体现。"""
+    cover = _f(b, "poster") or b.get("cover") or ""
     if not cover.startswith("http"):
         return _poster(cover)
-    pan, hg, sg = _f(b, "_pan"), b.get("_health"), None
-    if (not pan) and hg is None and _badge_provider is not None:
+    pan = _f(b, "_pan")
+    if not pan and _badge_provider is not None:
         try:
             flags = _badge_provider(b)
-            pan, hg = flags[0], flags[1]
-            sg = flags[2] if len(flags) > 2 else None
+            pan = flags[0] if flags else ""
         except Exception:  # noqa: BLE001
-            pan, hg, sg = "", None, None
-    if pan or hg is not None or sg is not None:
-        return _poster_badged(cover, pan,
-                              hg if isinstance(hg, int) else None,
-                              sg if isinstance(sg, int) else None)
+            pan = ""
+    if pan:
+        return _poster_badged(cover, pan, None, None)
     return _poster(cover)
 
 

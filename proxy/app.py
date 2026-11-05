@@ -52,6 +52,7 @@ import hot as hotmod
 from hot import hot_cache
 import charts as chartmod
 from charts import chart_cache
+import chartbind
 import catalog as catalogmod
 from catalog import catalog
 import history as histmod
@@ -125,6 +126,13 @@ def _self_url(url: str) -> str:
 _search_cache: dict[str, tuple[float, list]] = {}
 _search_inflight: dict[str, asyncio.Future] = {}
 CACHE_TTL = 120
+# 绑定聚合缓存池：同一(片名·是否快源·是否含T4)在 TTL 内复用聚合后的 briefs，
+# 榜单绑定 / 播放回源 / 搜索等多次调用同一片名时不重复扇出所有源。
+# 注意：缓存的是 remember_merged 之后的 brief（含线路），命中即等价一次完整聚合。
+_AGG_CACHE: dict[str, tuple[float, list]] = {}
+_AGG_INFLIGHT: dict[str, asyncio.Future] = {}
+AGG_CACHE_TTL = 180
+_AGG_CACHE_MAX = 800
 T4_STREAM_READY_BUDGET = 8.0
 # 在线热门按内容拆成 4 个虚拟媒体库。guid 由固定串 md5 派生，保持稳定。
 HOT_CATEGORIES = [
@@ -352,6 +360,51 @@ def chart_card(item: dict) -> dict:
     }
 
 
+def prewarm_persist_mode() -> bool:
+    """预热方式开关：
+    True  = 方案B 持久化（绑定结果落盘，重启直接恢复，少重新搜源）；
+    False = 方案A 实时（重启后启动任务现场 resolve，默认）。"""
+    return str(config.get().get("prewarm_mode", "realtime")) == "persist"
+
+
+def _persist_chart_binding(guid: str, bound: dict) -> None:
+    """方案B：把榜单绑定结果落盘（仅持久化模式）。失败静默，不影响播放。"""
+    try:
+        if prewarm_persist_mode() and guid and bound:
+            chartbind.bind_store.remember(guid, bound)
+    except Exception:
+        pass
+
+
+def _restore_chart_bindings() -> int:
+    """方案B：启动时从磁盘恢复榜单绑定到 store（返回恢复条数）。
+
+    过期绑定也恢复进内存（避免冷点），但播放链若发现死链仍会重新 resolve；
+    同时后台预热会对失效片刷新。"""
+    try:
+        if not prewarm_persist_mode():
+            return 0
+        restored = 0
+        for cat, _t, _g in chartmod.CHART_CATEGORIES:
+            for it in chart_cache.items(cat):
+                guid = it.get("guid")
+                if not guid or store.get_title_by_guid(guid):
+                    continue
+                brief = chartbind.bind_store.get(guid)
+                if not brief:
+                    continue
+                b = dict(brief)
+                b["guid"] = guid  # 确保挂到榜单卡片 guid
+                try:
+                    store.remember_merged([b])
+                    restored += 1
+                except Exception:
+                    pass
+        return restored
+    except Exception:
+        return 0
+
+
 def start_resolve_chart(guid: str, *, prefetch: bool = False,
                         force: bool = False) -> asyncio.Future | None:
     """启动榜单 guid 的后台解析（单飞），立即返回在途 Future；不阻塞当前请求。
@@ -439,6 +492,7 @@ def start_resolve_chart(guid: str, *, prefetch: bool = False,
                                               "rating": item.get("rating", 0)}
                             _chart_resolved[guid] = bound
                             store.remember_merged([bound])
+                            _persist_chart_binding(guid, bound)
                             schedule_prewarm_title(guid, 0)
                             _PENDING_MEDIA_CHART.pop(media_guid(guid), None)
                             _CHART_FAILED_TS.pop(guid, None)
@@ -466,6 +520,7 @@ def start_resolve_chart(guid: str, *, prefetch: bool = False,
                                   "rating": item.get("rating", 0)}
                 _chart_resolved[guid] = bound
                 store.remember_merged([bound])
+                _persist_chart_binding(guid, bound)
                 schedule_prewarm_title(guid, 0)
                 _PENDING_MEDIA_CHART.pop(media_guid(guid), None)
                 _CHART_FAILED_TS.pop(guid, None)
@@ -761,6 +816,19 @@ async def lifespan(app: FastAPI):
         chart_cache.load()
     except Exception as exc:  # noqa: BLE001
         _log.warning("chart cache load on startup failed: %s", exc)
+    # 方案B：从磁盘恢复榜单绑定（线路），重启后热门片无需重新全网搜源
+    try:
+        _n = _restore_chart_bindings()
+        if _n:
+            _log.info("chart bindings restored on startup: %d", _n)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("chart binding restore failed: %s", exc)
+    # 方案B：同时恢复冠军线记忆（重启即秒播，不用现建播放清单）
+    try:
+        if prewarm_persist_mode():
+            linepredict.set_persist(True)
+    except Exception:  # noqa: BLE001
+        pass
     # 网盘转存缓存定时清理（默认保留 6h，每小时检查；配置关闭则不跑）。
     async def _pan_cache_loop():
         try:
@@ -783,6 +851,8 @@ async def lifespan(app: FastAPI):
         timeout=httpx.Timeout(30), trust_env=False, follow_redirects=True)
     app.state.stop_hot = asyncio.Event()
     app.state.hot_task = asyncio.create_task(_hot_worker(app))
+    # 重启后后台预热热门四库首屏（纯 CMS 冠军线），消除冷启动首批片慢/无线路
+    app.state.startup_warm = asyncio.create_task(startup_prewarm_hot())
 
     # 源健康画像：每 5 分钟把内存统计落盘一次（热路径零 IO）
     async def _health_flush_loop():
@@ -1226,7 +1296,48 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
                             *, include_t4: bool = True) -> list[dict]:
     """聚合搜索所有启用源 → 跨源合并 → 去噪/去无直链 → brief 列表（已入库）。
     fast_only=True 时只查秒回的标准 CMS 直链源（跳过加固/drpy 等慢源），供播放
-    失败时快速回源，避免被 redroid 慢源拖到网关超时。"""
+    失败时快速回源，避免被 redroid 慢源拖到网关超时。
+
+    结果进绑定聚合缓存池（按 片名·fast·t4 区分），TTL 内同片名的多次绑定/回源/
+    搜索复用同一份聚合结果，并以单飞去重并发扇出，不重复拉取所有源。"""
+    cache_key = f"{keyword}\x00{int(bool(fast_only))}\x00{int(bool(include_t4))}"
+    loop = asyncio.get_event_loop()
+    _hit = _AGG_CACHE.get(cache_key)
+    if _hit and (time.time() - _hit[0]) < AGG_CACHE_TTL:
+        return [dict(b) for b in _hit[1]]
+    _fut = _AGG_INFLIGHT.get(cache_key)
+    if _fut is not None and not _fut.done():
+        try:
+            return [dict(b) for b in await _fut]
+        except Exception:
+            pass  # 前次扇出失败则自己重试
+    fut = loop.create_future()
+    _AGG_INFLIGHT[cache_key] = fut
+    try:
+        result = await __aggregate_briefs_inner(
+            keyword, maxn, fast_only, soft_timeout, include_t4)
+        # remember_merged 幂等：命中缓存路径也已入库，这里再确保 store 有这些 brief
+        try:
+            store.remember_merged(result)
+        except Exception:
+            pass
+        _AGG_CACHE[cache_key] = (time.time(), result)
+        if len(_AGG_CACHE) > _AGG_CACHE_MAX:
+            for _old in list(_AGG_CACHE)[:_AGG_CACHE_MAX // 2]:
+                _AGG_CACHE.pop(_old, None)
+        if not fut.done():
+            fut.set_result(result)
+        return [dict(b) for b in result]
+    except Exception as exc:
+        if not fut.done():
+            fut.set_exception(exc)
+        raise
+    finally:
+        _AGG_INFLIGHT.pop(cache_key, None)
+
+
+async def __aggregate_briefs_inner(keyword, maxn, fast_only, soft_timeout,
+                                   include_t4) -> list[dict]:
     # 可选特性源不进入全局搜索（公开构建下该开关恒关，等价于不过滤）。
     sources = [s for s in config.enabled_sources()
                if not (features.ADULT and s.get("adult"))
@@ -1462,18 +1573,19 @@ except Exception:  # noqa: BLE001
 
 
 def _brief_poster_badged(brief: dict) -> str:
-    """按 brief 线路的网盘/健康情况生成带角标的海报路径。"""
-    cover = brief.get("poster") or ""
+    """按 brief 线路生成带角标的海报路径。
+
+    只保留网盘资源 ☁ 文字角标；不再烧录测速/健康圆点——后者需要后端逐张下载
+    原图并用 Pillow 合成重编码（to_thread），海报墙几十张图会显著拖慢加载，
+    且速度信息已在播放时由自动竞速/线路预测体现，无需画在封面上。"""
+    cover = brief.get("poster") or brief.get("cover") or ""
     if not cover:
         return ""
-    pan_label, health_grade, _ = _brief_line_flags(brief)
-    speed_grade = None
+    pan_label, _health_grade, _ = _brief_line_flags(brief)
     try:
-        speed_grade = linepredict.grade(f"{brief.get('guid', '')}|0")
-    except Exception:
-        pass
-    try:
-        return inj._poster_badged(cover, pan_label, health_grade, speed_grade)
+        # health_grade / speed_grade 一律不传（None）→ 纯 CMS 片直接透传原图，
+        # 零 Pillow 合成开销；仅网盘资源走一次 ☁ 角标合成。
+        return inj._poster_badged(cover, pan_label, None, None)
     except Exception:  # noqa: BLE001
         return inj._poster(cover)
 
@@ -2160,19 +2272,21 @@ async def item_list(request: Request):
     # 浏览热门库本页卡片时，后台提前搜源绑定（不阻塞列表）。这样用户点进某部片时
     # 多数已绑定，preset/main 不必现场等 9~25s 的榜单匹配，实现热门库也“秒播”。
     # 仅预解析首页前若干张（通常就是屏幕可见区），避免一次性压垮聚合源。
+    # 浏览热门库【每一页】都后台搜源绑定（不阻塞列表），按展示顺序处理、显示一页
+    # 匹配一页：用户翻到第 2/3 页点进去时也大多已绑定，preset/main 不必现场等。
+    # 仅本页前若干张（≈屏幕可见区）、去重 + 冷却限流，避免翻页压垮聚合源。
     try:
-        if start == 0:
-            _pre = [r.get("guid") for r in out_rows[:18] if r.get("guid")]
-            for g in _pre:
-                if chart_cache.is_chart_guid(g) and not store.get_title_by_guid(g) \
-                        and g not in _chart_resolving \
-                        and g not in _CHART_SLOW_RUNNING \
-                        and _chart_cooldown_left(g) <= 0:
-                    start_resolve_chart(g, prefetch=True)
-                elif store.get_title_by_guid(g):
-                    # 已绑定的本页影片：后台轻量探测其前几条线，预测出本片最快线，
-                    # 用户点进去零竞速秒播（只首屏、限并发，不打全站）。
-                    schedule_prewarm_title(g, 0)
+        _pre = [r.get("guid") for r in out_rows[:18] if r.get("guid")]
+        for g in _pre:
+            if chart_cache.is_chart_guid(g) and not store.get_title_by_guid(g) \
+                    and g not in _chart_resolving \
+                    and g not in _CHART_SLOW_RUNNING \
+                    and _chart_cooldown_left(g) <= 0:
+                start_resolve_chart(g, prefetch=True)
+            elif store.get_title_by_guid(g):
+                # 已绑定的本页影片：后台轻量探测其前几条线，预测出本片最快线，
+                # 用户点进去零竞速秒播（只本页可见区、限并发，不打全站）。
+                schedule_prewarm_title(g, 0)
     except Exception:
         pass
     _payload = {"code": 0, "msg": "", "data": {
@@ -3132,7 +3246,12 @@ async def media_range(mg: str, request: Request):
     # 同样【不在此同步解析】（会卡 App 起播、像点了没反应）：先瞬时 302 到对应代理，
     # 由 preset/main、direct 内部在播放加载阶段解析，并有双向 302 兜底。
     _wrapper, is_hls = _guess_wrapper(target)
-    q = urllib.parse.urlencode({"line": target["line"], "index": target["index"]})
+    # auto=1：这是“播放器自动起播”（非用户手动切线），main 见到它即按冠军线/竞速
+    # 选本片实测最快的源秒播，四端（Web/iOS/Android/TV）行为统一；URL 仍带默认线
+    # 名是为了在无更快预测时回落到它。用户从线路菜单手切的请求不带 auto=1，
+    # 严格尊重所选线。
+    q = urllib.parse.urlencode({"line": target["line"],
+                                "index": target["index"], "auto": "1"})
     if is_hls:
         # 普通库片：后台按片名补齐全网同名 CMS 线路（非阻塞），让线路菜单和热门库
         # 一样完整、名称规范；本次仍用记录内既有线路秒播。
@@ -3247,12 +3366,22 @@ async def play_play(request: Request):
     # 卡在海报墙像“点了没反应”）。先瞬时返回播放地址让播放器立刻进入加载页转圈，
     # 真正的解析延迟到播放器内部取 main.m3u8 / direct 时再做（那里本就有加载指示）。
     wrapper, is_hls = _guess_wrapper(target)
-    q = urllib.parse.urlencode({"line": target["line"], "index": target["index"]})
+    # auto=1：自动起播，main 按冠军线/竞速选最快源，四端统一秒播（见 stream 302）。
+    q = urllib.parse.urlencode({"line": target["line"],
+                                "index": target["index"], "auto": "1"})
     if is_hls:
         play_link = f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{q}"
-        # 后台立刻预热该线路（含解析 + 播放列表），播放器取 main 时大概率已就绪
+        # 后台立刻预热全部普通线路（含解析 + 播放列表），播放器取 main 时大概率已就绪
         try:
-            _warm_playlist(mg, target, request)
+            _tgts = [t for t in store.target_lines(target)[:_PREWARM_MAX]
+                     if not t.get("_pansou_manual") and not t.get("xsrc")
+                     and not any(t.get(k) for k in ("catvod", "drpy", "guard"))
+                     and (t.get("m3u8") or
+                          re.search(r"\.m3u8(\?|$)", str(t.get("url") or ""), re.I))]
+            if _tgts:
+                _warm_preset_lines(mg, _tgts, request)
+            else:
+                _warm_playlist(mg, target, request)
         except Exception:
             pass
     else:
@@ -3308,7 +3437,8 @@ async def direct_proxy(mg: str, request: Request):
     if re.search(r"\.m3u8(\?|$)", src_url, re.I):
         # 源是 HLS 却走到直链（MP4 预判失误）：带线路/集序重定向到 preset
         q = urllib.parse.urlencode({"line": target["line"],
-                                    "index": target.get("index", 0)})
+                                    "index": target.get("index", 0),
+                                    "auto": "1"})
         return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{q}",
                                 status_code=302)
     # 网盘原画直出 mp4：src 是本服务根相对地址，经回环自调用（注入网盘 Cookie）
@@ -3695,6 +3825,14 @@ def _pan_match(text: str):
 # NameError、也绝不会出现网盘线。full 版加载时块内真实定义会覆盖这些兜底。
 PANSOU_LINE = "builtin-pansou::PanSou网盘高清"
 PANSOU_LABEL = "🎞️网盘高清（PanSou）"
+
+
+def _is_pansou_line_name(line: str) -> bool:
+    # lite 恒无网盘线：只有内置 pansou 名才认
+    try:
+        return bool(line) and str(line).startswith("builtin-pansou::")
+    except Exception:
+        return False
 
 
 def _pansou_available() -> bool:
@@ -4518,6 +4656,102 @@ def warm_catalog_briefs(briefs: list) -> None:
         pass
 
 
+async def startup_prewarm_hot() -> None:
+    """重启后自动预热：先建海量库路由，再预热热门/海量首屏（纯 CMS 线）。
+
+    解决“刚重启第一批片冷点、海量库列表空、线路未聚合”：
+    - catalog 路由是内存态、重启后要重建（约 10s），先触发它，海量库才有卡片；
+    - 再对热门四库 + 海量四库首屏走 warm_catalog_briefs（落库→补全网 CMS 线→
+      本片最快线探测→预建冠军清单），用户点进即秒播、线路立即可见。
+    低并发、分批、可被 linepredict_enabled 关闭。"""
+    per_cat = 14
+
+    async def _refresh_catalog_routes() -> None:
+        # 海量库路由是内存态、重启后重建；与热门绑定互不依赖，并行跑。
+        try:
+            if catalog.routes_stale():
+                await asyncio.wait_for(
+                    catalog.refresh_routes(config.enabled_sources()), timeout=90)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.info("startup catalog routes warm skipped", exc_info=True)
+
+    async def _resolve_round() -> int:
+        # 一轮：对热门四库首屏里仍未绑定的片串行 resolve，返回本轮成功绑定数。
+        bound = 0
+        for cat, _title, _g in chartmod.CHART_CATEGORIES:
+            try:
+                guids = [g for g in (it.get("guid")
+                        for it in list(chart_cache.items(cat))[:per_cat]) if g]
+                for g in guids:
+                    if store.get_title_by_guid(g):
+                        continue  # 已绑定（含用户浏览/上一轮成果）
+                    await _safe_start_resolve(g)
+                    if store.get_title_by_guid(g):
+                        bound += 1
+                    await asyncio.sleep(1)
+            except Exception:
+                _log.info("startup chart resolve skipped", exc_info=True)
+            await asyncio.sleep(3)
+        return bound
+
+    async def _resolve_hot_firstscreen() -> None:
+        # 热门片只有片名、没有线路，必须 resolve 全网搜源；绑定成功后 resolve
+        # 内部自动 schedule_prewarm_title 选最快线+预建冠军清单。
+        try:
+            # 第一轮：重启早期网络/源站可能未热，先等服务稳定
+            await asyncio.sleep(20)
+            first = await _resolve_round()
+            _log.info("startup hot resolve round1 bound=%d", first)
+            # 第二轮：给慢源/瞬时失败的片一次重试（此时连接已热、成功率高）
+            await asyncio.sleep(30)
+            second = await _resolve_round()
+            _log.info("startup hot resolve round2 bound=%d", second)
+        except Exception:
+            _log.info("startup hot resolve failed", exc_info=True)
+
+    try:
+        await asyncio.sleep(8)
+        if not bool(config.get().get("linepredict_enabled", True)):
+            return
+        # 两条预热线并行：catalog 路由重建 与 热门首屏绑定，互不阻塞
+        await asyncio.gather(
+            _refresh_catalog_routes(),
+            _resolve_hot_firstscreen(),
+            return_exceptions=True)
+        # 海量四库首屏：路由就绪后取窗预热（线路聚合 + 冠军清单）
+        for ccat, _xname, _xcat in catalogmod.CATALOG_CATEGORIES:
+            try:
+                briefs, _n = await catalog.get_window(ccat, 0, per_cat)
+                if briefs:
+                    warm_catalog_briefs(list(briefs)[:per_cat])
+            except Exception:
+                pass
+            await asyncio.sleep(8)
+        _log.info("startup prewarm all done")
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        _log.info("startup hot prewarm skipped", exc_info=True)
+
+
+async def _safe_start_resolve(guid: str) -> None:
+    """启动预热用：触发榜单片后台绑定并等待其完成，吞掉所有异常/限流。
+
+    start_resolve_chart 返回在途 Future（单飞），必须 await 完成，否则调用方
+    立即查 store 会因绑定仍在后台进行而误判失败、bound 计数恒为 0。"""
+    try:
+        fut = start_resolve_chart(guid, prefetch=True)
+        if fut is not None:
+            try:
+                await asyncio.wait_for(fut, timeout=30)
+            except Exception:
+                pass  # 单个片失败不影响其它片；播放时仍会即时解析
+    except Exception:
+        _log.info("startup resolve skipped %s", guid, exc_info=True)
+
+
 async def _prewarm_title_task(og: str, index: int, ekey: str) -> None:
     try:
         try:
@@ -4570,7 +4804,9 @@ async def _prewarm_title_task(og: str, index: int, ekey: str) -> None:
         for c, lat in res:
             if lat is not None and (best is None or lat < best[1]):
                 best = (c, lat)
-        if best is not None:
+        # 只把“够快”的候选记为冠军：否则唯一可探源很慢（实测有 25s）时也会被钉死
+        # 成首选，点击即卡/失败。慢于阈值不记预测，让起播时现场竞速在多条线里挑快的。
+        if best is not None and best[1] < linepredict.SLOW_SEC:
             linepredict.remember(ekey, best[0]["line"], best[1])
             # 预建冠军线播放清单：点击时 main 直接命中缓存，零上游抓取 = 真秒播。
             # 失败静默（点击竞速仍会兜底）。用独立短预算，避免占住海报探测信号量。
@@ -4581,7 +4817,7 @@ async def _prewarm_title_task(og: str, index: int, ekey: str) -> None:
                 bc["index"] = int(index or 0)
                 await asyncio.wait_for(
                     _get_playlist_cached(og, bc, build_req, champion=True),
-                    timeout=3.0)
+                    timeout=5.0)
             except Exception:
                 pass
             _log.debug("海报预热: 《%s》选中 %s (%.2fs, %d 候选)",
@@ -5148,8 +5384,23 @@ async def hls_preset(mg: str, request: Request):
     # 来自 stream/play 的 qualities，用户切线时会带新 line 重新请求，不依赖这里多变体；
     # 其余线路仍由下方 _warm_preset_lines 在后台并发建热，切线时命中缓存。
     _explicit_all = targets
+    # 自动起播标记：stream 302 / play_link 会带 auto=1（即使同时带默认 line）。
+    _auto_start = request.query_params.get("auto") == "1"
     if explicit_line and explicit_line != PANSOU_LINE:
-        _sel = next((t for t in targets if t.get("line") == explicit_line), picked)
+        if _auto_start:
+            # 四端统一“起播瞬间走本片最快线”：单变体优先选海报预热/竞速冠军线
+            # （已预建清单→秒播）；无冠军时回落到 302 给的默认线。仍只输出单变体，
+            # 避免 iOS/TV 串行预取所有变体。
+            _fast = remembered_fast_line(picked)
+            _sel = None
+            if _fast:
+                _sel = next((t for t in targets if t.get("line") == _fast
+                             and not _line_is_bad(t)), None)
+            if _sel is None:
+                _sel = next((t for t in targets if t.get("line") == explicit_line),
+                            picked)
+        else:
+            _sel = next((t for t in targets if t.get("line") == explicit_line), picked)
         targets = [_sel]
     for t in targets:
         if t.get("m3u8") or re.search(r"\.(m3u8|mp4)(\?|$)", t.get("url", ""), re.I) \
@@ -5173,8 +5424,9 @@ async def hls_preset(mg: str, request: Request):
     # 分辨率探测模块已搁置：线路菜单只显示线路名，不追加分辨率标签。
     idx = int(picked.get("index", 0) or 0)
 
-    # 自动起播：把上一次竞速选出的最快线排到首位（稳定用线）；用户显式选线时不动顺序
-    auto_mode = (not explicit_line) and _fastest_on()
+    # 自动起播：无 line（网页）或带 auto=1（App/TV/iOS 的 302/play_link）。
+    # 用户从线路菜单手切（有 line 且无 auto=1）不算自动，严格尊重所选线。
+    auto_mode = _fastest_on() and ((not explicit_line) or _auto_start)
 
     def _is_manual_pansou(t: dict) -> bool:
         return bool(t.get("_pansou_manual")) or t.get("line") == PANSOU_LINE
@@ -5462,7 +5714,9 @@ async def hls_main(mg: str, request: Request):
 
     # 线路健康探测 + 自动选最快线
     explicit_line = request.query_params.get("line")
-    auto_play = request.query_params.get("auto") == "1" and not explicit_line
+    # auto=1 即“自动起播”：网页(无line)与 App/TV/iOS(302 带默认 line + auto=1)
+    # 都走冠军线复用/竞速选最快源；只有用户手动切线（有 line 且无 auto=1）才不自动。
+    auto_play = request.query_params.get("auto") == "1"
     request.state._play_mg = mg  # 供探测复用播放列表构建、填充缓存
 
     # ===== 手动 PanSou 高清线：必须有真实手切意图才搜索/转存 =====
@@ -5535,6 +5789,31 @@ async def hls_main(mg: str, request: Request):
         # 【自动起播秒播快路径】auto 起播时，先看本片本片是否已有预建好的真实清单：
         # 优先用预测/竞速冠军线；键错位（补线改名）时退而复用同片任一新鲜清单，直接秒播，
         # 不做任何上游竞速/抓取。用户显式选线(auto_play=False)绝不走这里。
+        # 【播放中静默换更快线】auto 起播且当前线真实播放持续慢、同片另一条线
+        # 明显更快（seg 端点实时分片测速判定）：播放器周期重拉 main 时直接返回更快线
+        # 已建好的清单，不打断当前播放、只让后续分片走快线；带冷却防抖。手动选线不走。
+        if auto_play and not _is_slow_line(_p):
+            try:
+                _faster = linepredict.pick_faster_line(
+                    _p.get("online_guid", ""), int(_p.get("index", 0) or 0),
+                    _p.get("line", ""))
+                if _faster and _faster != _p.get("line"):
+                    _fp = next((c for c in _episode_candidates(_p)
+                                if c.get("line") == _faster and not _line_is_bad(c)
+                                and not _is_pansou_line_name(_faster)), None)
+                    if _fp is not None:
+                        _fbc = _PLAYLIST_CACHE.get(_playlist_cache_key(_fp))
+                        if (_fbc and _fbc[1] and _fbc[1] is not _NOT_HLS
+                                and _playlist_has_segment(_fbc[1])
+                                and "_placeholder/" not in _fbc[1][:400]):
+                            _log.info("播放中检测到慢线，静默切换 %s -> %s",
+                                      _p.get("line"), _faster)
+                            return Response(_fbc[1],
+                                            media_type="application/vnd.apple.mpegurl",
+                                            headers={"Cache-Control": "no-cache",
+                                                     "Access-Control-Allow-Origin": "*"})
+            except Exception:
+                pass
         if auto_play:
             _fast = remembered_fast_line(_p)
             _ready = _cached_sibling_playlist(_p, prefer=_fast)
@@ -5608,10 +5887,11 @@ async def hls_main(mg: str, request: Request):
         _MAIN_SERVE_FUT[bk] = fut
         fut.add_done_callback(lambda _f: _MAIN_SERVE_FUT.pop(bk, None))
     if not slow_source:
-        # 普通 CMS：直接等竞速+建清单完成（内部每条探测/抓取均有各自超时上限），
-        # 与 v0.2.17 一致一次出真片。外层给宽松硬顶，仅防极端上游永久挂死。
+        # 普通 CMS：在有限预算内等竞速+建清单，一次出真片。预算取 ~3.5s：足够多线
+        # 竞速里几十~几百毫秒的快线胜出并建好清单，又不让 TV/App（约 10s 轮询 main）
+        # 每次都干等 8s。超时先回占位、后台 future 继续跑完写缓存，下一次轮询即秒回。
         try:
-            return await asyncio.wait_for(asyncio.shield(fut), timeout=8.0)
+            return await asyncio.wait_for(asyncio.shield(fut), timeout=3.5)
         except asyncio.TimeoutError:
             return _placeholder_playlist_response(mg)
     try:
@@ -5718,6 +5998,9 @@ async def hls_seg(mg: str, request: Request):
     headers = picked["headers"] if picked else {}
     # 透传 Range（播放器 seek）
     fwd = dict(headers)
+    # 域名解析为通用逻辑（公开版也需要，用于下方网盘 Cookie 判定），不放进私有块，
+    # 否则剥离 GUARD 块后下方 _host 引用会 NameError。
+    _host = urllib.parse.urlsplit(src_url).netloc.lower()
     # 加密 HLS 由本服务解密：不能按密文转发任意字节 Range，需完整拉取后回传纯 TS。
     if request.query_params.get("dec") == "1":
         fwd.pop("Range", None)
@@ -5730,6 +6013,72 @@ async def hls_seg(mg: str, request: Request):
         _log.warning("seg fetch fail %s %s", type(exc).__name__,
                      urllib.parse.urlsplit(src_url).netloc)
         return Response(f"seg fail {type(exc).__name__}", status_code=502)
+
+    # 流式快路径：普通、无需服务端处理的分片【边收边发】，首字节不再等整段下完，
+    # 对慢 CDN（分片 1~10s）能显著降低播放器缓冲等待、减少“放一会卡住”。
+    # 仍需整段处理的情形不走这里：AES 解密(dec=1)、夸克/UC 网盘分片（保证 Cookie
+    # 注入语义统一）。PNG 伪装分片在生成器里读首块嗅探，发现 PNG 头则转缓冲剥壳。
+    is_decrypt = request.query_params.get("dec") == "1"
+    _need_pan_cookie = _host.endswith("drive.quark.cn") or _host.endswith(".quark.cn") \
+        or _host.endswith(".uc.cn")
+    if (not is_decrypt and not _need_pan_cookie
+            and r.status_code in (200, 206) and hasattr(r, "aiter_bytes")):
+        # 播放中实时分片测速上下文（用于持续慢源静默换线）
+        _tog = (picked.get("online_guid", "") if picked else "") or \
+            store.online_guid_by_media(mg)
+        _tidx = int((picked or {}).get("index", request.query_params.get("index", 0)) or 0)
+        _tline = request.query_params.get("line") or \
+            ((picked or {}).get("line", ""))
+        _t0 = time.monotonic()
+
+        async def _stream_seg():
+            buf = b""
+            sniffed = False
+            try:
+                async for chunk in r.aiter_bytes(64 * 1024):
+                    if not sniffed:
+                        sniffed = True
+                        buf += chunk
+                        if buf[:8] == b"\x89PNG\r\n\x1a\n":
+                            # PNG 伪装分片：收齐后剥壳再发，退出流式改缓冲路径
+                            async for rest in r.aiter_bytes(64 * 1024):
+                                buf += rest
+                            try:
+                                import quality as _q
+                                payload, _ = _q._unwrap_segment(buf)
+                                buf = payload if payload is not None else buf
+                            except Exception:
+                                pass
+                            yield buf
+                            return
+                        if buf:
+                            yield buf
+                            buf = b""
+                        continue
+                    yield chunk
+            finally:
+                try:
+                    await r.aclose()
+                except Exception:
+                    pass
+                # 记录该线真实分片下载耗时（整段流式完成时刻）
+                if _tog and _tline and not _is_pansou_line_name(_tline):
+                    try:
+                        linepredict.record_seg(
+                            _tog, _tidx, _tline, time.monotonic() - _t0)
+                    except Exception:
+                        pass
+
+        hs = _safe_response_headers(r.headers, {"content-security-policy"})
+        hs["Access-Control-Allow-Origin"] = "*"
+        hs.pop("content-length", None)  # 剥 PNG 壳后长度可能变化，用分块传输
+        hs.setdefault("Content-Type", "video/mp2t")
+        if r.status_code in _RETRY_STATUS:
+            _log.warning("seg upstream %s %s", r.status_code,
+                         urllib.parse.urlsplit(src_url).netloc)
+        return StreamingResponse(_stream_seg(),
+                                 status_code=r.status_code, headers=hs)
+
     body = r.content
     # 服务端解密 AES-128 HLS 分片：m3u8 已移除 EXT-X-KEY，这里把密文 TS 解成纯 TS，
     # 并强制按完整 200 内容返回（密文 206 不能直接解密/拼接）。
@@ -5870,14 +6219,15 @@ async def _serve_online_poster(tok_path: str, request: Request) -> Response:
     if marker in tok_path:
         tok_path = tok_path.split(marker, 1)[1]
     try:
-        u, pan_label, health_grade, speed_grade = _decode_poster_tok(tok_path)
+        u, pan_label, _health_grade, _speed_grade = _decode_poster_tok(tok_path)
     except Exception:
         return _poster_fallback()
     if not u.startswith("http"):
         return _poster_fallback()
-    # 本片预测速度档优先（1快→绿0 / 2中→黄1 / 3慢→橙2）；无速度档才用源健康点
-    badge_grade = speed_grade - 1 if speed_grade in (1, 2, 3) else health_grade
-    want_badge = bool(pan_label) or badge_grade is not None
+    # 海报墙不再烧录测速/健康圆点（逐张 Pillow 合成会拖慢整墙加载）：
+    # 忽略旧链接里可能携带的 h/s，只保留网盘资源 ☁ 文字角标。
+    badge_grade = None
+    want_badge = bool(pan_label)
     headers = {"User-Agent": "Mozilla/5.0"}
     host = urllib.parse.urlsplit(u).netloc.lower()
     # 豆瓣图床需要带豆瓣 Referer，否则可能 403
@@ -6065,7 +6415,7 @@ async def ext_cache_clear(request: Request):
     targets = {str(t) for t in targets}
     done, need_restart = [], False
     if "search" in targets:
-        _search_cache.clear(); done.append("search")
+        _search_cache.clear(); _AGG_CACHE.clear(); done.append("search")
     if "charts" in targets:
         try:
             chart_cache.reset(); done.append("charts")
@@ -6364,10 +6714,14 @@ async def ext_set_config(request: Request):
         "line_fastest", "line_fastest_max", "line_fastest_timeout",
         "line_fastest_prefer", "line_fastest_budget", "main_ready_budget",
         "line_autofail",
+        "prewarm_mode",
         "pan_cache_cleanup_enabled", "pan_cache_ttl_hours",
         "update_proxy",
     }
     patch = {k: v for k, v in body.items() if k in allowed}
+    if "prewarm_mode" in patch:
+        # 只允许两种预热方式，非法值回退默认 realtime（方案A）
+        patch["prewarm_mode"] = "persist" if str(patch["prewarm_mode"]) == "persist" else "realtime"
     if "hot_library_title" in patch:
         patch["hot_library_title"] = str(patch["hot_library_title"]).strip()[:20] or HOT_DEFAULT_TITLE
     if "hot_limit" in patch:
@@ -6427,7 +6781,13 @@ async def ext_set_config(request: Request):
                     cur[sid]["adult"] = ch["adult"] and bool(cur[sid].get("standalone"))
         patch["sources"] = list(cur.values())
     config.save(patch)
-    _search_cache.clear()
+    _search_cache.clear(); _AGG_CACHE.clear()
+    # 方案B 开关切换：即时启用/停用冠军线记忆持久化
+    if "prewarm_mode" in patch:
+        try:
+            linepredict.set_persist(patch["prewarm_mode"] == "persist")
+        except Exception:
+            pass
     if sources_changed:
         _schedule_routes_refresh()
     return {"code": 0, "msg": "saved"}
@@ -6513,7 +6873,7 @@ async def ext_junk_keywords(request: Request):
         kws = config.reset_junk_keywords()
     else:
         kws = config.set_junk_keywords(body.get("keywords", []))
-    _search_cache.clear()
+    _search_cache.clear(); _AGG_CACHE.clear()
     return {"code": 0, "msg": "saved", "data": {"junk_keywords": kws}}
 
 
@@ -6533,7 +6893,7 @@ async def ext_source_add(request: Request):
                                  bool(body.get("standalone", False)))
     if not ok:
         return JSONResponse({"code": 400, "msg": info}, status_code=400)
-    _search_cache.clear()
+    _search_cache.clear(); _AGG_CACHE.clear()
     if body.get("standalone"):
         _schedule_routes_refresh()
     return {"code": 0, "msg": "added", "data": {"id": info}}
@@ -6559,7 +6919,7 @@ async def ext_source_update(request: Request):
         return JSONResponse({"code": 500, "msg": str(exc)}, status_code=500)
     if not ok:
         return JSONResponse({"code": 400, "msg": info}, status_code=400)
-    _search_cache.clear()
+    _search_cache.clear(); _AGG_CACHE.clear()
     _schedule_routes_refresh()
     return {"code": 0, "msg": "ok", "data": {"id": info}}
 
@@ -6608,7 +6968,7 @@ async def ext_source_delete(request: Request):
     ok, info = config.remove_source(body.get("id", ""))
     if not ok:
         return JSONResponse({"code": 404, "msg": info}, status_code=404)
-    _search_cache.clear()
+    _search_cache.clear(); _AGG_CACHE.clear()
     _schedule_routes_refresh()
     return {"code": 0, "msg": "deleted"}
 
@@ -6616,7 +6976,7 @@ async def ext_source_delete(request: Request):
 @app.post("/v/api/ext/source/restore")
 async def ext_source_restore(request: Request):
     config.restore_builtin()
-    _search_cache.clear()
+    _search_cache.clear(); _AGG_CACHE.clear()
     return {"code": 0, "msg": "restored"}
 
 
@@ -6635,7 +6995,79 @@ async def ext_source_test(request: Request):
     return {"code": 0, "msg": "", "data": result}
 
 
-@app.post("/v/api/ext/source/test-all")
+def _is_pure_cms(s: dict) -> bool:
+    """纯苹果 CMS 源（非 jar 爬虫 / 加固 / 小雅 / dduo / DRPY / T4）。"""
+    if s.get("guard") or s.get("spider_src") or s.get("catvod") \
+            or s.get("xsrc") or s.get("drpy") or s.get("t4"):
+        return False
+    if str(s.get("id", "")).startswith(("spider-", "guard-", "drpy-", "t4-")):
+        return False
+    return bool(str(s.get("api", "")).startswith(("http://", "https://")))
+
+
+@app.get("/v/api/ext/source/export")
+async def ext_source_export():
+    """导出纯 CMS 源为可移植 JSON（只含名称/接口/启用/独立库/非过滤等通用字段，
+    不含 id/内置标记，便于跨设备导入；jar/加固/小雅等不属本页范围）。"""
+    out = []
+    for s in config.all_sources():
+        if not _is_pure_cms(s):
+            continue
+        out.append({
+            "name": s.get("name", ""),
+            "api": s.get("api", ""),
+            "enabled": bool(s.get("enabled", True)),
+            "standalone": bool(s.get("standalone", False)),
+            "loose_filter": bool(s.get("loose_filter", False)),
+        })
+    return {"code": 0, "msg": "", "data": {"version": 1, "sources": out}}
+
+
+@app.post("/v/api/ext/source/import-file")
+async def ext_source_import_file(request: Request):
+    """从导出的 JSON（或含 sources 数组的兼容结构）批量导入纯 CMS 源。
+    自动去重（按规范化 API），返回新增/跳过计数；jar/爬虫/加固条目忽略并计数。"""
+    body = await request.json()
+    raw = body.get("sources")
+    if raw is None and isinstance(body.get("data"), dict):
+        raw = body["data"].get("sources")
+    if not isinstance(raw, list):
+        return JSONResponse({"code": 400, "msg": "JSON 需含 sources 数组"},
+                            status_code=400)
+    added, skipped, noncms = 0, 0, 0
+    for it in raw:
+        if not isinstance(it, dict):
+            continue
+        api = str(it.get("api", "")).strip()
+        name = str(it.get("name", "")).strip()
+        if not api.startswith(("http://", "https://")):
+            noncms += 1
+            continue
+        # 兼容 TVBox 形态：带 jar/csp/type!=0/1 的不当作纯 CMS
+        if it.get("jar") or str(it.get("type", "")).strip() not in ("", "0", "1", 0, 1):
+            noncms += 1
+            continue
+        ok, _info = config.add_source(
+            name, api, bool(it.get("enabled", True)),
+            bool(it.get("standalone", False)))
+        if ok:
+            added += 1
+            if it.get("loose_filter"):
+                try:
+                    sid = config.make_custom_id(api)
+                    config.save({sid: {"loose_filter": True}})
+                except Exception:
+                    pass
+        else:
+            skipped += 1
+    _search_cache.clear(); _AGG_CACHE.clear()
+    if added:
+        _schedule_routes_refresh()
+    return {"code": 0, "msg": "", "data": {"added": added, "skipped": skipped,
+                                            "ignored_noncms": noncms}}
+
+
+
 async def ext_source_test_all(request: Request):
     """并发探测全部源，返回 [{id,name,...result}]。"""
     async def one(s):
@@ -6727,7 +7159,7 @@ async def ext_import_tvbox(request: Request):
             break
     t4_report = config.import_t4_sources(t4_candidates)
     if added_names or t4_report["added"]:
-        _search_cache.clear()
+        _search_cache.clear(); _AGG_CACHE.clear()
         if standalone:
             _schedule_routes_refresh()
         else:
@@ -6860,7 +7292,7 @@ async def ext_import_subscription(request: Request):
     if cms_added or t4_report["added"] or (guard_report and guard_report.get("enabled_count")) \
             or (csp_report and csp_report.get("added")) \
             or (drpy_report and drpy_report.get("added")):
-        _search_cache.clear()
+        _search_cache.clear(); _AGG_CACHE.clear()
         _schedule_routes_refresh()
 
     return {"code": 0, "msg": "", "data": {
@@ -6996,7 +7428,9 @@ async def linepredict_status():
         "config": {
             "enabled": bool(config.get().get("linepredict_enabled", True)),
             "max_lines": int(config.get().get("linepredict_max_lines", 2) or 2),
-            "ttl_min": int(config.get().get("linepredict_ttl_min", 30) or 30)}}})
+            "ttl_min": int(config.get().get("linepredict_ttl_min", 30) or 30),
+            "prewarm_mode": str(config.get().get("prewarm_mode", "realtime")),
+            "chart_bindings": chartbind.bind_store.status()}}})
 
 
 @app.post("/v/api/ext/linepredict/config")

@@ -66,15 +66,36 @@ label.field>span{display:block;color:var(--muted);font-size:12px;margin-bottom:4
 .switch-row{display:flex;align-items:flex-start;gap:10px;padding:10px 0;cursor:pointer}
 .switch-row input{width:17px;height:17px;margin-top:2px;accent-color:var(--accent);flex:none}
 .switch-row .sub{display:block;font-size:13px;color:var(--muted)}
-.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);
-  background:#fff;color:var(--text);border-radius:8px;padding:8px 14px;cursor:pointer;font-size:14px}
-.btn:hover{border-color:var(--accent);color:var(--accent)}
-.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-.btn.primary:hover{opacity:.92;color:#fff}
-.btn.small{padding:5px 12px;font-size:13px;min-height:0}
-.btn:disabled{opacity:.5;cursor:default}
-.btn.danger{color:var(--err)}.btn.danger:hover{background:var(--err);color:#fff;border-color:var(--err)}
+/* ---------- 统一按钮体系：.btn 与页面内 button 同一外观；按重要性分色
+   primary主操作(蓝实底) / 默认次操作(白底蓝边) / success导入·一键(绿) /
+   danger删除·清空(红) / warn部署·谨慎(橙) / ghost中性；.small 紧凑尺寸 ---------- */
+.btn,main button,.main button{
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  border:1px solid var(--accent);background:#fff;color:var(--accent);
+  border-radius:8px;padding:7px 14px;cursor:pointer;font-size:13.5px;line-height:1.2;
+  font-family:inherit;white-space:nowrap;user-select:none;
+  transition:background .15s,border-color .15s,color .15s,opacity .15s}
+.btn:hover,main button:hover,.main button:hover{background:var(--accent-soft)}
+.btn.primary,button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover,button.primary:hover{background:var(--accent);opacity:.9;color:#fff}
+.btn.success,button.success{background:var(--ok);border-color:var(--ok);color:#fff}
+.btn.success:hover,button.success:hover{opacity:.9;color:#fff}
+.btn.danger,button.danger{background:#fff;border-color:var(--err);color:var(--err)}
+.btn.danger:hover,button.danger:hover{background:var(--err);color:#fff;border-color:var(--err)}
+.btn.warn,button.warn{background:#fff;border-color:var(--warn);color:var(--warn)}
+.btn.warn:hover,button.warn:hover{background:var(--warn);color:#fff;border-color:var(--warn)}
+.btn.ghost,button.ghost{border-color:var(--line);color:var(--muted)}
+.btn.ghost:hover,button.ghost:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.small,.btn.small{padding:5px 12px;font-size:12.5px;min-height:0;border-radius:7px}
+.btn:disabled,button:disabled{opacity:.45;cursor:default;background:#fff;color:var(--muted);border-color:var(--line)}
+button.primary:disabled{background:var(--accent);color:#fff;opacity:.45}
 .btn-row{display:flex;gap:10px;align-items:center;margin:10px 0;flex-wrap:wrap}
+/* 充当按钮的 <label>(文件选择) 与按钮对齐 */
+label.btn,label.btn-sm{display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  border:1px solid var(--accent);background:#fff;color:var(--accent);border-radius:8px;
+  padding:7px 14px;font-size:13.5px;cursor:pointer;white-space:nowrap;font-family:inherit}
+label.btn-sm{padding:5px 12px;font-size:12.5px;border-radius:7px}
+label.btn:hover,label.btn-sm:hover{background:var(--accent-soft)}
 
 /* ---------- 徽标/状态点 ---------- */
 .badge{font-size:11px;padding:1px 8px;border-radius:99px;background:var(--accent-soft);color:var(--accent);font-weight:500}
@@ -240,11 +261,10 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
     </div>
     <nav class="nav" id="nav">
       <button class="nav-item active" data-page="overview">概览</button>
-      <button class="nav-item" data-page="library">虚拟媒体库</button>
-      <button class="nav-item" data-page="quality">片源质量</button>
-      <button class="nav-item" data-page="sources">资源站</button>
-      <button class="nav-item" data-page="importsub">导入订阅</button>
-      <button class="nav-item" data-page="search">搜索</button>
+      <button class="nav-item" data-page="library">媒体库</button>
+      <button class="nav-item" data-page="cms">CMS 源站</button>
+      <button class="nav-item" data-page="jar">JAR / 订阅源</button>
+      <button class="nav-item" data-page="playback">播放与画质</button>
       <button class="nav-item" data-page="about">关于</button>
     </nav>
     <div class="sidebar-foot">
@@ -325,7 +345,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div class="hint" id="hotStatus">等待加载状态…</div>
         <div class="btn-row">
           <button class="primary small" onclick="saveHotCfg()">保存热门设置</button>
-          <button class="small" onclick="refreshHot()">立即刷新榜单</button>
+          <button class="small primary" onclick="refreshHot()">立即刷新榜单</button>
         </div>
       </div>
 
@@ -349,7 +369,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div class="hint" id="titlesCacheStat">当前缓存体积读取中…</div>
         <div class="btn-row">
           <button class="primary small" onclick="saveTitlesCacheCfg()">保存缓存设置</button>
-          <button class="small" onclick="clearTitlesCache()">清空在线缓存（重启后回到冷态，搜索更快）</button>
+          <button class="small danger" onclick="clearTitlesCache()">清空在线缓存（重启后回到冷态，搜索更快）</button>
         </div>
       </div>
 
@@ -414,10 +434,10 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
     </section>
 
-    <!-- ============ 片源质量 ============ -->
-    <section class="page" id="page-quality">
-      <h2 class="page-title">片源质量优先级</h2>
-      <p class="page-desc">热门资源点击搜源时，按「源质量权重 → 可播直链数」排序，优先选择高质量源。</p>
+    <!-- ============ 播放与画质 ============ -->
+    <section class="page" id="page-playback">
+      <h2 class="page-title">播放与画质</h2>
+      <p class="page-desc">起播选线、线路预测、源质量权重、去广告与搜索过滤；让每部片都自动走最快、最清晰的源。</p>
       <div class="card">
         <label class="switch-row">
           <input type="checkbox" id="preferQ" checked/>
@@ -435,7 +455,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
       <div class="card">
         <div class="card-title">各源质量权重 <span class="badge" id="prioCount"></span>
-          <button class="small" style="margin-left:auto" onclick="resetPriority()">恢复默认权重</button>
+          <button class="small danger" style="margin-left:auto" onclick="resetPriority()">恢复默认权重</button>
         </div>
         <p class="card-sub">数值越大越优先（-100–100，留空/0 用内省默认）。修改后点底部「保存权重」。</p>
         <div class="longbox">
@@ -446,51 +466,10 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         </div>
         <div class="btn-row"><button class="primary small" onclick="savePriority()">保存权重</button></div>
       </div>
-    </section>
-
-    <!-- ============ 资源站 ============ -->
-    <section class="page" id="page-sources">
-      <h2 class="page-title">资源站</h2>
-      <p class="page-desc">标准苹果 CMS 源与扩展源；启用后进入聚合搜索与海量片库。</p>
-      <div class="card">
-        <div class="card-title">资源站列表 <span class="badge" id="srcCount"></span>
-          <input type="text" id="srcFilter" placeholder="筛选名称/地址…" oninput="renderSources()"
-                 style="margin-left:auto;max-width:168px;font-size:12px;padding:5px 9px"/>
-          <button class="small" onclick="testAll()">全部测速</button>
-          <button class="small" onclick="restoreBuiltin()">恢复内置源</button>
-        </div>
-        <div id="srcGrid" class="src-grid"><div class="muted">加载中…</div></div>
-        <div class="collapse-bar collapsed" id="srcCollapseBar" onclick="toggleSrcCollapse()">
-          <span class="chev">▾</span><span id="srcCollapseTxt">展开完整列表</span></div>
-        <div class="row mt" style="display:grid;grid-template-columns:150px 1fr 90px auto;gap:10px" id="addGrid">
-          <input type="text" id="addName" placeholder="名称（可选）"/>
-          <input type="text" id="addApi" placeholder="苹果CMS JSON 接口，如 https://xxx.com/api.php/provide/vod/at/json"/>
-          <label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer">
-            <input type="checkbox" id="addStandalone" style="width:15px;height:15px;accent-color:var(--accent)"/>独立库</label>
-          <button class="primary small" style="justify-content:center" onclick="addSource()">添加</button>
-        </div>
-        <div class="hint">「独立库」= 该站单独生成一张媒体库卡片；「非过滤」= 不按标题/备注过滤解说/预告/花絮；点卡片上的 ✎ 可改名称/订阅链接；
-          删除内置源仅隐藏，可恢复。批量导入 TVBox 订阅请用左侧「导入订阅」。</div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">🗑 缓存管理
-          <span class="hint" style="font-weight:400">搜索/榜单/海量库异常或占用过大时可一键清除，下次访问自动重建</span>
-          <button class="small" style="margin-left:auto" onclick="loadCacheStatus()">刷新</button>
-        </div>
-        <div id="cacheGrid" class="cache-grid"><div class="muted sm">读取中…</div></div>
-        <div class="btn-row">
-          <button class="small" onclick="clearCaches(['search'])">仅清搜索缓存</button>
-          <button class="small" onclick="clearCaches(['charts','catalog'])">清榜单+海量库</button>
-          <button class="primary small" onclick="clearCaches(['search','charts','catalog'])">一键清运行缓存（不重启）</button>
-          <button class="small" onclick="clearCaches(['health'])">重置源健康画像</button>
-          <button class="small" onclick="clearCaches(['titles'])">清在线资源缓存（将重启）</button>
-        </div>
-      </div>
 
       <div class="card">
         <div class="card-title">⚡ 本片线路预测（秒播）
-          <span class="hint" style="font-weight:400">浏览海报时对首屏影片的前几条线做轻量探活，预测出<b>每部片自己</b>的最快线；点播放直接走它、零竞速。不做全站定时测速（源级速度代表不了各片分片 CDN）</span>
+          <span class="hint" style="font-weight:400">浏览海报时预测出<b>每部片自己</b>的最快线；点播放直接走它、零竞速</span>
           <button class="small" style="margin-left:auto" onclick="loadLinepredict()">刷新</button>
         </div>
         <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin:4px 0 10px">
@@ -502,10 +481,21 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
               <option value="2" selected>2（推荐）</option>
               <option value="3">3</option>
             </select></label>
-          <button class="small" onclick="saveLinepredictCfg()">保存设置</button>
-          <button class="small" onclick="resetLinepredict()">清空预测记忆</button>
+          <button class="small primary" onclick="saveLinepredictCfg()">保存设置</button>
+          <button class="small danger" onclick="resetLinepredict()">清空预测记忆</button>
         </div>
-        <div class="hint" style="margin:0 0 8px">已预测 <b id="lpRemembered">0</b> 部影片，当前在途预热 <b id="lpInflight">0</b> 个；预测记忆 30 分钟有效，失败会自动换线，网盘高清线永不参与。</div>
+        <div class="switch-row" style="padding:6px 0">
+          <div>
+            启动预热方式
+            <span class="sub">实时模式（默认）：重启后后台逐部全网搜源绑定；持久化模式：把热门片绑定结果落盘，重启直接恢复线路、少重新搜源（占少量磁盘）</span>
+          </div>
+          <div class="seg" id="prewarmModeSeg" role="tablist" style="flex:none">
+            <button type="button" data-mode="realtime" onclick="setPrewarmMode('realtime')">实时（方案A）</button>
+            <button type="button" data-mode="persist" onclick="setPrewarmMode('persist')">持久化（方案B）</button>
+          </div>
+        </div>
+        <div class="muted sm" id="chartBindStat" style="margin-bottom:8px"></div>
+        <div class="hint" style="margin:0 0 8px">已预测 <b id="lpRemembered">0</b> 部，在途预热 <b id="lpInflight">0</b> 个；30 分钟有效，失败自动换线，网盘高清线永不参与。</div>
         <div class="longbox">
         <table>
           <thead><tr><th>影片</th><th style="width:180px">预测最快线</th>
@@ -516,8 +506,40 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
 
       <div class="card">
+        <div class="card-title">播放线路
+          <span class="hint" style="font-weight:400">起播并行测速自动选最快线路；当前线路失效自动切换</span></div>
+        <label class="switch-row"><input type="checkbox" id="lineFastest"/>
+          <span>自动选最快线路<span class="sub">起播时并行测速、自动选首字节最快的线路；同一集短时间内固定用它</span></span></label>
+        <label class="field" style="max-width:260px"><span>参与测速的线路数</span>
+          <input type="number" id="fastestMax" min="2" max="12" style="width:100%"/></label>
+        <label class="field" style="max-width:260px"><span>测速超时（秒）</span>
+          <input type="number" id="fastestTimeout" min="1" max="10" step="0.5" style="width:100%"/></label>
+        <label class="switch-row"><input type="checkbox" id="lineAutofail"/>
+          <span>坏线自动切换<span class="sub">当前线路失效/文件不存在时自动换到可用线路，并短时跳过坏线</span></span></label>
+        <div class="btn-row"><button class="primary small" onclick="saveLines()">保存播放设置</button></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">🛡 播放去广告（m3u8 流层）
+          <label style="margin-left:auto;display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400;cursor:pointer">
+            <input type="checkbox" id="adfEnable" style="width:14px;height:14px;accent-color:var(--accent)" onchange="toggleAdfilter(this.checked)"/> 启用去广告</label></div>
+        <p class="card-sub">① 编码指纹识别无标记重编码广告；② 动态检测广告段；③ 订阅 rules 精准剥除；④ 假选集过滤。识别可能误伤时自动保留。</p>
+        <div style="margin:6px 0">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+            <input type="checkbox" id="adfSps" style="width:14px;height:14px;accent-color:var(--accent)" onchange="toggleAdfilterSps(this.checked)"/>
+            编码指纹去广告（读分片头识别重编码中插/片头广告）</label>
+        </div>
+        <div style="margin:6px 0">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+            <input type="checkbox" id="adfDynamic" style="width:14px;height:14px;accent-color:var(--accent)" onchange="toggleAdfilterDynamic(this.checked)"/>
+            播放时动态检测（识别订阅未提供规则的广告段）</label>
+        </div>
+        <div id="adfStatus" class="muted sm" style="margin-top:6px">正在加载去广告规则…</div>
+      </div>
+
+      <div class="card">
         <div class="card-title">源健康画像
-          <span class="hint" style="font-weight:400">按真实播放探测统计成功率/延迟，死源自动降权 15 分钟</span>
+          <span class="hint" style="font-weight:400">按真实播放探测统计成功率/延迟，死源自动降权</span>
           <button class="small" style="margin-left:auto" onclick="loadHealth()">刷新</button>
         </div>
         <div class="longbox" id="healthBox">
@@ -530,33 +552,102 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         </div>
         <div class="collapse-bar" onclick="toggleBox('healthBox',this)"><span class="chev">▾</span><span>展开/收起</span></div>
       </div>
+
+      <div class="card">
+        <div class="card-title">🔎 搜索结果过滤
+          <button class="small" style="margin-left:auto" onclick="loadOnline()">刷新缓存条目</button>
+        </div>
+        <label class="switch-row"><input type="checkbox" id="onlineFirst"/>
+          <span>在线资源结果前排展示<span class="sub">在线片库更齐全；关闭则本地优先</span></span></label>
+        <label class="field" style="max-width:240px"><span>每个关键词最多注入条数</span>
+          <input type="number" id="maxn" min="1" max="50" style="width:100%"/></label>
+        <label class="switch-row"><input type="checkbox" id="junk"/>
+          <span>按关键词过滤噪音<span class="sub">标题或备注命中噪音词则不注入</span></span></label>
+        <label class="field"><span>噪音关键词 <span id="kwN" class="muted"></span>
+          <span style="float:right">
+            <button class="small danger" type="button" onclick="resetKw()">恢复默认</button>
+            <button class="small" type="button" onclick="toggleKwEdit()">批量编辑</button>
+          </span></span>
+          <div id="kwChips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
+          <div id="kwEdit" style="display:none;margin-bottom:8px">
+            <textarea id="kwArea" rows="4" placeholder="每行一个，或逗号/顿号分隔，如：解说,预告片,花絮,枪版"></textarea>
+            <button class="small" type="button" onclick="applyKwText()" style="margin-top:6px">应用文本</button>
+          </div>
+          <div class="row"><input type="text" id="kwAdd" placeholder="添加关键词后回车" style="flex:1"/>
+            <button class="small" type="button" onclick="addKw()">添加</button></div>
+        </label>
+        <div class="btn-row"><button class="primary small" onclick="saveCfg()">保存搜索设置</button>
+          <button class="small danger" onclick="clearTitlesCache()">🗑 清空在线缓存</button>
+        </div>
+        <div class="hint" style="margin:6px 0">本地缓存 <code>state/titles.json</code> 按条数/容量上限自动丢弃；清空后服务重启回到冷态。已缓存 <b id="cacheN">0</b> 条。</div>
+        <label class="field"><span>按标题过滤缓存条目</span>
+          <div class="row"><input type="text" id="kw" placeholder="在飞牛搜索过的会出现在这里" style="flex:1"/>
+            <button class="small" onclick="loadOnline()">刷新</button></div></label>
+        <div class="longbox" id="onlineBox" style="margin-top:10px">
+        <table>
+          <thead><tr><th>标题</th><th style="width:100px">来源</th><th style="width:70px">集数</th></tr></thead>
+          <tbody id="rows"><tr><td colspan="3" class="muted">加载中…</td></tr></tbody>
+        </table>
+        </div>
+        <div class="collapse-bar" onclick="toggleBox('onlineBox',this)"><span class="chev">▾</span><span>展开/收起</span></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">🗑 运行缓存管理
+          <span class="hint" style="font-weight:400">搜索/榜单/海量库异常或占用过大时一键清除，下次访问自动重建</span>
+          <button class="small" style="margin-left:auto" onclick="loadCacheStatus()">刷新</button>
+        </div>
+        <div id="cacheGrid" class="cache-grid"><div class="muted sm">读取中…</div></div>
+        <div class="btn-row">
+          <button class="small danger" onclick="clearCaches(['search'])">仅清搜索缓存</button>
+          <button class="small danger" onclick="clearCaches(['charts','catalog'])">清榜单+海量库</button>
+          <button class="primary small danger" onclick="clearCaches(['search','charts','catalog'])">一键清运行缓存（不重启）</button>
+          <button class="small danger" onclick="clearCaches(['health'])">重置源健康画像</button>
+          <button class="small danger" onclick="clearCaches(['titles'])">清在线资源缓存（将重启）</button>
+        </div>
+      </div>
     </section>
 
-    <!-- ============ 导入 TVBox 订阅（独立页） ============ -->
-    <section class="page" id="page-importsub">
-      <h2 class="page-title">导入订阅</h2>
-      <p class="page-desc">粘贴一个 TVBox / 影视仓 / OK影视 订阅 URL 或整段配置，自动识别并分类导入，<strong>导入即可在搜索与播放源中使用</strong>。支持 base64 与多订阅聚合。</p>
+    <!-- ============ CMS 苹果CMS 源站 ============ -->
+    <section class="page" id="page-cms">
+      <h2 class="page-title">CMS 源站</h2>
+      <p class="page-desc">标准苹果 CMS（type 0/1）源站统一管理：增删改、测速、排序、导入 / 导出。启用后进入聚合搜索与海量片库；爬虫 / 加固 / DRPY 等 jar 源请在「JAR / 订阅源」页管理。</p>
       <div class="card">
-        <div class="card-title">订阅抓取代理（可选）
-          <label style="float:right;display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400;cursor:pointer">
-            <input type="checkbox" id="subProxyEnable" style="width:14px;height:14px;accent-color:var(--accent)" onchange="onSubProxyToggle()"/> 启用代理</label></div>
-        <p class="card-sub">仅用于<strong>拉取订阅配置、爬虫 jar、DRPY 脚本</strong>（GitHub 等被墙/解析失败时可走 Clash）。<strong>播放、搜索、CMS 探测一律不走此代理</strong>。形如 <code>http://用户:密码@主机:端口</code>，清空=直连。</p>
-        <div class="row">
-          <input type="text" id="subProxyUrl" placeholder="http://Clash:密码@192.168.x.x:7890" style="flex:2" disabled/>
-          <button class="small" id="subProxySaveBtn" onclick="saveSubProxy(true)" disabled>保存并测试</button>
-          <button class="small" id="subProxyClearBtn" onclick="clearSubProxy()" disabled>清空(直连)</button>
+        <div class="card-title">资源站列表 <span class="badge" id="srcCount"></span>
+          <input type="text" id="srcFilter" placeholder="筛选名称/地址…" oninput="renderSources()"
+                 style="margin-left:auto;max-width:168px;font-size:12px;padding:5px 9px"/>
+          <button class="small" onclick="testAll()">全部测速</button>
+          <button class="small ghost" onclick="restoreBuiltin()">恢复内置源</button>
+          <button class="small" onclick="exportCmsSources()" title="把当前纯 CMS 源导出为 JSON 文件备份">⬇ 导出</button>
+          <label class="btn-sm success" style="border-color:var(--ok);background:var(--ok);color:#fff" title="从 JSON 文件导入 CMS 源（自动去重，jar/爬虫源请到 JAR 页）">
+            ⬆ 导入<input type="file" id="cmsImportFile" accept=".json,application/json" style="display:none" onchange="importCmsFile(this)"/>
+          </label>
         </div>
-        <div id="subProxyMsg" class="muted sm" style="margin-top:6px"></div>
+        <div id="srcGrid" class="src-grid"><div class="muted">加载中…</div></div>
+        <div class="collapse-bar collapsed" id="srcCollapseBar" onclick="toggleSrcCollapse()">
+          <span class="chev">▾</span><span id="srcCollapseTxt">展开完整列表</span></div>
+        <div class="row mt" style="display:grid;grid-template-columns:150px 1fr 90px auto;gap:10px" id="addGrid">
+          <input type="text" id="addName" placeholder="名称（可选）"/>
+          <input type="text" id="addApi" placeholder="苹果CMS JSON 接口，如 https://xxx.com/api.php/provide/vod/at/json"/>
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer">
+            <input type="checkbox" id="addStandalone" style="width:15px;height:15px;accent-color:var(--accent)"/>独立库</label>
+          <button class="primary small" style="justify-content:center" onclick="addSource()">添加</button>
+        </div>
+        <div class="hint">「独立库」= 该站单独生成一张媒体库卡片；「非过滤」= 不按标题/备注过滤解说/预告/花絮；点卡片上的 ✎ 可改名称/订阅链接；
+          删除内置源仅隐藏，可恢复。批量导入 TVBox / jar / DRPY 订阅请用「JAR / 订阅源」页。</div>
       </div>
-      <div class="card">
-        <div class="card-title">资源站取源代理（可选）
-          <label style="float:right;display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400;cursor:pointer">
-            <input type="checkbox" id="srcProxyEnable" style="width:14px;height:14px;accent-color:var(--accent)" onchange="onSrcProxyToggle()"/> 已配置代理</label></div>
-        <p class="card-sub">部分运营商<strong>直连资源站很慢或不通</strong>（搜索转圈、无结果、测速超时）时可走 Clash 等代理。仅用于<strong>搜索、海量库分类深翻、测速、解析播放地址</strong>；真正的视频分片流量仍直连，不占代理带宽。形如 <code>http://用户:密码@主机:端口</code>。</p>
+
+      <details class="card">
+        <summary class="card-title" style="cursor:pointer">🌐 资源站取源代理（可选 · 直连慢时）</summary>
+        <p class="card-sub" style="margin-top:8px">部分运营商直连资源站很慢或不通（搜索转圈、无结果、测速超时）时可走 Clash 等代理。仅用于<strong>搜索、海量库深翻、测速、解析播放地址</strong>；视频分片流量仍直连，不占代理带宽。</p>
+        <div class="row">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+            <input type="checkbox" id="srcProxyEnable" style="width:14px;height:14px;accent-color:var(--accent)" onchange="onSrcProxyToggle()"/> 已配置代理</label>
+        </div>
         <div class="row">
           <input type="text" id="srcProxyUrl" placeholder="http://Clash:密码@192.168.x.x:7890" style="flex:2" disabled/>
-          <button class="small" id="srcProxySaveBtn" onclick="saveSrcProxy(true)" disabled>保存并测速</button>
-          <button class="small" id="srcProxyClearBtn" onclick="clearSrcProxy()" disabled>清空</button>
+          <button class="small primary" id="srcProxySaveBtn" onclick="saveSrcProxy(true)" disabled>保存并测速</button>
+          <button class="small ghost danger" id="srcProxyClearBtn" onclick="clearSrcProxy()" disabled>清空</button>
         </div>
         <div class="seg" id="srcProxyMode" style="margin-top:10px" role="tablist">
           <button type="button" data-mode="auto" onclick="setSrcProxyMode('auto')">🪄 智能（推荐）</button>
@@ -565,25 +656,14 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         </div>
         <div class="hint" id="srcProxyModeHint" style="margin-top:6px"></div>
         <div id="srcProxyMsg" class="muted sm" style="margin-top:6px"></div>
-      </div>
-      <div class="card">
-        <div class="card-title">🛡 播放去广告（m3u8 流层）
-          <label style="float:right;display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400;cursor:pointer">
-            <input type="checkbox" id="adfEnable" style="width:14px;height:14px;accent-color:var(--accent)" onchange="toggleAdfilter(this.checked)"/> 启用去广告</label></div>
-        <p class="card-sub">播放时实时检测当前线路并去除广告，兼容 TVBox / OK影视 Pro：<strong>① 编码指纹</strong>——读分片头识别“重新编码拼接”的隐形广告（无标记、无关键词也能发现，见下方开关）；<strong>② 动态检测</strong>——按分片间断边界、切片时长模式、CDN 切换、片头/片中位置实时识别广告段（无需订阅自带规则）；<strong>③ 订阅 rules</strong>——导入订阅时自动收录其去广告正则，按线路域名精准剥除；<strong>④ 选集过滤</strong>——剔除“关注公众号/加微信/下载APP”假选集。识别不确定或可能误伤时自动保留，不影响播放。</p>
-        <div style="margin:6px 0">
-          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
-            <input type="checkbox" id="adfSps" style="width:14px;height:14px;accent-color:var(--accent)" onchange="toggleAdfilterSps(this.checked)"/>
-            编码指纹去广告（读分片头 4~32KB，识别无任何标记的重编码中插/片头广告）</label>
-          <div class="muted sm" style="margin:2px 0 0 22px">仅按“宽高+帧率”判定正文，广告必须是另一套转码才剔除；探测失败、样本不足或可能误伤时一律保留。</div>
-        </div>
-        <div style="margin:6px 0">
-          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
-            <input type="checkbox" id="adfDynamic" style="width:14px;height:14px;accent-color:var(--accent)" onchange="toggleAdfilterDynamic(this.checked)"/>
-            播放时动态检测（识别订阅未提供规则的广告段）</label>
-        </div>
-        <div id="adfStatus" class="muted sm" style="margin-top:6px">正在加载去广告规则…</div>
-      </div>
+      </details>
+    </section>
+
+
+    <!-- ============ JAR / 订阅源 ============ -->
+    <section class="page" id="page-jar">
+      <h2 class="page-title">JAR / 订阅源</h2>
+      <p class="page-desc">导入 TVBox / 影视仓 / OK影视 / T4 订阅（URL 或粘贴配置），<strong>自动识别归类</strong>：普通爬虫 csp_ 源（自动下载/补传 jar）、Guard 加固源、远程 DRPY JS 源；普通苹果 CMS 站会自动归到「CMS 源站」。支持 base64 与多订阅聚合。</p>
       <div class="card">
         <div class="card-title">TVBox / T4 订阅</div>
         <p class="card-sub">自动识别并分类：标准苹果CMS影视站（type 0/1）
@@ -593,7 +673,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <button class="primary small" onclick="importSubscription('url')">按 URL 导入</button>
         </div>
         <div class="row">
-          <button id="btnImportCatLite" class="small" style="border-color:var(--ok,#16a34a);color:var(--ok,#16a34a)" onclick="importCatLite()" title="纯苹果CMS精选源：无爬虫jar、无需安卓运行时，低配机器/lite版也能直接搜索与播放">🐱 一键轻量猫源（免运行时·低配推荐）</button>
+          <button id="btnImportCatLite" class="small success" onclick="importCatLite()" title="纯苹果CMS精选源：无爬虫jar、无需安卓运行时，低配机器/lite版也能直接搜索与播放">🐱 一键轻量猫源（免运行时·低配推荐）</button>
         </div>
         <label class="field"><textarea id="subText" rows="7" placeholder="或直接粘贴配置 JSON（含 sites 数组）…"></textarea></label>
         <div class="btn-row">
@@ -606,65 +686,26 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
 
 
+
+      <details class="card" style="margin-top:14px">
+        <summary class="card-title" style="cursor:pointer">订阅抓取代理（可选 · GitHub 被墙时）</summary>
+        <p class="card-sub" style="margin-top:8px">仅用于<strong>拉取订阅配置、爬虫 jar、DRPY 脚本</strong>；播放、搜索、CMS 探测一律不走此代理。形如 <code>http://用户:密码@主机:端口</code>，清空=直连。</p>
+        <div class="row">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+            <input type="checkbox" id="subProxyEnable" style="width:14px;height:14px;accent-color:var(--accent)" onchange="onSubProxyToggle()"/> 启用代理</label>
+        </div>
+        <div class="row">
+          <input type="text" id="subProxyUrl" placeholder="http://Clash:密码@192.168.x.x:7890" style="flex:2" disabled/>
+          <button class="small primary" id="subProxySaveBtn" onclick="saveSubProxy(true)" disabled>保存并测试</button>
+          <button class="small danger" id="subProxyClearBtn" onclick="clearSubProxy()" disabled>清空(直连)</button>
+        </div>
+        <div id="subProxyMsg" class="muted sm" style="margin-top:6px"></div>
+      </details>
+
     </section>
 
 
 
-    <!-- ============ 搜索 ============ -->
-    <section class="page" id="page-search">
-      <h2 class="page-title">搜索设置</h2>
-      <div class="card">
-        <label class="switch-row"><input type="checkbox" id="onlineFirst"/>
-          <span>在线资源结果前排展示<span class="sub">在线片库更齐全；关闭则本地优先</span></span></label>
-        <label class="field" style="max-width:240px"><span>每个关键词最多注入条数</span>
-          <input type="number" id="maxn" min="1" max="50" style="width:100%"/></label>
-        <label class="switch-row"><input type="checkbox" id="junk"/>
-          <span>按关键词过滤噪音<span class="sub">标题或备注命中噪音词则不注入</span></span></label>
-        <label class="field"><span>噪音关键词 <span id="kwN" class="muted"></span>
-          <span style="float:right">
-            <button class="small" type="button" onclick="resetKw()">恢复默认</button>
-            <button class="small" type="button" onclick="toggleKwEdit()">批量编辑</button>
-          </span></span>
-          <div id="kwChips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
-          <div id="kwEdit" style="display:none;margin-bottom:8px">
-            <textarea id="kwArea" rows="4" placeholder="每行一个，或逗号/顿号分隔，如：解说,预告片,花絮,枪版"></textarea>
-            <button class="small" type="button" onclick="applyKwText()" style="margin-top:6px">应用文本</button>
-          </div>
-          <div class="row"><input type="text" id="kwAdd" placeholder="添加关键词后回车" style="flex:1"/>
-            <button class="small" type="button" onclick="addKw()">添加</button></div>
-        </label>
-        <div class="btn-row"><button class="primary small" onclick="saveCfg()">保存设置</button></div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">播放线路</div>
-        <label class="switch-row"><input type="checkbox" id="lineFastest"/>
-          <span>自动选最快线路<span class="sub">起播时并行测速、自动选首字节最快的线路；同一集短时间内固定用它</span></span></label>
-        <label class="field" style="max-width:260px"><span>参与测速的线路数</span>
-          <input type="number" id="fastestMax" min="2" max="12" style="width:100%"/></label>
-        <label class="field" style="max-width:260px"><span>测速超时（秒）</span>
-          <input type="number" id="fastestTimeout" min="1" max="10" step="0.5" style="width:100%"/></label>
-        <label class="switch-row"><input type="checkbox" id="lineAutofail"/>
-          <span>坏线自动切换<span class="sub">当前线路失效/文件不存在时自动换到可用线路，并短时跳过坏线（关闭则纯手动切线）</span></span></label>
-        <div class="btn-row"><button class="primary small" onclick="saveLines()">保存播放设置</button></div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">已缓存在线条目 <span class="badge" id="cacheN"></span>
-          <button class="small" style="margin-left:auto" onclick="clearTitlesCache()">🗑 清空在线缓存</button>
-        </div>
-        <div class="hint" style="margin-bottom:8px">本地缓存 <code>state/titles.json</code>，按条数/容量上限自动丢弃最旧条目，默认约 4000 条 / 4MB，不会无限增长；清空后服务会重启并回到冷态。</div>
-        <div class="row"><input type="text" id="kw" placeholder="按标题过滤（在飞牛搜索过的会出现在这里）" style="flex:1"/>
-          <button class="small" onclick="loadOnline()">刷新</button></div>
-        <div class="longbox" id="onlineBox" style="margin-top:10px">
-        <table>
-          <thead><tr><th>标题</th><th style="width:100px">来源</th><th style="width:70px">集数</th></tr></thead>
-          <tbody id="rows"><tr><td colspan="3" class="muted">加载中…</td></tr></tbody>
-        </table>
-        </div>
-        <div class="collapse-bar" onclick="toggleBox('onlineBox',this)"><span class="chev">▾</span><span>展开/收起</span></div>
-      </div>
-    </section>
 
     <!-- ============ 关于 ============ -->
     <section class="page" id="page-about">
@@ -748,9 +789,10 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
 <nav class="bottom-nav" id="bottomNav">
   <button class="nav-item active" data-page="overview">概览</button>
   <button class="nav-item" data-page="library">媒体库</button>
-  <button class="nav-item" data-page="quality">质量</button>
-  <button class="nav-item" data-page="sources">资源站</button>
-  <button class="nav-item" data-page="search">搜索</button>
+  <button class="nav-item" data-page="cms">CMS</button>
+  <button class="nav-item" data-page="jar">JAR</button>
+  <button class="nav-item" data-page="playback">播放</button>
+  <button class="nav-item" data-page="about">关于</button>
 </nav>
 
 <div id="toast"></div>
@@ -790,12 +832,28 @@ async function switchPage(page){
   $$(".page").forEach(el=>el.classList.toggle("active",el.id==="page-"+page));
   $$("[data-page]").forEach(el=>el.classList.toggle("active",el.dataset.page===page));
   window.scrollTo(0,0);
-  if(page==="overview"){renderOverview();startLivePoll();}
+  if(page==="overview"){renderOverview();startLivePoll();try{loadSidecar();}catch(e){}try{loadGuard();}catch(e){}}
   if(page==="library"){loadLibs().then(renderLibrary);}
-  if(page==="quality")renderQuality();
-  if(page==="sources"){try{loadHealth();}catch(e){}try{loadLinepredict();startLinepredictTimer();}catch(e){}try{loadCacheStatus();}catch(e){}}
-  if(page==="tvbox"){try{loadGuardZone();}catch(e){}try{gbInit();}catch(e){}}
-  if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{if(typeof initSrcProxy==="function")initSrcProxy();}catch(e){}try{loadAdfilter();}catch(e){}try{if(typeof loadSpiderMgmt==="function")loadSpiderMgmt();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}}
+  // CMS 源站
+  if(page==="cms"){try{renderSources();}catch(e){}}
+  // JAR / 订阅源：代理初始化 + 去广告 + 爬虫/DRPY 列表 + 订阅所需 CFG
+  if(page==="jar"){
+    try{if(!CFG)await loadStatus();}catch(e){}
+    try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}
+    try{if(typeof initSrcProxy==="function")initSrcProxy();}catch(e){}
+    try{if(typeof loadSpiderMgmt==="function")loadSpiderMgmt();}catch(e){}
+    try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}
+  }
+  // 播放与画质：权重/预测/健康/缓存/去广告/播放设置/在线缓存
+  if(page==="playback"){
+    try{renderQuality();}catch(e){}
+    try{loadHealth();}catch(e){}
+    try{loadLinepredict();startLinepredictTimer();}catch(e){}
+    try{loadCacheStatus();}catch(e){}
+    try{loadAdfilter();}catch(e){}
+    try{loadOnline();}catch(e){}
+  }
+  if(page==="runtime"){try{loadGuardZone();}catch(e){}try{gbInit();}catch(e){}try{loadSidecar();}catch(e){}try{loadGuardJar();}catch(e){}}
   if(page==="about"){loadUpdate(false);}
 }
 $$("[data-page]").forEach(b=>b.addEventListener("click",()=>switchPage(b.dataset.page)));
@@ -1374,9 +1432,9 @@ function renderSources(){
       </div>
       <div class="src-actions">
         <span class="st wait" data-st>未测</span>
-        <button class="small" data-test>测速</button>
+        <button class="small ghost" data-test>测速</button>
         <button class="small" data-edit title="编辑名称/订阅链接">✎</button>
-        <button class="del small" data-del title="删除">✕</button>
+        <button class="small danger" data-del title="删除">删除</button>
       </div>
     </div>`;
   }).join("")+hiddenNote;
@@ -1470,7 +1528,7 @@ async function loadCacheStatus(){
     ];
     box.innerHTML=items.map(([k,label,val,note])=>`<div class="cache-item">
       <div class="cn">${label}</div><div class="cv">${val||"-"}<br><span style="opacity:.7">${note}</span></div>
-      <button class="small" style="width:100%" onclick="clearCaches(['${k}'])">清除</button></div>`).join("");
+      <button class="small danger" style="width:100%" onclick="clearCaches(['${k}'])">清除</button></div>`).join("");
   }catch(e){box.innerHTML='<div class="muted sm">读取失败</div>';}
 }
 async function clearCaches(targets){
@@ -1497,7 +1555,7 @@ async function loadHealth(){
       return `<tr><td>${s.key}</td><td>${s.samples}</td>
         <td>${pct}%</td><td>${(s.avg_latency||0).toFixed(1)}s</td>
         <td class="st ${GC[s.grade]||''}">${G[s.grade]||""}</td>
-        <td><button class="small" onclick="resetHealth('${s.key}')">清零</button></td></tr>`;
+        <td><button class="small danger" onclick="resetHealth('${s.key}')">清零</button></td></tr>`;
     }).join("");
   }catch(e){box.innerHTML='<tr><td colspan="6" class="muted">读取失败</td></tr>';}
 }
@@ -1513,6 +1571,16 @@ async function loadLinepredict(){
     $("lpInflight").textContent=d.inflight??0;
     $("lpEnabled").checked=c.enabled!==false;
     $("lpMaxLines").value=String(c.max_lines??2);
+    // 预热方式分段
+    const mode=c.prewarm_mode||"realtime";
+    document.querySelectorAll("#prewarmModeSeg button").forEach(b=>{
+      b.classList.toggle("active", b.dataset.mode===mode);
+    });
+    const cb=c.chart_bindings;
+    const cbs=$("chartBindStat");
+    if(cbs){ cbs.textContent = cb
+      ? `持久化绑定：${cb.entries} 条（保鲜 ${cb.fresh} / 待校验 ${cb.stale}，TTL ${Math.round(cb.ttl_sec/3600)}h）`
+      : ""; }
     const rows=d.recent||[]; const box=$("lpRows");
     if(box){
       const gc=["","ok","warn","bad"],gt=["","快","中","慢"];
@@ -1534,6 +1602,13 @@ async function saveLinepredictCfg(){
 async function resetLinepredict(){
   const r=await jpost("/v/api/ext/linepredict/reset",{});
   if(r.code===0){toast("已清空预测记忆");loadLinepredict();}else toast(r.msg||"操作失败","fail");
+}
+async function setPrewarmMode(mode){
+  const r=await jpost("/v/api/ext/config",{prewarm_mode:mode});
+  if(r.code===0){toast(mode==="persist"?"已切换到持久化模式（方案B），重启后绑定自动恢复":"已切换到实时模式（方案A）");
+    document.querySelectorAll("#prewarmModeSeg button").forEach(b=>b.classList.toggle("active",b.dataset.mode===mode));
+    loadLinepredict();
+  }else toast(r.msg||"切换失败","fail");
 }
 async function addSource(){
   const name=$("addName").value.trim(),api=$("addApi").value.trim(),standalone=$("addStandalone").checked;
@@ -1754,7 +1829,7 @@ async function importFantaiying(){
     if(btn){btn.disabled=false;btn.style.opacity="";btn.style.cursor="";}
   }
 }
-function goDeploy(){switchPage("tvbox");setTimeout(()=>{const b=$("scInstallAll");if(b)b.click();},80);}
+function goDeploy(){switchPage("runtime");setTimeout(()=>{const b=$("scInstallAll");if(b)b.click();},80);}
 async function importCatLite(){
   const btn=$("btnImportCatLite"), out=$("subResult");
   if(btn){btn.disabled=true;btn.style.opacity=".6";btn.style.cursor="wait";}
@@ -1781,7 +1856,7 @@ function renderSubResult(d){
     h+='<div style="margin:10px 0;padding:10px 12px;border:1px solid var(--warn,#d59a2b);border-radius:8px;background:rgba(213,154,43,.08)">'
      + '<div style="font-weight:600;margin-bottom:4px">已导入 '+g.items.length+' 个加固秒播源，但本地安卓运行时未就绪</div>'
      + '<div class="muted sm" style="margin-bottom:8px">'+esc(rt.reason||"运行时未连接")+'。源已保存，部署运行时后立即可播，无需重新导入。</div>'
-     + '<button class="primary small" onclick="goDeploy()">一键部署外挂运行时</button></div>';
+     + '<button class="small warn" onclick="goDeploy()">一键部署外挂运行时</button></div>';
   }
   if(g && g.skipped_build){
     h+='<div class="hint" style="margin:10px 0">订阅中含加固源，但当前为公开构建（无安卓运行时），已仅导入苹果CMS源。</div>';
@@ -1881,6 +1956,41 @@ async function restoreBuiltin(){
   if(r.code===0){toast("已恢复内置源");await loadStatus();}else toast("失败","fail");
 }
 
+/* ---------- CMS 源导入 / 导出 ---------- */
+async function exportCmsSources(){
+  try{
+    const r=await jget("/v/api/ext/source/export");
+    const list=(r.data&&r.data.sources)||[];
+    if(!list.length){toast("当前没有可导出的 CMS 源","fail");return;}
+    const blob=new Blob([JSON.stringify(r.data,null,2)],{type:"application/json"});
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download="fnmedia-cms-sources.json";
+    document.body.appendChild(a);a.click();
+    setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);
+    toast("已导出 "+list.length+" 个 CMS 源");
+  }catch(e){toast("导出失败："+e.message,"fail");}
+}
+async function importCmsFile(input){
+  const f=input.files&&input.files[0];
+  if(!f)return;
+  try{
+    const text=await f.text();
+    let data;
+    try{data=JSON.parse(text);}catch(_){toast("文件不是合法 JSON","fail");input.value="";return;}
+    // 兼容直接是数组 / 包在 data 里
+    const body=Array.isArray(data)?{sources:data}:data;
+    const r=await jpost("/v/api/ext/source/import-file",body);
+    if(r.code===0){
+      const d=r.data||{};
+      toast(`导入完成：新增 ${d.added}，已存在跳过 ${d.skipped}，忽略非CMS ${d.ignored_noncms}`);
+      await loadStatus();
+      if(typeof renderSources==="function")renderSources();
+    }else toast(r.msg||"导入失败","fail");
+  }catch(e){toast("导入失败："+e.message,"fail");}
+  finally{input.value="";}
+}
+
 /* ---------- 搜索设置 / 噪音词 / 缓存 ---------- */
 function renderKw(){
   $("kwN").textContent="（共 "+KWS.length+" 个）";
@@ -1923,10 +2033,10 @@ async function saveLines(){
   if(r.code===0){toast("已保存");Object.assign(CFG,body);}else toast("保存失败 "+r.msg,"fail");
 }
 async function loadOnline(){
-  const kw=$("kw").value.trim();
+  const tb=$("rows"); if(!tb)return;
+  const kw=($("kw")&&$("kw").value||"").trim();
   const r=await jget("/v/api/ext/online?limit=500"+(kw?("&q="+encodeURIComponent(kw)):""));
-  const list=r.data||[];$("cacheN").textContent=list.length;
-  const tb=$("rows");
+  const list=r.data||[];const cn=$("cacheN");if(cn)cn.textContent=list.length;
   if(!list.length){tb.innerHTML='<tr><td colspan="3" class="muted">暂无，先去飞牛搜索任意中文片名</td></tr>';return;}
   tb.innerHTML=list.map(x=>`<tr><td><div style="font-weight:500">${esc(x.title)}</div>
     <div class="meta">${esc(x.year||"")} ${esc(x.area||"")} · ${esc(x.remarks||"")}</div></td>

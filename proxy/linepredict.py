@@ -12,15 +12,91 @@
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 from collections import OrderedDict
+from pathlib import Path
 
 # ep_key -> (ts, line, latency_seconds)
 _FAST: "OrderedDict[str, tuple[float, str, float]]" = OrderedDict()
 _LOCK = threading.Lock()
 _TTL = 30 * 60          # 本片最快线记忆 30 分钟（预热与播放竞速共用）
 _MAX = 4000             # 最多记忆的集数，超出淘汰最旧
+
+# ---- 冠军线记忆持久化（方案B，仅 persist 模式启用）----
+_STATE = Path(__file__).resolve().parent.parent / "state" / "linepredict_fast.json"
+_persist_enabled = False
+_flush_timer: "threading.Timer | None" = None
+_FLUSH_DEBOUNCE = 5.0
+
+
+def set_persist(enabled: bool) -> None:
+    """开关冠军线记忆持久化；开启时先从磁盘恢复。"""
+    global _persist_enabled
+    _persist_enabled = bool(enabled)
+    if _persist_enabled:
+        load_persisted()
+        _schedule_flush()
+
+
+def load_persisted() -> int:
+    """启动恢复冠军线记忆，返回恢复条数。"""
+    try:
+        raw = json.loads(_STATE.read_text(encoding="utf-8"))
+        items = raw.get("fast") if isinstance(raw, dict) else None
+        if not isinstance(items, dict):
+            return 0
+        n = 0
+        with _LOCK:
+            for k, v in items.items():
+                try:
+                    ts, line, lat = v[0], str(v[1]), float(v[2])
+                    # 过期记忆不恢复（避免重启后钉在已失效的线上）
+                    if time.time() - float(ts) < _TTL:
+                        _FAST[str(k)] = (float(ts), line, lat)
+                        n += 1
+                except Exception:
+                    continue
+        return n
+    except Exception:
+        return 0
+
+
+def _persist_now() -> None:
+    try:
+        with _LOCK:
+            snapshot = {k: list(v) for k, v in _FAST.items()}
+        _STATE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _STATE.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"fast": snapshot}, ensure_ascii=False,
+                                  separators=(",", ":")), encoding="utf-8")
+        tmp.replace(_STATE)
+    except Exception:
+        pass
+
+
+def _schedule_flush() -> None:
+    global _flush_timer
+    if not _persist_enabled:
+        return
+    if _flush_timer is not None:
+        return
+
+    def _fire():
+        global _flush_timer
+        with _LOCK:
+            _flush_timer = None
+        _persist_now()
+        # 落盘后若又有新记忆，继续排下一轮
+        if _persist_enabled:
+            _schedule_flush()
+
+    t = threading.Timer(_FLUSH_DEBOUNCE, _fire)
+    t.daemon = True
+    _flush_timer = t
+    t.start()
+
 
 # 正在预热的 ep_key，避免同片重复打源
 _INFLIGHT: set[str] = set()
@@ -30,6 +106,102 @@ _INFLIGHT_LOCK = threading.Lock()
 
 def ep_key(og: str, index: int) -> str:
     return f"{og}|{int(index or 0)}"
+
+
+# ===== 播放中实时分片速度表（按 集+线路 滑动） =====
+# 用于“放到一半某条线持续变慢”时，在播放器下次刷新 media playlist 时静默
+# 切到同片更快的线。只统计实际播放（seg 端点）产生的样本，TTL 很短（播放会话级）。
+# key = "og|index|line" -> (最近时间戳, 最近若干分片耗时秒的列表)
+_SEG: "OrderedDict[str, tuple[float, list[float]]]" = OrderedDict()
+_SEG_LOCK = threading.Lock()
+_SEG_WIN = 6                # 每条线只看最近 6 个分片
+_SEG_TTL = 180.0            # 3 分钟没新样本即丢弃
+_SEG_MAX = 3000
+# 判定“当前线持续慢”的阈值：最近窗口中位数 ≥ 该秒数
+SEG_SLOW_SEC = 2.2
+# 备选线必须比当前线快出该比例才切（避免抖动来回切）
+SEG_SWITCH_RATIO = 0.55
+# 至少累计这么多个慢分片才允许切（避免偶发一两个慢片误切）
+SEG_SLOW_MIN = 3
+# 两次静默切线的最小间隔（每集），防频繁切换
+_SWITCH_COOLDOWN = 25.0
+_LAST_SWITCH: dict[str, float] = {}
+
+
+def _seg_key(og: str, index: int, line: str) -> str:
+    return f"{og}|{int(index or 0)}|{line}"
+
+
+def record_seg(og: str, index: int, line: str, seconds: float) -> None:
+    """记录一次实际播放分片的完整下载耗时（秒）。"""
+    if not og or not line or seconds is None or seconds < 0:
+        return
+    key = _seg_key(og, index, line)
+    now = time.time()
+    with _SEG_LOCK:
+        old = _SEG.get(key)
+        samples = (old[1] if old else []) + [float(seconds)]
+        samples = samples[-_SEG_WIN:]
+        _SEG[key] = (now, samples)
+        _SEG.move_to_end(key)
+        while len(_SEG) > _SEG_MAX:
+            _SEG.popitem(last=False)
+
+
+def _median(v: list[float]) -> float:
+    s = sorted(v)
+    n = len(s)
+    if not n:
+        return 0.0
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2
+
+
+def pick_faster_line(og: str, index: int, cur_line: str) -> str | None:
+    """播放中：若当前线最近分片持续慢，且另一条线有明显更快的新鲜样本，
+    返回应切换到的线路名；否则返回 None。按 集 做切换冷却。"""
+    if not og or not cur_line:
+        return None
+    now = time.time()
+    cool_key = ep_key(og, index)
+    with _SEG_LOCK:
+        if now - _LAST_SWITCH.get(cool_key, 0) < _SWITCH_COOLDOWN:
+            return None
+        # 清理过期
+        for k in list(_SEG.keys()):
+            if now - _SEG[k][0] > _SEG_TTL:
+                _SEG.pop(k, None)
+        pref = f"{og}|{int(index or 0)}|"
+        cur = _SEG.get(_seg_key(og, index, cur_line))
+        if not cur:
+            return None
+        cur_v = cur[1]
+        slow_n = sum(1 for x in cur_v if x >= SEG_SLOW_SEC)
+        if len(cur_v) < SEG_SLOW_MIN or slow_n < SEG_SLOW_MIN:
+            return None
+        cur_med = _median(cur_v)
+        if cur_med < SEG_SLOW_SEC:
+            return None
+        best_line, best_med = None, cur_med * SEG_SWITCH_RATIO
+        for k, (_, v) in _SEG.items():
+            if not k.startswith(pref):
+                continue
+            line = k[len(pref):]
+            if line == cur_line or len(v) < 2:
+                continue
+            m = _median(v)
+            # 备选线既要明显更快，其最近窗口也不能整体很慢
+            if m <= best_med and m < SEG_SLOW_SEC:
+                best_line, best_med = line, m
+        if best_line:
+            _LAST_SWITCH[cool_key] = now
+        return best_line
+
+
+def reset_seg_timing() -> None:
+    with _SEG_LOCK:
+        _SEG.clear()
+        _LAST_SWITCH.clear()
 
 
 # 慢档阈值：实测延迟 ≥ 该值视为“不够秒播”，允许后续重探纠正（首探时绑定尚未
@@ -57,6 +229,7 @@ def remember(ep_key: str, line: str, latency: float) -> None:
         _FAST.move_to_end(ep_key)
         while len(_FAST) > _MAX:
             _FAST.popitem(last=False)
+        _schedule_flush()
 
 
 def ready_or_reprobe(ep_key: str) -> bool:
@@ -165,3 +338,5 @@ def reset() -> None:
         _FAST.clear()
     with _INFLIGHT_LOCK:
         _INFLIGHT.clear()
+    if _persist_enabled:
+        _persist_now()

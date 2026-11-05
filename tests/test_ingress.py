@@ -34,6 +34,12 @@ class IngressTests(unittest.IsolatedAsyncioTestCase):
             ("charts_enabled", lambda: True),
             ("catalog_enabled", lambda: False),
             ("standalone_sources_active", lambda: []),
+            # 0.2.68 之后新增的虚拟库类型（加固/小雅/T4）本用例不涉及，统一关闭，
+            # 保证纯净环境下 mediadb/list 只返回热门 CHART 四库。
+            ("guard_native_enabled", lambda: False),
+            ("_t4_sources", lambda: []),
+            ("guard_libs_active", lambda: []),
+            ("_xlib_active_cats", lambda *a, **k: []),
             ("chart_cache", SimpleNamespace(items=lambda cat: [])),
         ):
             item = patch.object(appmod, name, value)

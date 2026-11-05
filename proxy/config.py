@@ -49,6 +49,9 @@ DEFAULTS = {
     "linepredict_max_lines": 3,
     # 预热结果记忆时长（分钟）
     "linepredict_ttl_min": 30,
+    # 启动预热方式：realtime=重启后后台逐部搜源绑定（方案A，默认）；
+    # persist=热门片绑定结果落盘，重启直接恢复线路、少重新搜源（方案B）
+    "prewarm_mode": "realtime",
     # 网盘转存缓存自动清理：开启后按“最后一次播放时间”清理插件转存目录中超时的
     # 视频，防止网盘容量被不断转存占满。默认保留 6 小时；后台每小时检查一次。
     "pan_cache_cleanup_enabled": True,
