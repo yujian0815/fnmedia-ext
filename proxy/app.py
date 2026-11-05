@@ -7517,16 +7517,6 @@ async def admin_page():
                  "Pragma": "no-cache", "Expires": "0"})
 
 
-@app.get("/v/ext/donate-qr")
-async def donate_qr():
-    """关于页「爱发电」打赏收款码（随包静态图，full/lite 通用）。"""
-    qr = Path(__file__).resolve().parent / "assets" / "donate.jpg"
-    if not qr.exists():
-        return JSONResponse({"code": 404, "msg": "no qr"}, status_code=404)
-    return FileResponse(qr, media_type="image/jpeg",
-                        headers={"Cache-Control": "public, max-age=86400"})
-
-
 @app.get("/v/ext/alipay-qr")
 async def alipay_qr():
     """关于页支付宝收款码（随包静态图，full/lite 通用）。"""

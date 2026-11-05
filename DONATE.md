@@ -13,10 +13,10 @@
 最实在的鼓励，也会让后续开发、新设备适配和长期维护更有动力。
 
 <p align="center">
-  <img src="proxy/assets/donate.jpg" alt="微信 / 支付宝 打赏收款码" width="240">
+  <img src="proxy/assets/alipay.jpg" alt="支付宝打赏收款码" width="240">
 </p>
 
-<p align="center">微信 / 支付宝 扫码打赏 · 金额随意，感谢支持 ❤️</p>
+<p align="center">支付宝扫码打赏 · 金额随意，感谢支持 ❤️</p>
 
 ---
 

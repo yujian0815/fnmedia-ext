@@ -730,14 +730,6 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div style="display:flex;gap:18px;justify-content:center;flex-wrap:wrap;align-items:stretch">
           <div style="display:inline-flex;flex-direction:column;align-items:center;gap:6px">
             <div style="padding:10px;border:1px solid var(--border,#e3e3e6);border-radius:12px;background:#fff;display:flex;align-items:center;justify-content:center;height:232px">
-              <img src="/v/ext/donate-qr" alt="微信打赏码"
-                   style="width:200px;height:200px;object-fit:contain;display:block;border-radius:6px"
-                   onerror="this.style.display='none'"/>
-            </div>
-            <div class="muted sm" style="font-weight:600">微信扫码打赏</div>
-          </div>
-          <div style="display:inline-flex;flex-direction:column;align-items:center;gap:6px">
-            <div style="padding:10px;border:1px solid var(--border,#e3e3e6);border-radius:12px;background:#fff;display:flex;align-items:center;justify-content:center;height:232px">
               <img src="/v/ext/alipay-qr" alt="支付宝打赏码"
                    style="width:200px;height:200px;object-fit:contain;display:block;border-radius:6px"
                    onerror="this.style.display='none'"/>
@@ -745,7 +737,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
             <div class="muted sm" style="font-weight:600">支付宝扫码打赏</div>
           </div>
         </div>
-        <div class="muted sm" style="margin-top:8px">微信 / 支付宝 扫码打赏 · 金额随意，感谢支持 ❤️</div>
+        <div class="muted sm" style="margin-top:8px">支付宝扫码打赏 · 金额随意，感谢支持 ❤️</div>
       </div>
 
       <div class="card" id="updCard">
@@ -2051,30 +2043,59 @@ async function loadStatus(){
   CFG=STATUS.config;
   PRIO=STATUS.source_priority||{};
 }
-async function init(){
-  await loadStatus();
-  KWS=Array.isArray(CFG.junk_keywords)?CFG.junk_keywords.slice():[];
-  $("maxn").value=CFG.max_per_keyword;
-  $("junk").checked=CFG.filter_junk;
-  $("onlineFirst").checked=CFG.online_first!==false;
-  $("lineFastest").checked=CFG.line_fastest!==false;
-  $("lineAutofail").checked=CFG.line_autofail!==false;
-  $("fastestMax").value=CFG.line_fastest_max||6;
-  $("fastestTimeout").value=CFG.line_fastest_timeout||4;
-  renderKw();renderSources();
-  const gs=$("globalState");gs.textContent="接管运行中 · 已缓存 "+STATUS.cached_titles;gs.className="dot ok";
-  const ed=$("aboutEdition");if(ed)ed.textContent=(FEAT_DDUO?"完整版（本地全功能）":"公开版")+" · 在飞牛原生搜索与媒体库中注入在线影视";
-  loadOnline();
-  renderOverview();
-  loadWhoami();
-  startLivePoll();
+// 带重试的状态加载：在线更新后服务会重启，首个请求可能撞上未就绪窗口
+// （502/503/连接失败）。最多重试若干次，避免一次失败就让整个管理页黑屏。
+async function loadStatusWithRetry(maxTries){
+  let last=null;
+  for(let i=0;i<(maxTries||8);i++){
+    try{ await loadStatus(); return; }
+    catch(e){
+      last=e;
+      await new Promise(r=>setTimeout(r,700));
+    }
+  }
+  throw last||new Error("status unavailable");
 }
-$("liveClear").addEventListener("click",async e=>{e.preventDefault();
+// 安全设置控件值：元素缺失时跳过，避免单个 id 不存在中断整个 init
+function setVal(id,fn){const el=$(id);if(el){try{fn(el);}catch(e){}}}
+async function init(){
+  // 1) 先保证拿到状态（更新重启窗口内自动重试），失败也继续渲染静态页面
+  let statusOk=true;
+  try{ await loadStatusWithRetry(); }catch(e){ statusOk=false; console.error("loadStatus",e); }
+  try{
+    KWS=Array.isArray(CFG&&CFG.junk_keywords)?CFG.junk_keywords.slice():[];
+    setVal("maxn",el=>el.value=(CFG&&CFG.max_per_keyword)||12);
+    setVal("junk",el=>el.checked=!!(CFG&&CFG.filter_junk));
+    setVal("onlineFirst",el=>el.checked=!(CFG&&CFG.online_first===false));
+    setVal("lineFastest",el=>el.checked=!(CFG&&CFG.line_fastest===false));
+    setVal("lineAutofail",el=>el.checked=!(CFG&&CFG.line_autofail===false));
+    setVal("fastestMax",el=>el.value=(CFG&&CFG.line_fastest_max)||6);
+    setVal("fastestTimeout",el=>el.value=(CFG&&CFG.line_fastest_timeout)||4);
+  }catch(e){console.error("init controls",e);}
+  try{ renderKw(); }catch(e){console.error("renderKw",e);}
+  try{ renderSources(); }catch(e){console.error("renderSources",e);}
+  const gs=$("globalState");
+  if(gs){
+    if(statusOk){gs.textContent="接管运行中 · 已缓存 "+(STATUS.cached_titles||0);gs.className="dot ok";}
+    else{gs.textContent="服务启动中，请稍后刷新";gs.className="dot bad";}
+  }
+  const ed=$("aboutEdition");if(ed)ed.textContent=(FEAT_DDUO?"完整版（本地全功能）":"公开版")+" · 在飞牛原生搜索与媒体库中注入在线影视";
+  if(statusOk){ try{ loadOnline(); }catch(e){console.error("loadOnline",e);} }
+  // 概览/诊断各自独立容错，单个失败不影响页面整体渲染
+  try{ renderOverview(); }catch(e){console.error("renderOverview",e);}
+  try{ loadWhoami(); }catch(e){console.error("loadWhoami",e);}
+  try{ startLivePoll(); }catch(e){console.error("startLivePoll",e);}
+  // 状态未就绪时，服务起来后自动重试一次，让概览数据补上
+  if(!statusOk){ setTimeout(()=>location.reload(), 8000); }
+}
+// 顶层事件绑定统一做空值保护：公开版剥离/元素缺失时不能让整段脚本中断导致黑屏
+function onClick(id,fn){const el=$(id);if(el)el.addEventListener("click",fn);}
+onClick("liveClear",async e=>{e.preventDefault();
   try{await fetch("/v/api/ext/live/clear",{method:"POST"});await loadLive();toast("已清空实时记录");}catch(_){}});
-$("liveCopy").addEventListener("click",e=>{e.preventDefault();copyDiagnosis();});
-$("kwAdd").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();addKw();}});
-$("kw").addEventListener("input",()=>{clearTimeout(window._t);window._t=setTimeout(loadOnline,250);});
-init().catch(e=>{const gs=$("globalState");gs.textContent="未接管/接口不可用";gs.className="dot bad";console.error(e);});
+onClick("liveCopy",e=>{e.preventDefault();copyDiagnosis();});
+const _kwAdd=$("kwAdd");if(_kwAdd)_kwAdd.addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();addKw();}});
+const _kwInput=$("kw");if(_kwInput)_kwInput.addEventListener("input",()=>{clearTimeout(window._t);window._t=setTimeout(loadOnline,250);});
+init().catch(e=>{const gs=$("globalState");if(gs){gs.textContent="服务启动中，请稍后刷新";gs.className="dot bad";}console.error(e);});
 </script>
 </body>
 </html>

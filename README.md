@@ -221,9 +221,9 @@ bash packaging/fpk/build.sh          # 产出 dist/fnmedia-ext-<ver>.fpk
 更好用，欢迎扫码请作者喝杯咖啡——你的支持是持续适配新设备、维护源解析和修复问题的动力。
 
 <p align="center">
-  <img src="proxy/assets/donate.jpg" alt="微信 / 支付宝 打赏收款码" width="220">
+  <img src="proxy/assets/alipay.jpg" alt="支付宝打赏收款码" width="220">
 </p>
 
-<p align="center">微信 / 支付宝 扫码，金额随意 ❤️ · 详见 <a href="DONATE.md">打赏说明</a></p>
+<p align="center">支付宝扫码，金额随意 ❤️ · 详见 <a href="DONATE.md">打赏说明</a></p>
 
 打赏完全自愿，不影响任何功能使用，也不对应任何功能承诺或技术支持 SLA。
