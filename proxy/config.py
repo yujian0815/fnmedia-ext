@@ -37,7 +37,8 @@ DEFAULTS = {
     "line_fastest": True,
     # 自动选最快线时最多参与竞速的候选线路数（控制起播开销）
     "line_fastest_max": 6,
-    # 竞速超时预算（秒）：超时未响应的线路本轮判慢，不阻塞起播
+    # 竞速超时预算（秒）：单条候选线探活上限。固化 0.2.42 最优基准=4.0s，
+    # gather 等全部候选、各自 4s 上限，轻量验活正常几百毫秒返回即胜出。
     "line_fastest_timeout": 4.0,
     # 默认线（高质量源）领先优势（秒）：它在该优势内返回就算赢，避免无谓抖动
     "line_fastest_prefer": 0.25,
@@ -98,6 +99,9 @@ DEFAULTS = {
     "hot_per_source": 120,    # 每个资源站最多抓取的可播条目
     "hot_pages_per_source": 6,  # 每个资源站翻“最近更新”的页数（每页约20条）
     "hot_refresh_interval": 6 * 3600,
+    # —— 海报预热（按需，不做全量后台预热）——
+    # 仅在用户实际浏览海报/搜索列表时由 schedule_prewarm_title 触发轻量探活，
+    # 不做无界后台拉取，避免抢占事件循环与连接池拖慢海报墙和媒体库。
     # —— 在线资源会话缓存 state/titles.json（issue #42：搜索越用越慢）——
     # 该文件每次合并搜索结果都会落盘；机械盘/ARM 盒子写几十 MB 要数秒，直接拖慢搜索。
     # 故同时给出「条数上限」和「字节上限」双重裁剪，并把落盘改为后台防抖异步写。
@@ -138,8 +142,14 @@ DEFAULTS = {
     "ad_filter_sps": True,
 }
 
-# 已废弃、需从旧配置里清除的键
-_DEPRECATED = {"public_base", "strm_root"}
+# 已废弃、需从旧配置里清除的键（含曾引入后又移除的海报/冠军磁盘缓存）
+_DEPRECATED = {
+    "public_base", "strm_root",
+    # 磁盘缓存已按 v0.2.42 机制移除（海报纯透传+浏览器强缓存，播放清单仅内存）
+    "poster_disk_cache_enabled", "poster_cache_dir", "poster_disk_cache_max_mb",
+    "poster_mem_cache_max", "poster_cache_ttl",
+    "champion_cache_max_mb", "champion_cache_ttl",
+}
 _BUILTIN_IDS = {s["id"] for s in DEFAULT_SOURCES}
 
 
@@ -204,6 +214,13 @@ class Config:
                     cfg["hot_per_source"] = DEFAULTS["hot_per_source"]; migrated = True
                 if not cfg.get("hot_pages_per_source"):
                     cfg["hot_pages_per_source"] = DEFAULTS["hot_pages_per_source"]; migrated = True
+                # 竞速单条超时：实验期曾改为 2.5s，现固化回 0.2.42 最优基准 4.0s。
+                # 仅把实验值 2.5 迁回，用户手动设过的其它值保留。
+                try:
+                    if abs(float(cfg.get("line_fastest_timeout", 0)) - 2.5) < 1e-9:
+                        cfg["line_fastest_timeout"] = DEFAULTS["line_fastest_timeout"]; migrated = True
+                except (TypeError, ValueError):
+                    pass
             except (TypeError, ValueError):
                 pass
             if migrated:

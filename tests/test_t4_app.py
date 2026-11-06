@@ -187,6 +187,44 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
         local = await self.client.get("/v/api/v1/item/official-guid")
         self.assertEqual(local.json(), {"code": 0, "data": []})
 
+    async def test_history_isolated_per_fnos_login_account(self):
+        """同一在线集在两个飞牛账号下进度与继续观看列表必须完全隔离。"""
+        _, eg = await self.load_episode()
+        mg = storemod.ep_media_guid(eg)
+
+        def resolve_user(request):
+            token = request.headers.get("authorization", "")
+            if token == "alice-token":
+                return {"known": True, "guid": "alice", "name": "Alice", "is_admin": False}
+            if token == "bob-token":
+                return {"known": True, "guid": "bob", "name": "Bob", "is_admin": False}
+            return {"known": False, "guid": "", "name": "", "is_admin": False}
+
+        with patch.object(appmod.fnusers, "resolve", side_effect=resolve_user):
+            await self.client.post("/v/api/v1/play/record", json={
+                "item_guid": eg, "media_guid": mg, "ts": 120, "duration": 3600},
+                headers={"Authorization": "alice-token"})
+            await self.client.post("/v/api/v1/play/record", json={
+                "item_guid": eg, "media_guid": mg, "ts": 480, "duration": 3600},
+                headers={"Authorization": "bob-token"})
+            # 再次上报不能串到另一个账号，也不会覆盖其它账号进度。
+            await self.client.post("/v/api/v1/play/record", json={
+                "item_guid": eg, "media_guid": mg, "ts": 180, "duration": 3600},
+                headers={"Authorization": "alice-token"})
+            alice_list = (await self.client.get(
+                "/v/api/v1/play/list", headers={"Authorization": "alice-token"})).json()["data"]
+            bob_list = (await self.client.get(
+                "/v/api/v1/play/list", headers={"Authorization": "bob-token"})).json()["data"]
+
+        self.assertEqual(self.history.get(eg, user="alice")["ts"], 180)
+        self.assertEqual(self.history.get(eg, user="bob")["ts"], 480)
+        self.assertEqual(len(alice_list), 1)
+        self.assertEqual(len(bob_list), 1)
+        self.assertEqual(alice_list[0]["ts"], 180)
+        self.assertEqual(bob_list[0]["ts"], 480)
+        self.assertNotEqual(alice_list[0]["ts"], bob_list[0]["ts"])
+        self.assertEqual(self.history.get(eg, user="unknown"), None)
+
     async def test_app_range_header_and_first_middle_last(self):
         self.protected = True
         _, eg = await self.load_episode()
@@ -451,7 +489,8 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         response = await self.client.get("/v/online-admin")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("TVBox / T4", response.text)
+        # 管理页回归 v0.2.42 版本，断言其稳定包含的 TVBox 功能文字
+        self.assertIn("TVBox", response.text)
 
     async def test_season_episode_and_play_info_retain_title_metadata_all_clients(self):
         self.detail_override = {
@@ -568,6 +607,42 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                     played = [r for r in self.calls if "play" in r.url.params][-1]
                     self.assertEqual(played.url.params["play"], "b2")
                     self.assertEqual(played.url.params["flag"], "B")
+
+    async def test_cms_stream_aggregates_lines_and_highlights_current(self):
+        """聚合线路按资源站去重且完整，当前播放线的回显码率与菜单高亮一致。"""
+        target = {"online_guid": "cms-show", "kind": "episode", "index": 0,
+                  "line": "lzi::lzm3u8", "title": "聚合测试"}
+        raw = [
+            {"line": "baofeng::bfzym3u8", "m3u8": True,
+             "url": "https://b.test/1.m3u8"},
+            {"line": "lzi::lzm3u8", "m3u8": True,
+             "url": "https://a.test/1.m3u8"},
+            {"line": "youku::ukm3u8", "m3u8": True,
+             "url": "https://c.test/1.m3u8"},
+            {"line": "lzi::liangzi", "m3u8": False, "resolve": True,
+             "url": "https://a.test/share/1"},
+        ]
+        with patch.object(appmod.store, "resolve_media_guid", return_value=target), \
+                patch.object(appmod.store, "target_lines", return_value=raw), \
+                patch.object(appmod, "_pansou_available", return_value=False), \
+                patch.object(appmod.inj, "episode_stream_list", return_value={
+                    "files": [{}], "video_streams": [{}], "audio_streams": []}):
+            data = (await self.client.post("/v/api/v1/stream", json={
+                "media_guid": "cms-media"})).json()["data"]
+            lines = [c["line"] for c in appmod._line_choices(target)]
+            expected_qualities = appmod._qualities(target)
+        self.assertEqual(lines, ["lzi::lzm3u8", "baofeng::bfzym3u8", "youku::ukm3u8"])
+        self.assertEqual(len(data["qualities"]), 3)
+        self.assertEqual({q["resolution"] for q in data["qualities"]},
+                         {q["resolution"] for q in expected_qualities})
+        current = next(q for q in data["qualities"]
+                       if q["bitrate"] == appmod._line_bitrate(target["line"]))
+        self.assertEqual(data["video_stream"]["bps"], current["bitrate"])
+        self.assertEqual(data["video_stream"]["resolution_type"], current["resolution"])
+        # 任意一条聚合线的哈希编码都可稳定反解，跨片不会发生高亮错位。
+        for line in lines:
+            self.assertEqual(appmod._line_of_bitrate(
+                appmod._line_bitrate(line), lines), line)
 
     async def test_stream_and_play_use_same_selected_t4_line(self):
         _, eg = await self.load_episode()

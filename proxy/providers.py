@@ -519,6 +519,9 @@ async def _search_cms(keyword: str, sources,
                  for s in enabled]
         if not tasks:
             return []
+        # 预初始化：搜索任务被取消（CancelledError）时 results 仍已定义，
+        # 避免 UnboundLocalError 让后台搜索 Future 异常未回收、刷错误日志。
+        results: list = []
         if soft_timeout is None:
             results = await asyncio.gather(*tasks, return_exceptions=True)
         else:
@@ -590,6 +593,8 @@ async def search_all(keyword: str, sources=None,
                 return await _coro_for(source)
 
         tasks = [asyncio.create_task(one(s)) for s in scheduled]
+        # 预初始化：finally 与取消路径都会引用 results，避免 UnboundLocalError
+        results: list = []
         try:
             if budget is None and soft_timeout is None:
                 results = await asyncio.gather(*tasks, return_exceptions=True)

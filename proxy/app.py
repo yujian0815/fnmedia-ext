@@ -607,6 +607,10 @@ def _title_for_media(mg: str) -> str:
 _LINE_FILL_TS: dict[str, float] = {}
 _LINE_FILL_TTL = 10 * 60
 _LINE_FILL_MIN = 6   # 记录内线路数达到该值即视为已较全，不再补
+# 补线并发闸门：高负载/批量浏览时避免几十个聚合任务同时抢占事件循环，
+# 把海报/播放请求拖到十几秒。限制同时在途的补线任务数。
+_LINE_FILL_SEM = asyncio.Semaphore(2)
+_LINE_FILL_INFLIGHT = 0
 
 
 def start_fill_lines(og: str) -> None:
@@ -627,65 +631,80 @@ def start_fill_lines(og: str) -> None:
     _LINE_FILL_TS[og] = now
 
     async def work():
-        try:
-            title = cur.get("title") or ""
-            want_year = str(cur.get("year") or "")
-            want = _norm_title(title)
-            if not want:
-                return
-            briefs = await asyncio.wait_for(
-                _aggregate_briefs(title, maxn=20, fast_only=True,
-                                  soft_timeout=6.0), timeout=12)
-            # 选同名同部：规范名【完全相等】；年份强一致——当前记录有年份时只接受
-            # 同年候选（候选缺年份也不并入），双方都缺年份才放宽，防止同名不同片串源。
-            pick = None
-            for b in briefs:
-                nb = _norm_title(b.get("title", ""))
-                by = str(b.get("year") or "")
-                if nb != want:
-                    continue
-                if (want_year or by) and by != want_year:
-                    continue
-                if pick is None or len(b.get("lines") or {}) > \
-                        len(pick.get("lines") or {}):
-                    pick = b
-            if not pick:
-                return
-            merged = dict(cur)
-            lines = dict(cur.get("lines") or {})
-            added = 0
-            for lk, eps in (pick.get("lines") or {}).items():
-                if not eps or lk in lines:
-                    continue
-                lines[lk] = eps
-                added += 1
-            if not added:
-                return
-            merged["lines"] = lines
-            # 保持当前记录身份（og 不变，播放链/历史不断），只扩充线路
-            merged["guid"] = og
-            store.remember_merged([merged])
-            _log.info("补线: 《%s》 +%d 条 (共 %d 条线路)",
-                      title, added, len(lines))
-            # 补进了更多源后重选本片最快线：
-            #  - 此前【没有任何预测】（首探时目录片只有单一源/尚无廉价 m3u8，未形成冠军）
-            #  - 或只预测到慢档（≥SLOW_SEC）
-            # 都要清掉并在更全的候选里重新预热，否则这类片补线后永远不会再被预热，
-            # 首次点击只能现场冷竞速 ~2.4s。
+        global _LINE_FILL_INFLIGHT
+        # 高负载下补线排队：最多 2 个并发，避免抢占事件循环拖慢海报/播放
+        async with _LINE_FILL_SEM:
+            _LINE_FILL_INFLIGHT += 1
             try:
-                ekey = f"{og}|0"
-                lat = linepredict.latency(ekey)
-                if lat is None or lat >= linepredict.SLOW_SEC:
-                    if lat is not None:
-                        linepredict.invalidate(ekey)
-                    linepredict.clear_inflight(ekey)
-                    schedule_prewarm_title(og, 0)
-            except Exception:
-                pass
-        except Exception:
-            _log.info("补线失败 og=%s", og, exc_info=True)
+                await _fill_lines_work(og, cur)
+            finally:
+                _LINE_FILL_INFLIGHT -= 1
 
     asyncio.create_task(work())
+
+
+async def _fill_lines_work(og: str, cur: dict) -> None:
+    """单个补线任务的实际工作（从 start_fill_lines 拆出，便于并发闸门控制）。"""
+    try:
+        title = cur.get("title") or ""
+        want_year = str(cur.get("year") or "")
+        want = _norm_title(title)
+        if not want:
+            return
+        briefs = await asyncio.wait_for(
+            _aggregate_briefs(title, maxn=20, fast_only=True,
+                              soft_timeout=6.0), timeout=12)
+        # 选同名同部：规范名【完全相等】；年份强一致——当前记录有年份时只接受
+        # 同年候选（候选缺年份也不并入），双方都缺年份才放宽，防止同名不同片串源。
+        pick = None
+        for b in briefs:
+            nb = _norm_title(b.get("title", ""))
+            by = str(b.get("year") or "")
+            if nb != want:
+                continue
+            if (want_year or by) and by != want_year:
+                continue
+            if pick is None or len(b.get("lines") or {}) > \
+                    len(pick.get("lines") or {}):
+                pick = b
+        if not pick:
+            return
+        merged = dict(cur)
+        lines = dict(cur.get("lines") or {})
+        added = 0
+        for lk, eps in (pick.get("lines") or {}).items():
+            if not eps or lk in lines:
+                continue
+            lines[lk] = eps
+            added += 1
+        if not added:
+            return
+        merged["lines"] = lines
+        # 保持当前记录身份（og 不变，播放链/历史不断），只扩充线路
+        merged["guid"] = og
+        store.remember_merged([merged])
+        _log.info("补线: 《%s》 +%d 条 (共 %d 条线路)",
+                  title, added, len(lines))
+        # 补进了更多源后重选本片最快线：
+        #  - 此前【没有任何预测】（首探时目录片只有单一源/尚无廉价 m3u8，未形成冠军）
+        #  - 或只预测到慢档（≥SLOW_SEC）
+        # 都要清掉并在更全的候选里重新预热，否则这类片补线后永远不会再被预热，
+        # 首次点击只能现场冷竞速 ~2.4s。
+        try:
+            ekey = f"{og}|0"
+            lat = linepredict.latency(ekey)
+            if lat is None or lat >= linepredict.SLOW_SEC:
+                if lat is not None:
+                    linepredict.invalidate(ekey)
+                linepredict.clear_inflight(ekey)
+                schedule_prewarm_title(og, 0)
+        except Exception:
+            pass
+    except asyncio.TimeoutError:
+        # 高负载下补线超时是常态，降级为 debug，不打 traceback 刷屏/占用 IO
+        _log.debug("补线超时 og=%s", og)
+    except Exception:
+        _log.debug("补线失败 og=%s", og, exc_info=True)
 
 
 async def resolve_chart_by_media(mg: str) -> dict | None:
@@ -849,6 +868,12 @@ async def lifespan(app: FastAPI):
         timeout=httpx.Timeout(120), trust_env=False)
     app.state.ext = httpx.AsyncClient(
         timeout=httpx.Timeout(30), trust_env=False, follow_redirects=True)
+    # 海报专用客户端：与预热/播放的 ext 连接池隔离，避免全量预热等后台任务耗尽连接
+    # 或污染 keepalive 后海报请求被拖到几十秒。限制并发连接，读超时单独收窄。
+    app.state.poster_http = httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=8.0, read=15.0, write=10.0, pool=5.0),
+        trust_env=False, follow_redirects=True,
+        limits=httpx.Limits(max_connections=32, max_keepalive_connections=16))
     app.state.stop_hot = asyncio.Event()
     app.state.hot_task = asyncio.create_task(_hot_worker(app))
     # 重启后后台预热热门四库首屏（纯 CMS 冠军线），消除冷启动首批片慢/无线路
@@ -1075,6 +1100,17 @@ def up_client(req: Request) -> httpx.AsyncClient:
 
 
 def ext_client(req: Request) -> httpx.AsyncClient:
+    return req.app.state.ext
+
+
+def _poster_http(req: Request) -> httpx.AsyncClient:
+    """海报专用客户端（连接池与预热/播放隔离）；未就绪时回退 ext。"""
+    try:
+        c = req.app.state.poster_http
+        if c is not None and not c.is_closed:
+            return c
+    except Exception:
+        pass
     return req.app.state.ext
 
 
@@ -4456,7 +4492,8 @@ async def _resurrect_worker(picked: dict, mg: str, nkey: str) -> bool:
 _LINE_FAST_TTL = 3600.0         # 本片最快线记忆 1 小时：重播/续播直接复用、免竞速；
                                 # 期间该线若取流失败会被标记坏线，remembered 自动失效并换线
 _LINE_FAST: dict[str, tuple[float, str]] = {}   # 集 key -> (ts, line)
-_RACE_CONCURRENCY = 6
+# 固化 0.2.42 最优基准：竞速并发 4（与已验证最快版本一致）
+_RACE_CONCURRENCY = 4
 
 
 def _episode_key(picked: dict) -> str:
@@ -4566,7 +4603,9 @@ def _race_candidates(picked: dict) -> list[dict]:
         key=rank)
     pinned_keys = {id(c) for c in pinned}
     rest = [c for c in ordered if id(c) not in pinned_keys]
-    # 剩余名额：健康源在前、直链优先、每源只取一条，尽量覆盖更多源；名额富余再补其余
+    # 剩余名额：健康源在前、直链优先、每源只取一条，尽量覆盖更多源；名额富余再补其余。
+    # 关键：熔断源只沉底、绝不排除——健康候选不足 n 时用它们补足，保证竞速总有候选，
+    # 避免“源被熔断→候选只剩 1 条且恰好是死链→起播直接失败”。
     picked_list = list(pinned)
     seen = {_prov(c) for c in picked_list}
     rest.sort(key=lambda c: (_src_dead(c), not _is_direct(c)))
@@ -4697,7 +4736,8 @@ def schedule_prewarm_title(og: str, index: int = 0) -> None:
         ekey = f"{og}|{int(index or 0)}"
         if linepredict.ready_or_reprobe(ekey):
             return
-        # 全局在途预热上限：用户快速连翻多个首屏时不无限排队压源站
+        # 全局在途预热上限：用户快速连翻多个首屏时不无限排队压源站。
+        # 实际并发仍受海报探测信号量(3)约束，这里只限制排队长度。
         if linepredict.inflight_count() >= 24:
             return
         if not linepredict.try_mark_inflight(ekey):
@@ -4717,8 +4757,9 @@ def warm_catalog_briefs(briefs: list) -> None:
     try:
         if not briefs or not bool(config.get().get("linepredict_enabled", True)):
             return
+        # 批量大小由调用方控制（首屏渲染/后台全量预热各自分批），这里不再硬截断
         items = []
-        for b in briefs[:18]:
+        for b in briefs:
             g = b.get("guid")
             if not g or store.get_title_by_guid(g):
                 if g:
@@ -4730,7 +4771,7 @@ def warm_catalog_briefs(briefs: list) -> None:
                 store.remember_merged(items)
             except Exception:
                 pass
-        for b in (items or briefs[:18]):
+        for b in (items or briefs):
             g = b.get("guid")
             if not g:
                 continue
@@ -4744,99 +4785,31 @@ def warm_catalog_briefs(briefs: list) -> None:
 
 
 async def startup_prewarm_hot() -> None:
-    """重启后自动预热：先建海量库路由，再预热热门/海量首屏（纯 CMS 线）。
+    """重启后的轻量启动任务（按需模式，不做全量预热）。
 
-    解决“刚重启第一批片冷点、海量库列表空、线路未聚合”：
-    - catalog 路由是内存态、重启后要重建（约 10s），先触发它，海量库才有卡片；
-    - 再对热门四库 + 海量四库首屏走 warm_catalog_briefs（落库→补全网 CMS 线→
-      本片最快线探测→预建冠军清单），用户点进即秒播、线路立即可见。
-    低并发、分批、可被 linepredict_enabled 关闭。"""
-    per_cat = 14
-
-    async def _refresh_catalog_routes() -> None:
-        # 海量库路由是内存态、重启后重建；与热门绑定互不依赖，并行跑。
-        try:
-            if catalog.routes_stale():
-                await asyncio.wait_for(
-                    catalog.refresh_routes(config.enabled_sources()), timeout=90)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            _log.info("startup catalog routes warm skipped", exc_info=True)
-
-    async def _resolve_round() -> int:
-        # 一轮：对热门四库首屏里仍未绑定的片串行 resolve，返回本轮成功绑定数。
-        bound = 0
-        for cat, _title, _g in chartmod.CHART_CATEGORIES:
-            try:
-                guids = [g for g in (it.get("guid")
-                        for it in list(chart_cache.items(cat))[:per_cat]) if g]
-                for g in guids:
-                    if store.get_title_by_guid(g):
-                        continue  # 已绑定（含用户浏览/上一轮成果）
-                    await _safe_start_resolve(g)
-                    if store.get_title_by_guid(g):
-                        bound += 1
-                    await asyncio.sleep(1)
-            except Exception:
-                _log.info("startup chart resolve skipped", exc_info=True)
-            await asyncio.sleep(3)
-        return bound
-
-    async def _resolve_hot_firstscreen() -> None:
-        # 热门片只有片名、没有线路，必须 resolve 全网搜源；绑定成功后 resolve
-        # 内部自动 schedule_prewarm_title 选最快线+预建冠军清单。
-        try:
-            # 第一轮：重启早期网络/源站可能未热，先等服务稳定
-            await asyncio.sleep(20)
-            first = await _resolve_round()
-            _log.info("startup hot resolve round1 bound=%d", first)
-            # 第二轮：给慢源/瞬时失败的片一次重试（此时连接已热、成功率高）
-            await asyncio.sleep(30)
-            second = await _resolve_round()
-            _log.info("startup hot resolve round2 bound=%d", second)
-        except Exception:
-            _log.info("startup hot resolve failed", exc_info=True)
-
+    历史教训：全量后台预热（逐片 resolve / 无界翻页拉取）会长期抢占事件循环与
+    HTTP 连接池，把海报回源从亚秒拖到几十秒、并引发媒体库加载慢/网络错误。
+    现仅在启动后刷新【海量库内存路由】（轻量、必要，决定海量库能否出卡片）；
+    所有影片级的探活/建清单一律改为按需：用户浏览到哪、schedule_prewarm_title
+    预热到哪，点击时现场竞速，不产生常驻后台重任务。
+    """
     try:
         await asyncio.sleep(8)
         if not bool(config.get().get("linepredict_enabled", True)):
             return
-        # 两条预热线并行：catalog 路由重建 与 热门首屏绑定，互不阻塞
-        await asyncio.gather(
-            _refresh_catalog_routes(),
-            _resolve_hot_firstscreen(),
-            return_exceptions=True)
-        # 海量四库首屏：路由就绪后取窗预热（线路聚合 + 冠军清单）
-        for ccat, _xname, _xcat in catalogmod.CATALOG_CATEGORIES:
-            try:
-                briefs, _n = await catalog.get_window(ccat, 0, per_cat)
-                if briefs:
-                    warm_catalog_briefs(list(briefs)[:per_cat])
-            except Exception:
-                pass
-            await asyncio.sleep(8)
-        _log.info("startup prewarm all done")
+        try:
+            if catalog.routes_stale():
+                await asyncio.wait_for(
+                    catalog.refresh_routes(config.enabled_sources()), timeout=90)
+                _log.info("startup catalog routes refreshed (on-demand mode)")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.info("startup catalog routes warm skipped", exc_info=True)
     except asyncio.CancelledError:
         raise
     except Exception:
-        _log.info("startup hot prewarm skipped", exc_info=True)
-
-
-async def _safe_start_resolve(guid: str) -> None:
-    """启动预热用：触发榜单片后台绑定并等待其完成，吞掉所有异常/限流。
-
-    start_resolve_chart 返回在途 Future（单飞），必须 await 完成，否则调用方
-    立即查 store 会因绑定仍在后台进行而误判失败、bound 计数恒为 0。"""
-    try:
-        fut = start_resolve_chart(guid, prefetch=True)
-        if fut is not None:
-            try:
-                await asyncio.wait_for(fut, timeout=30)
-            except Exception:
-                pass  # 单个片失败不影响其它片；播放时仍会即时解析
-    except Exception:
-        _log.info("startup resolve skipped %s", guid, exc_info=True)
+        _log.info("startup prewarm skipped", exc_info=True)
 
 
 async def _prewarm_title_task(og: str, index: int, ekey: str) -> None:
@@ -5025,6 +4998,7 @@ _PLAYLIST_TTL = 120.0
 # 仍由首片验活+自动换线兜底。普通清单不受影响。
 _CHAMPION_KEYS: set[str] = set()
 _PLAYLIST_STALE = 15 * 60.0
+
 # 单飞：同一「集+线路」只允许一次在途抓取，预热与真正取 main 共用同一个 Future
 _PLAYLIST_FUT: dict[str, asyncio.Future] = {}
 # main 整条“解析+换线+建清单”的在途服务任务（mg|line|index -> Future）：慢源首个
@@ -6311,22 +6285,22 @@ def _poster_fallback() -> Response:
                     headers={"Cache-Control": "max-age=3600"})
 
 
+
 async def _serve_online_poster(tok_path: str, request: Request) -> Response:
     # 兼容 /online/<token>.jpg 与官方图片前缀 /v/api/v1/sys/img/online/<token>.jpg
+    # 机制对齐 v0.2.42：纯透传 + 浏览器 max-age 强缓存，服务端不做任何内存/磁盘缓存，
+    # 事件循环零额外缓存逻辑，海报墙瞬载。
     tok_path = tok_path.lstrip("/")
     marker = "online/"
     if marker in tok_path:
         tok_path = tok_path.split(marker, 1)[1]
     try:
-        u, pan_label, _health_grade, _speed_grade = _decode_poster_tok(tok_path)
+        u, pan_label, health_grade, _speed_grade = _decode_poster_tok(tok_path)
     except Exception:
         return _poster_fallback()
     if not u.startswith("http"):
         return _poster_fallback()
-    # 海报墙不再烧录测速/健康圆点（逐张 Pillow 合成会拖慢整墙加载）：
-    # 忽略旧链接里可能携带的 h/s，只保留网盘资源 ☁ 文字角标。
-    badge_grade = None
-    want_badge = bool(pan_label)
+    want_badge = bool(pan_label) or health_grade is not None
     headers = {"User-Agent": "Mozilla/5.0"}
     host = urllib.parse.urlsplit(u).netloc.lower()
     # 豆瓣图床需要带豆瓣 Referer，否则可能 403
@@ -6334,7 +6308,7 @@ async def _serve_online_poster(tok_path: str, request: Request) -> Response:
             host.endswith("doubanio.viki.moe"):
         headers["Referer"] = "https://movie.douban.com/"
     try:
-        r = await ext_client(request).get(u, headers=headers)
+        r = await _poster_http(request).get(u, headers=headers)
         ctype = (r.headers.get("content-type") or "").lower()
         if r.status_code != 200 or not r.content:
             return _poster_fallback()
@@ -6362,7 +6336,7 @@ async def _serve_online_poster(tok_path: str, request: Request) -> Response:
             import posterbadge
             if posterbadge.available():
                 badged = await asyncio.to_thread(
-                    posterbadge.badge, r.content, pan_label, badge_grade)
+                    posterbadge.badge, r.content, pan_label, health_grade)
                 if badged:
                     out_bytes, out_type = badged, "image/jpeg"
         except Exception:  # noqa: BLE001
@@ -7092,6 +7066,30 @@ async def ext_source_test(request: Request):
     keyword = (body.get("keyword") or "庆余年").strip()
     result = await providers.probe_source(api, keyword=keyword, source=src)
     return {"code": 0, "msg": "", "data": result}
+
+
+@app.post("/v/api/ext/source/test-all")
+async def ext_source_test_all(request: Request):
+    """并发探测全部源，返回 [{id,name,...result}]（对齐 v0.2.42 管理台）。"""
+    async def one(s):
+        try:
+            r = await providers.probe_source(
+                s["api"], keyword="庆余年", source=s)
+            if not isinstance(r, dict):
+                r = {}
+            r.update(id=s["id"], name=s["name"],
+                     enabled=bool(s.get("enabled")),
+                     builtin=bool(s.get("builtin")))
+            return r
+        except Exception:
+            return {"id": s.get("id"), "name": s.get("name"),
+                    "ok": False, "error": "探测异常",
+                    "enabled": bool(s.get("enabled")),
+                    "builtin": bool(s.get("builtin"))}
+    results = await asyncio.gather(
+        *[one(s) for s in config.all_sources()], return_exceptions=True)
+    out = [r for r in results if isinstance(r, dict)]
+    return {"code": 0, "msg": "", "data": out}
 
 
 @app.post("/v/api/ext/source/health-check")

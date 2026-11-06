@@ -599,6 +599,9 @@ class Catalog:
                     async def bound(r):
                         async with sem:
                             return await fetch_one(client, r, timeout)
+                    # 预初始化：任务被取消（CancelledError）时 results 也已定义，
+                    # 避免 UnboundLocalError 导致后台预热 Future 异常未回收。
+                    results: list = []
                     results = await asyncio.gather(
                         *[bound(r) for r in routes],
                         return_exceptions=True)
@@ -684,6 +687,8 @@ class Catalog:
         if not cats:
             return [], 0
         end = offset + limit
+        # 预初始化：任务取消时 results 仍已定义，避免 UnboundLocalError
+        results: list = []
         results = await asyncio.gather(
             *[self._source_cat_window(scope, c, 0, end) for c in cats],
             return_exceptions=True)

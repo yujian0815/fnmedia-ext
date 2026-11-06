@@ -130,8 +130,10 @@ def main():
 
     moved = False
     try:
-        # 等暂存 socket 就绪
-        for _ in range(80):
+        # 等暂存 socket 就绪。冷启动要恢复榜单绑定/冠军清单/加固目录，数据多或系统繁忙
+        # （bridge 拉起、磁盘 IO 高）时 uvicorn 建 socket 可能明显变慢，窗口太短会在应用
+        # 即将就绪时误判失败并杀进程，导致服务 failed、媒体库消失。放宽到 45s。
+        for _ in range(225):
             if child.poll() is not None:
                 log("uvicorn 提前退出")
                 return 1
