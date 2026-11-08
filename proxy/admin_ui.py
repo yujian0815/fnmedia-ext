@@ -72,23 +72,51 @@ input[type=text],input[type=number],input[type=password],textarea,select{
   transition:border-color .16s var(--ease),box-shadow .16s var(--ease)}
 input[type=number]{width:auto}
 textarea{resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
+input:hover,textarea:hover,select:hover{border-color:#b9c7dc}
 input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);
   box-shadow:0 0 0 3px rgba(47,111,237,.12)}
+input:disabled,textarea:disabled,select:disabled{background:#f3f5f8;color:var(--muted);cursor:not-allowed}
 label.field{display:block;margin:10px 0}
 label.field>span{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}
 .switch-row{display:flex;align-items:flex-start;gap:10px;padding:10px 0;cursor:pointer}
 .switch-row input{width:17px;height:17px;margin-top:2px;accent-color:var(--accent);flex:none}
 .switch-row .sub{display:block;font-size:13px;color:var(--muted)}
-.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);
-  background:#fff;color:var(--text);border-radius:9px;padding:8px 15px;cursor:pointer;font-size:14px;
-  transition:border-color .16s var(--ease),color .16s var(--ease),background .16s var(--ease),box-shadow .16s var(--ease)}
-.btn:hover{border-color:var(--accent);color:var(--accent)}
-.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-.btn.primary:hover{opacity:.94;color:#fff;box-shadow:0 4px 12px rgba(47,111,237,.24)}
-.btn.small{padding:5px 12px;font-size:13px;min-height:0}
-.btn:disabled{opacity:.5;cursor:default}
-.btn.danger{color:var(--err);transition:background .16s var(--ease)}.btn.danger:hover{background:var(--err);color:#fff;border-color:var(--err)}
+/* ---------- 统一按钮体系（对齐272）：实际HTML多使用button.primary.small，
+   不能只给.btn写样式，否则按钮会退回浏览器默认外观。 ---------- */
+.btn,main button,.main button{
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  border:1px solid var(--accent);background:#fff;color:var(--accent);
+  border-radius:9px;padding:8px 15px;min-height:36px;cursor:pointer;
+  font-family:inherit;font-size:13.5px;font-weight:500;line-height:1.2;
+  white-space:nowrap;user-select:none;
+  transition:background .16s var(--ease),border-color .16s var(--ease),
+    color .16s var(--ease),box-shadow .16s var(--ease),transform .08s var(--ease)}
+.btn:hover,main button:hover,.main button:hover{background:var(--accent-soft)}
+.btn:active,main button:active,.main button:active{transform:translateY(1px)}
+.btn:focus-visible,main button:focus-visible,.main button:focus-visible{
+  outline:2px solid rgba(47,111,237,.28);outline-offset:2px}
+.btn.primary,button.primary{background:var(--accent);border-color:var(--accent);color:#fff;
+  box-shadow:0 2px 6px rgba(47,111,237,.16)}
+.btn.primary:hover,button.primary:hover{background:var(--accent);color:#fff;opacity:.94;
+  box-shadow:0 4px 12px rgba(47,111,237,.24)}
+.btn.success,button.success{background:var(--ok);border-color:var(--ok);color:#fff}
+.btn.success:hover,button.success:hover{background:var(--ok);color:#fff;opacity:.92}
+.btn.danger,button.danger{background:#fff;border-color:var(--err);color:var(--err)}
+.btn.danger:hover,button.danger:hover{background:var(--err);border-color:var(--err);color:#fff}
+.btn.warn,button.warn{background:#fff;border-color:var(--warn);color:var(--warn)}
+.btn.warn:hover,button.warn:hover{background:var(--warn);border-color:var(--warn);color:#fff}
+.btn.ghost,button.ghost{border-color:var(--line);color:var(--muted);background:#fff}
+.btn.ghost:hover,button.ghost:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.small,.btn.small{padding:5px 12px;font-size:12.5px;min-height:30px;border-radius:7px}
+.btn:disabled,button:disabled{opacity:.45;cursor:not-allowed;background:#fff;color:var(--muted);
+  border-color:var(--line);box-shadow:none;transform:none}
+button.primary:disabled{background:var(--accent);color:#fff;opacity:.45}
 .btn-row{display:flex;gap:10px;align-items:center;margin:10px 0;flex-wrap:wrap}
+label.btn,label.btn-sm{display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  border:1px solid var(--accent);background:#fff;color:var(--accent);border-radius:9px;
+  padding:8px 15px;font-size:13.5px;cursor:pointer;white-space:nowrap;font-family:inherit}
+label.btn-sm{padding:5px 12px;font-size:12.5px;border-radius:7px}
+label.btn:hover,label.btn-sm:hover{background:var(--accent-soft)}
 
 /* ---------- 徽标/状态点 ---------- */
 .badge{font-size:11px;padding:1px 8px;border-radius:99px;background:var(--accent-soft);color:var(--accent);font-weight:500}
@@ -125,18 +153,43 @@ label.field>span{display:block;color:var(--muted);font-size:12px;margin-bottom:4
 /* ---------- 表格 ---------- */
 table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
-th{color:var(--muted);font-weight:600;font-size:12px;letter-spacing:.02em}
+th{color:var(--muted);font-weight:600;font-size:12px;letter-spacing:.02em;background:#fafbfc}
 tbody tr{transition:background .14s var(--ease)}
 tbody tr:hover{background:var(--accent-soft)}
 tr:last-child td{border-bottom:0}
 .meta{color:var(--muted);font-size:12px;word-break:break-all}
-.src-detail>summary{cursor:pointer;list-style:none;font-weight:500;outline:none}
+.src-detail>summary{cursor:pointer;list-style:none;font-weight:500;outline:none;border-radius:6px}
+.src-detail>summary:focus-visible{outline:2px solid rgba(47,111,237,.28);outline-offset:3px}
 .src-detail>summary::-webkit-details-marker{display:none}
 .src-detail>summary::before{content:"▸";display:inline-block;margin-right:5px;color:var(--muted);transition:transform .15s var(--ease)}
 .src-detail[open]>summary::before{transform:rotate(90deg)}
 .src-detail>summary:hover{color:var(--accent)}
 .src-detail .src-detail-body{margin:7px 0 2px 18px;padding:7px 9px;background:#fafbfc;border:1px solid var(--line);border-radius:7px}
+/* 长资源列表折叠、缓存卡片与源编辑弹窗（对齐272） */
+.collapse-bar{display:flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;user-select:none;
+  font-size:12.5px;color:var(--muted);padding:9px 4px 4px;border-top:1px dashed var(--line);margin-top:10px}
+.collapse-bar:hover{color:var(--accent)}
+.collapse-bar .chev{transition:transform .18s;display:inline-block}
+.collapse-bar.collapsed .chev{transform:rotate(-90deg)}
+.longbox{max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:10px}
+.longbox.collapsed{max-height:170px}
+.cache-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px;margin:10px 0}
+.cache-item{border:1px solid var(--line);border-radius:10px;padding:11px 12px;background:#fafbfc}
+.cache-item .cn{font-size:13px;font-weight:600}
+.cache-item .cv{font-size:12px;color:var(--muted);margin:3px 0 9px;word-break:break-all}
+.modal-mask{position:fixed;inset:0;background:rgba(15,23,42,.45);display:none;align-items:center;
+  justify-content:center;z-index:999;padding:18px}
+.modal-mask.show{display:flex}
+.modal{background:var(--card);border-radius:14px;width:min(520px,94vw);max-height:88vh;overflow:auto;
+  box-shadow:0 18px 50px rgba(0,0,0,.25);padding:18px 20px}
+.modal h3{margin:0 0 14px;font-size:16px}
+.modal label.fld{display:block;font-size:12.5px;color:var(--muted);margin:10px 0 4px}
+.modal .modal-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#f1f3f6;flex-wrap:wrap}
+.seg button{border:none!important;background:transparent!important;padding:7px 14px;font-size:13px;color:var(--muted)!important;border-radius:0!important;box-shadow:none!important}
+.seg button.active{background:var(--accent)!important;color:#fff!important;font-weight:600}
 .del{color:var(--err);background:transparent;border:0;cursor:pointer;font-size:13px;padding:4px 6px}
+.del:hover{background:#fee2e2!important;color:var(--err)!important}
 .st{font-size:12px;white-space:nowrap}.st.ok{color:var(--ok)}.st.bad{color:var(--err)}.st.wait{color:var(--muted)}
 
 /* ---------- 概览统计 ---------- */
@@ -166,7 +219,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
   padding:10px;font-size:11px;line-height:1.5;margin:6px 0 0;white-space:pre-wrap}
 #toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(8px);
   background:#222;color:#fff;padding:9px 18px;border-radius:99px;font-size:13px;opacity:0;
-  transition:.22s;pointer-events:none;z-index:80;max-width:90vw}
+  box-shadow:0 8px 24px rgba(16,30,54,.18);transition:.22s;pointer-events:none;z-index:80;max-width:90vw}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 #toast.ok{background:var(--ok)}#toast.fail{background:var(--err)}
 
@@ -178,7 +231,8 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
     calc(64px + env(safe-area-inset-bottom,8px));max-width:100%}
   h2.page-title{font-size:18px}
   input[type=text],input[type=password],textarea,select{font-size:16px}
-  .btn{min-height:42px}
+  main button:not(.small){min-height:42px}
+  main button.small{min-height:36px}
   .bottom-nav{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:45;
     height:calc(58px + env(safe-area-inset-bottom,0px));box-sizing:border-box;align-items:center;
     background:rgba(255,255,255,.97);border-top:1px solid var(--line);backdrop-filter:blur(6px);
@@ -359,6 +413,15 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div class="hint" style="margin:6px 0">开启「单独授权」后勾选该账号允许观看的媒体库；「在线搜索/片源」可独立控制：</div>
         <div id="aclBox" class="stack"></div>
       </div>
+
+      <div class="card">
+        <div class="card-title">T4 选片</div>
+        <div class="lib-grid" id="t4Libs"></div>
+        <label class="switch-row">
+          <input type="checkbox" id="t4Enabled" onchange="saveT4Cfg()"/>
+          <span>在飞牛影视媒体库显示 T4 选片</span>
+        </label>
+      </div>
     </section>
 
     <!-- ============ 片源质量 ============ -->
@@ -394,16 +457,24 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       <p class="page-desc">标准苹果 CMS 源与扩展源；启用后进入聚合搜索与海量片库。</p>
       <div class="card">
         <div class="card-title">资源站列表 <span class="badge" id="srcCount"></span>
-          <button class="small" style="margin-left:auto" onclick="testAll()">全部测速</button>
-          <button class="small" onclick="restoreBuiltin()">恢复内置源</button>
+          <input type="text" id="srcFilter" placeholder="筛选名称/地址…" oninput="renderSources()"
+                 style="margin-left:auto;max-width:168px;font-size:12px;padding:5px 9px"/>
+          <button class="small" onclick="testAll()">全部测速</button>
+          <button class="small ghost" onclick="restoreBuiltin()">恢复内置源</button>
+          <button class="small" onclick="exportCmsSources()" title="导出当前纯 CMS 源为 JSON 备份">⬇ 导出</button>
+          <label class="btn-sm" style="border-color:var(--ok);background:var(--ok);color:#fff" title="从 JSON 文件导入 CMS 源，自动去重">
+            ⬆ 导入<input type="file" id="cmsImportFile" accept=".json,application/json" style="display:none" onchange="importCmsFile(this)"/>
+          </label>
         </div>
         <div style="overflow-x:auto">
         <table>
           <thead><tr><th style="width:42px">启用</th><th style="width:96px">选项</th><th>资源站</th>
-            <th style="width:150px">连通性</th><th style="width:70px">测试</th><th style="width:44px"></th></tr></thead>
-          <tbody id="srcRows"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+            <th style="width:150px">连通性</th><th style="width:70px">测试</th><th style="width:44px"></th><th style="width:44px"></th></tr></thead>
+          <tbody id="srcRows"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
         </table>
         </div>
+        <div class="collapse-bar collapsed" id="srcCollapseBar" onclick="toggleSrcCollapse()">
+          <span class="chev">▾</span><span id="srcCollapseTxt">展开完整列表</span></div>
         <div class="row mt" style="display:grid;grid-template-columns:150px 1fr 90px auto;gap:10px" id="addGrid">
           <input type="text" id="addName" placeholder="名称（可选）"/>
           <input type="text" id="addApi" placeholder="苹果CMS JSON 接口，如 https://xxx.com/api.php/provide/vod/at/json"/>
@@ -414,6 +485,27 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div class="hint">「独立库」= 该站单独生成一张媒体库卡片；「非过滤」= 不按标题/备注过滤解说/预告/花絮；
           删除内置源仅隐藏，可恢复。批量导入 TVBox 订阅请用左侧「导入订阅」。</div>
       </div>
+
+      <details class="card">
+        <summary class="card-title" style="cursor:pointer">🌐 资源站取源代理（可选 · 直连慢时）</summary>
+        <p class="card-sub" style="margin-top:8px">仅用于搜索、分类深翻、测速和播放地址解析；视频分片仍直连，不占代理带宽。留空即直连，不改变现有播放策略。</p>
+        <div class="row">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+            <input type="checkbox" id="srcProxyEnable" style="width:14px;height:14px;accent-color:var(--accent)" onchange="onSrcProxyToggle()"/> 已配置代理</label>
+        </div>
+        <div class="row">
+          <input type="text" id="srcProxyUrl" placeholder="http://Clash:密码@192.168.x.x:7890" style="flex:2" disabled/>
+          <button class="small primary" id="srcProxySaveBtn" onclick="saveSrcProxy(true)" disabled>保存并测速</button>
+          <button class="small ghost danger" id="srcProxyClearBtn" onclick="clearSrcProxy()" disabled>清空</button>
+        </div>
+        <div class="seg" id="srcProxyMode" style="margin-top:10px" role="tablist">
+          <button type="button" data-mode="auto" onclick="setSrcProxyMode('auto')">🪄 智能（推荐）</button>
+          <button type="button" data-mode="on" onclick="setSrcProxyMode('on')">始终走代理</button>
+          <button type="button" data-mode="off" onclick="setSrcProxyMode('off')">全部直连</button>
+        </div>
+        <div class="hint" id="srcProxyModeHint" style="margin-top:6px"></div>
+        <div id="srcProxyMsg" class="muted sm" style="margin-top:6px"></div>
+      </details>
 
       <div class="card">
         <div class="card-title">源健康画像
@@ -523,10 +615,28 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div class="card-title">已缓存在线条目 <span class="badge" id="cacheN"></span></div>
         <div class="row"><input type="text" id="kw" placeholder="按标题过滤（在飞牛搜索过的会出现在这里）" style="flex:1"/>
           <button class="small" onclick="loadOnline()">刷新</button></div>
-        <table style="margin-top:10px">
-          <thead><tr><th>标题</th><th style="width:100px">来源</th><th style="width:70px">集数</th></tr></thead>
-          <tbody id="rows"><tr><td colspan="3" class="muted">加载中…</td></tr></tbody>
-        </table>
+        <div class="longbox collapsed" id="onlineBox" style="margin-top:10px">
+          <table>
+            <thead><tr><th>标题</th><th style="width:100px">来源</th><th style="width:70px">集数</th></tr></thead>
+            <tbody id="rows"><tr><td colspan="3" class="muted">加载中…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="collapse-bar collapsed" onclick="toggleBox('onlineBox',this)"><span class="chev">▾</span><span>展开/收起</span></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">🗑 运行缓存管理
+          <span class="hint" style="font-weight:400">缓存异常或占用过大时清除，后续访问自动重建</span>
+          <button class="small" style="margin-left:auto" onclick="loadCacheStatus()">刷新</button>
+        </div>
+        <div id="cacheGrid" class="cache-grid"><div class="muted sm">读取中…</div></div>
+        <div class="btn-row">
+          <button class="small danger" onclick="clearCaches(['search'])">仅清搜索缓存</button>
+          <button class="small danger" onclick="clearCaches(['charts','catalog'])">清榜单+海量库</button>
+          <button class="small danger" onclick="clearCaches(['search','charts','catalog'])">一键清运行缓存（不重启）</button>
+          <button class="small danger" onclick="clearCaches(['health'])">重置源健康画像</button>
+          <button class="small danger" onclick="clearCaches(['titles'])">清在线资源缓存（将重启）</button>
+        </div>
       </div>
     </section>
 
@@ -609,6 +719,23 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
 
 <div id="toast"></div>
 
+<!-- 资源站编辑弹窗 -->
+<div class="modal-mask" id="srcEditMask" onclick="if(event.target===this)closeSrcEdit()">
+  <div class="modal">
+    <h3>✎ 编辑资源站</h3>
+    <input type="hidden" id="seId"/>
+    <label class="fld">显示名称</label>
+    <input type="text" id="seName" maxlength="40" placeholder="给这个资源站起个名字"/>
+    <label class="fld">订阅 / 接口地址（苹果CMS JSON）</label>
+    <input type="text" id="seApi" placeholder="https://xxx.com/api.php/provide/vod/at/json"/>
+    <div class="hint" id="seHint" style="margin-top:8px"></div>
+    <div class="modal-foot">
+      <button class="small" onclick="closeSrcEdit()">取消</button>
+      <button class="primary small" onclick="saveSrcEdit()">保存</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const $=(id)=>document.getElementById(id);
 const $$=(sel)=>Array.from(document.querySelectorAll(sel));
@@ -639,7 +766,8 @@ async function switchPage(page){
     });
   }
   if(page==="quality")renderQuality();
-  if(page==="sources"){try{loadHealth();}catch(e){}}
+  if(page==="sources"){try{loadHealth();}catch(e){}try{initSrcProxy();}catch(e){}}
+  if(page==="search"){try{loadCacheStatus();}catch(e){}}
   if(page==="tvbox"){try{loadGuardZone();}catch(e){}try{gbInit();}catch(e){}}
   if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{loadAdfilter();}catch(e){}try{if(typeof loadSpiderMgmt==="function")loadSpiderMgmt();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}}
   if(page==="about"){loadUpdate(false);}
@@ -1067,6 +1195,9 @@ function renderLibrary(){
   if(!STATUS)return;
   $("hotEnabled").checked=CFG.hot_library_enabled!==false;
   if($("catEnabled"))$("catEnabled").checked=CFG.catalog_library_enabled!==false;
+  if($("t4Enabled"))$("t4Enabled").checked=CFG.t4_library_enabled!==false;
+  const t4=LIBS.find(x=>x.kind==="t4");
+  if($("t4Libs"))$("t4Libs").innerHTML=t4?`<div class="lib"><div class="ic">🧩</div><div><div class="t">${esc(t4.title)}</div><div class="c">${t4.count||0} 个插件</div></div></div>`:'<div class="hint">未配置 T4 源</div>';
   $("hotInterval").value=Math.round((CFG.hot_refresh_interval||21600)/3600);
   const c=STATUS.charts&&STATUS.charts.counts||{};
   const cats=(STATUS.catalog&&STATUS.catalog.categories)||{};
@@ -1097,6 +1228,12 @@ async function saveCatCfg(){
   const body={catalog_library_enabled:$("catEnabled").checked};
   const r=await jpost("/v/api/ext/config",body);
   if(r.code===0){Object.assign(CFG,body);toast("海量四库设置已保存");await loadLibs();renderLibrary();}
+  else toast(r.msg||"保存失败","fail");
+}
+async function saveT4Cfg(){
+  const body={t4_library_enabled:$("t4Enabled").checked};
+  const r=await jpost("/v/api/ext/config",body);
+  if(r.code===0){Object.assign(CFG,body);toast("T4 选片设置已保存");await loadLibs();renderLibrary();}
   else toast(r.msg||"保存失败","fail");
 }
 async function refreshHot(){
@@ -1143,9 +1280,21 @@ async function savePreferQ(){
 
 /* ---------- 资源站 ---------- */
 function renderSources(){
-  const srcs=CFG.sources;
-  $("srcCount").textContent=srcs.filter(x=>x.enabled).length+"/"+srcs.length+" 启用";
-  $("srcRows").innerHTML=srcs.map(src=>{
+  const all=CFG.sources;
+  const q=($("srcFilter")?.value||"").trim().toLowerCase();
+  const srcs=q?all.filter(s=>(s.name||"").toLowerCase().includes(q)||(s.api||"").toLowerCase().includes(q)):all;
+  $("srcCount").textContent=all.filter(x=>x.enabled).length+"/"+all.length+" 启用";
+  const collapsed=$("srcCollapseBar")?.classList.contains("collapsed");
+  const PREVIEW=12;
+  let view=srcs,hiddenNote="";
+  if(collapsed&&!q&&srcs.length>PREVIEW){
+    view=srcs.slice(0,PREVIEW);
+    hiddenNote=`<tr><td colspan="7" class="muted sm" style="text-align:center">还有 ${srcs.length-PREVIEW} 个未展开</td></tr>`;
+  }
+  const bar=$("srcCollapseBar");
+  if(bar){bar.style.display=srcs.length>PREVIEW?"flex":"none";
+    $("srcCollapseTxt").textContent=collapsed?`展开完整列表（${srcs.length} 个）`:"收起列表";}
+  $("srcRows").innerHTML=view.map(src=>{
     let extraCell="",extraTag="";
     return `<tr data-id="${src.id}">
       <td><input type="checkbox" class="en" ${src.enabled?"checked":""} style="accent-color:var(--accent);width:16px;height:16px"/></td>
@@ -1167,17 +1316,43 @@ function renderSources(){
       </details></td>
       <td class="st wait" data-st>未测</td>
       <td><button class="small" data-test>测试</button></td>
+      <td><button class="small ghost" data-edit title="编辑名称/订阅链接">✎</button></td>
       <td><button class="del" data-del title="删除">✕</button></td>
     </tr>`;
-  }).join("");
-  $$("#srcRows tr").forEach(tr=>{
+  }).join("")+hiddenNote;
+  $$("#srcRows tr[data-id]").forEach(tr=>{
     const id=tr.dataset.id;
     tr.querySelector(".en").addEventListener("change",()=>toggleEnable(id,tr.querySelector(".en").checked));
     const sa=tr.querySelector(".sa");sa.addEventListener("change",()=>toggleStandalone(id,sa.checked));
     const lf=tr.querySelector(".lf");if(lf)lf.addEventListener("change",()=>toggleLoose(id,lf.checked));
     tr.querySelector("[data-test]").addEventListener("click",()=>testOne(id,tr));
+    tr.querySelector("[data-edit]").addEventListener("click",()=>openSrcEdit(id));
     tr.querySelector("[data-del]").addEventListener("click",()=>delSource(id,srcName(id)));
   });
+}
+function toggleSrcCollapse(){const bar=$("srcCollapseBar");bar.classList.toggle("collapsed");renderSources();}
+function toggleBox(id,bar){const el=$(id);if(!el)return;el.classList.toggle("collapsed");if(bar)bar.classList.toggle("collapsed");}
+function openSrcEdit(id){
+  const s=CFG.sources.find(x=>x.id===id);if(!s)return;
+  $("seId").value=id;$("seName").value=s.name||"";$("seApi").value=s.api||"";
+  const apiInp=$("seApi"),hint=$("seHint"),isGuard=!!s.guard;
+  apiInp.disabled=isGuard||!!s.builtin;
+  hint.textContent=isGuard?"加固源订阅请在「TVBox 加固」页管理，这里仅可改名称。"
+    :(s.builtin?"内置源仅可改显示名称；更换接口请删除后以自定义源重新添加。"
+    :"自定义源可改名称与接口地址；改地址后源 ID 会重建，搜索缓存自动清空。");
+  $("srcEditMask").classList.add("show");setTimeout(()=>$("seName").focus(),50);
+}
+function closeSrcEdit(){$("srcEditMask").classList.remove("show");}
+document.addEventListener("keydown",e=>{if(e.key==="Escape"){const m=$("srcEditMask");if(m)m.classList.remove("show");}});
+async function saveSrcEdit(){
+  const id=$("seId").value,name=$("seName").value.trim(),api=$("seApi").value.trim();
+  const s=CFG.sources.find(x=>x.id===id);if(!s)return;
+  if(!name){toast("名称不能为空","fail");return;}
+  if(!api){toast("接口地址不能为空","fail");return;}
+  const body={id,name};if(!s.builtin&&!s.guard)body.api=api;
+  const r=await jpost("/v/api/ext/source/update",body);
+  if(r.code===0){toast("已保存");closeSrcEdit();await loadStatus();renderSources();}
+  else toast(r.msg||"保存失败","fail");
 }
 function srcName(id){const s=CFG.sources.find(x=>x.id===id);return s?s.name:id;}
 async function toggleEnable(id,on){
@@ -1208,6 +1383,7 @@ async function testOne(id,tr){
   tr.querySelector("[data-test]").disabled=false;
 }
 async function testAll(){
+  const bar=$("srcCollapseBar");if(bar&&bar.classList.contains("collapsed")){bar.classList.remove("collapsed");renderSources();}
   toast("正在并发测速…");
   $$("#srcRows [data-st]").forEach(el=>{el.className="st wait";el.textContent="测试中…";});
   const r=await jpost("/v/api/ext/source/test-all",{});
@@ -1477,7 +1653,61 @@ async function restoreBuiltin(){
   if(r.code===0){toast("已恢复内置源");await loadStatus();}else toast("失败","fail");
 }
 
+/* ---------- CMS 源导入 / 导出 ---------- */
+async function exportCmsSources(){
+  try{
+    const r=await jget("/v/api/ext/source/export"),list=(r.data&&r.data.sources)||[];
+    if(!list.length){toast("当前没有可导出的 CMS 源","fail");return;}
+    const blob=new Blob([JSON.stringify(r.data,null,2)],{type:"application/json"});
+    const a=document.createElement("a");a.href=URL.createObjectURL(blob);
+    a.download="fnmedia-cms-sources.json";document.body.appendChild(a);a.click();
+    setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);
+    toast("已导出 "+list.length+" 个 CMS 源");
+  }catch(e){toast("导出失败："+e.message,"fail");}
+}
+async function importCmsFile(input){
+  const f=input.files&&input.files[0];if(!f)return;
+  try{
+    const text=await f.text();let data;
+    try{data=JSON.parse(text);}catch(_){toast("文件不是合法 JSON","fail");input.value="";return;}
+    const body=Array.isArray(data)?{sources:data}:data;
+    const r=await jpost("/v/api/ext/source/import-file",body);
+    if(r.code===0){const d=r.data||{};
+      toast(`导入完成：新增 ${d.added}，已存在跳过 ${d.skipped}，忽略非CMS ${d.ignored_noncms}`);
+      await loadStatus();renderSources();
+    }else toast(r.msg||"导入失败","fail");
+  }catch(e){toast("导入失败："+e.message,"fail");}
+  finally{input.value="";}
+}
+
 /* ---------- 搜索设置 / 噪音词 / 缓存 ---------- */
+async function loadCacheStatus(){
+  const box=$("cacheGrid");if(!box)return;
+  try{
+    const r=await jget("/v/api/ext/cache"),d=r.data||{};
+    const fmtB=n=>n>=1048576?(n/1048576).toFixed(2)+" MB":(n>=1024?(n/1024).toFixed(1)+" KB":n+" B");
+    const items=[
+      ["titles","在线资源缓存",d.titles&&(fmtB(d.titles.bytes)+" · "+d.titles.entries+" 条"),"清后将重启服务"],
+      ["charts","热门榜单缓存",d.charts&&fmtB(d.charts.bytes),"后台自动重抓"],
+      ["catalog","海量库分类/分页",d.catalog&&(d.catalog.routes+" 路由 · "+d.catalog.pages+" 分页"),"下次浏览重建"],
+      ["search","搜索结果内存缓存",d.search&&(d.search.entries+" 条"),"即时清空不重启"],
+      ["health","源健康画像",d.health&&(d.health.entries+" 源"),"清空后重新画像"],
+    ];
+    box.innerHTML=items.map(([k,label,val,note])=>`<div class="cache-item">
+      <div class="cn">${label}</div><div class="cv">${val||"-"}<br><span style="opacity:.7">${note}</span></div>
+      <button class="small danger" style="width:100%" onclick="clearCaches(['${k}'])">清除</button></div>`).join("");
+  }catch(e){box.innerHTML='<div class="muted sm">读取失败</div>';}
+}
+async function clearCaches(targets){
+  const labels={titles:"在线资源缓存（会重启服务）",charts:"热门榜单",catalog:"海量库",search:"搜索缓存",health:"源健康画像"};
+  const names=targets.map(t=>labels[t]||t).join("、");
+  if(!confirm("确定清除："+names+" ？"))return;
+  const r=await jpost("/v/api/ext/cache/clear",{targets});
+  if(r.code===0){toast(r.msg||"已清除");
+    if((r.data||{}).restart)setTimeout(()=>location.reload(),1800);
+    else setTimeout(loadCacheStatus,600);
+  }else toast(r.msg||"清除失败","fail");
+}
 function renderKw(){
   $("kwN").textContent="（共 "+KWS.length+" 个）";
   $("kwChips").innerHTML=KWS.map((k,i)=>`<span class="chip">${esc(k)}<b data-i="${i}" title="删除">×</b></span>`).join("");
@@ -1531,6 +1761,65 @@ async function loadOnline(){
 
 
 
+/* ---------- 资源站取源代理（搜索/分类/测速，视频流仍直连） ---------- */
+function initSrcProxy(){
+  const p=(CFG&&CFG.source_proxy)||"";
+  const en=$("srcProxyEnable"),inp=$("srcProxyUrl"),sb=$("srcProxySaveBtn"),cb=$("srcProxyClearBtn"),msg=$("srcProxyMsg");
+  if(!en)return;
+  inp.value=p;en.checked=!!p;inp.disabled=!en.checked;sb.disabled=!en.checked;cb.disabled=!p;
+  msg.textContent=p?"取源请求按下方模式决定是否经代理，视频流仍直连":"当前未设代理（全部直连）";
+  msg.style.color="";renderSrcProxyMode();
+}
+const SRC_MODE_HINT={
+  auto:"🪄 智能：默认直连；只有直连失败的资源站自动切代理，其它站保持直连。",
+  on:"始终走代理：所有资源站搜索/分类/测速/解析都经代理，视频流仍直连。",
+  off:"全部直连：忽略已配置的代理地址。"
+};
+function renderSrcProxyMode(){
+  const mode=(CFG&&CFG.source_proxy_mode)||"auto",seg=$("srcProxyMode"),hint=$("srcProxyModeHint");
+  if(!seg)return;
+  seg.querySelectorAll("button").forEach(b=>b.classList.toggle("active",b.dataset.mode===mode));
+  if(hint)hint.textContent=SRC_MODE_HINT[mode]||SRC_MODE_HINT.auto;
+}
+async function setSrcProxyMode(mode){
+  const proxy=$("srcProxyUrl").value.trim();
+  if(mode!=="off"&&proxy&&proxy!==((CFG&&CFG.source_proxy)||""))await saveSrcProxy(false);
+  const r=await jpost("/v/api/ext/source-proxy",{proxy:(CFG&&CFG.source_proxy)||"",mode});
+  if(r.code===0){CFG.source_proxy_mode=(r.data&&r.data.mode)||mode;renderSrcProxyMode();
+    toast({auto:"已切换为智能模式",on:"已切换为始终走代理",off:"已切换为全部直连"}[mode]);
+  }else toast(r.msg||"切换失败","fail");
+}
+function onSrcProxyToggle(){
+  const en=$("srcProxyEnable"),inp=$("srcProxyUrl"),sb=$("srcProxySaveBtn");
+  inp.disabled=!en.checked;sb.disabled=!en.checked;if(en.checked)inp.focus();
+}
+async function saveSrcProxy(test){
+  const inp=$("srcProxyUrl"),msg=$("srcProxyMsg"),proxy=inp.value.trim();
+  if(!proxy){toast("请填写代理地址，或点清空直连","fail");return;}
+  msg.textContent="保存并测试资源站连通性…";msg.style.color="";
+  try{
+    const mode=(CFG&&CFG.source_proxy_mode)||"auto";
+    const r=await jpost("/v/api/ext/source-proxy",{proxy,mode});
+    if(r.code!==0){msg.textContent="未保存："+(r.msg||"格式错误");msg.style.color="var(--err)";return;}
+    CFG.source_proxy=proxy;CFG.source_proxy_mode=(r.data&&r.data.mode)||mode;renderSrcProxyMode();
+    const d=r.data||{};
+    if(test){msg.textContent=d.test_ok?("✓ 已保存，经代理测速成功（"+(d.test_msg||"")+"）")
+      :("已保存，但经代理测速失败："+(d.test_msg||"可稍后在资源站页测速"));
+      msg.style.color=d.test_ok?"var(--ok)":"var(--warn)";
+    }else msg.textContent="已保存";
+    $("srcProxyClearBtn").disabled=false;toast("源代理已保存");
+  }catch(e){msg.textContent="请求失败："+String(e);msg.style.color="var(--err)";}
+}
+async function clearSrcProxy(){
+  if(!confirm("清空资源站代理地址并全部直连？"))return;
+  const r=await jpost("/v/api/ext/source-proxy",{proxy:"",mode:"off"});
+  if(r.code===0){CFG.source_proxy="";CFG.source_proxy_mode="off";
+    $("srcProxyUrl").value="";$("srcProxyEnable").checked=false;
+    $("srcProxyUrl").disabled=true;$("srcProxySaveBtn").disabled=true;$("srcProxyClearBtn").disabled=true;
+    renderSrcProxyMode();$("srcProxyMsg").textContent="已清空，当前直连";toast("已清空代理");
+  }else toast(r.msg||"失败","fail");
+}
+
 /* ---------- 初始化 ---------- */
 async function loadStatus(){
   STATUS=await jget("/v/api/ext/status");
@@ -1547,7 +1836,7 @@ async function init(){
   $("lineAutofail").checked=CFG.line_autofail!==false;
   $("fastestMax").value=CFG.line_fastest_max||6;
   $("fastestTimeout").value=CFG.line_fastest_timeout||4;
-  renderKw();renderSources();
+  renderKw();renderSources();initSrcProxy();loadCacheStatus();
   const gs=$("globalState");gs.textContent="接管运行中 · 已缓存 "+STATUS.cached_titles;gs.className="dot ok";
   const ed=$("aboutEdition");if(ed)ed.textContent=(FEAT_DDUO?"完整版（本地全功能）":"公开版")+" · 在飞牛原生搜索与媒体库中注入在线影视";
   loadOnline();

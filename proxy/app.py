@@ -314,7 +314,7 @@ def chart_card(item: dict) -> dict:
     overview = item.get("desc") or ("、".join(tags) if tags else "")
     title = item["title"]
     guid = item["guid"]
-    return {
+    row = {
         "guid": guid,
         # TV/盒子端(Flutter)列表模型要求 video_guid/path/runtime，缺失会整库“加载失败”；
         # 手机端较宽松。video_guid 与播放/详情接口用的 video_guid(guid) 保持一致。
@@ -358,6 +358,7 @@ def chart_card(item: dict) -> dict:
         "single_child_guid": "",
         "file_name": "",
     }
+    return _vod_directory_card(row)
 
 
 def prewarm_persist_mode() -> bool:
@@ -393,6 +394,9 @@ def _restore_chart_bindings() -> int:
                 brief = chartbind.bind_store.get(guid)
                 if not brief:
                     continue
+                if not _chart_binding_matches(guid, brief):
+                    chartbind.bind_store.forget(guid)
+                    continue
                 b = dict(brief)
                 b["guid"] = guid  # 确保挂到榜单卡片 guid
                 try:
@@ -405,6 +409,59 @@ def _restore_chart_bindings() -> int:
         return 0
 
 
+_CHART_VARIANT_SUFFIX_RE = re.compile(
+    r"^(?:(?:普通话|国语|粤语|英语|日语|韩语|中字|中英双字|中文字幕|"
+    r"hd|高清|超清|蓝光|完整版|未删减|正片)+)$", re.I)
+
+
+def _chart_title_rank(item: dict, brief: dict) -> int:
+    """榜单→资源站片名相关度：完整同名最优先，其次仅允许语言/清晰度后缀。
+    不能沿用 242 的任意包含匹配，否则《突如其来》会错绑《突如其来的假期》。"""
+    want = _norm_title(item.get("title", ""))
+    name = _norm_title(brief.get("title", ""))
+    if not want or not name:
+        return 99
+    want_year = str(item.get("year") or "")
+    brief_year = str(brief.get("year") or "")
+    if want_year and brief_year and want_year != brief_year:
+        return 99
+    if name == want:
+        return 0
+    if name.startswith(want):
+        suffix = name[len(want):]
+        if suffix and _CHART_VARIANT_SUFFIX_RE.fullmatch(suffix):
+            return 1
+    tokens = [_norm_title(t) for t in re.split(r"[\s]+", item.get("title", ""))
+              if _norm_title(t)]
+    if len(tokens) > 1 and all(tok in name for tok in tokens):
+        return 2
+    return 99
+
+
+def _chart_binding_matches(guid: str, brief: dict | None) -> bool:
+    item = chart_cache.get_guid(guid)
+    return bool(item and brief and _chart_title_rank(item, brief) < 99)
+
+
+def _drop_chart_binding(guid: str) -> None:
+    """废弃已落盘的错误榜单绑定，并同步清理内存播放索引。"""
+    try:
+        with store._lock:
+            store._titles.pop(guid, None)
+            store._orig.pop(guid, None)
+            store._dirty = True
+            store._rebuild_index()
+        chartbind.bind_store.forget(guid)
+    except Exception:
+        pass
+
+
+def _best_chart_brief(item: dict, briefs: list[dict]) -> dict | None:
+    ranked = sorted(((_chart_title_rank(item, b), i, b)
+                     for i, b in enumerate(briefs)), key=lambda x: (x[0], x[1]))
+    return ranked[0][2] if ranked and ranked[0][0] < 99 else None
+
+
 def start_resolve_chart(guid: str, *, prefetch: bool = False,
                         force: bool = False) -> asyncio.Future | None:
     """启动榜单 guid 的后台解析（单飞），立即返回在途 Future；不阻塞当前请求。
@@ -414,6 +471,9 @@ def start_resolve_chart(guid: str, *, prefetch: bool = False,
     不限流，保证优先级。force=True 忽略近期失败冷却（播放页 phwait 重试时用，
     避免一次瞬时搜不到就被锁 10 分钟、热门片一直占位不恢复）。"""
     existing = store.get_title_by_guid(guid)
+    if existing and not _chart_binding_matches(guid, existing):
+        _drop_chart_binding(guid)
+        existing = None
     if existing:
         return None
     if not force and _chart_cooldown_left(guid) > 0:
@@ -443,74 +503,17 @@ def start_resolve_chart(guid: str, *, prefetch: bool = False,
             if not item:
                 fut.set_result(None)
                 return
-            # 两阶段找源，兼顾“秒播”与“不丢慢源独有片”：
-            # 1) 先只查秒回的标准 CMS 直链源（跳过加固/drpy 慢源），6s 软超时——
-            #    绝大多数热门片在此即绑定，冷点击也能秒播；
-            # 2) 快源里无严格同名同年结果时，再跑一次全源（含加固慢源）兜底，
-            #    避免“只有慢源有该片”时永远占位。
-            # 榜单绑定知道确切片名，给较宽候选窗口再严格同名同年筛选：部分资源站
-            # 搜不到时会回吐全站热榜（动辄上千集的无关长剧），按直链总数排序会把
-            # 真正同名的组挤出全局搜索的前 12，导致热门片误判“无源”一直占位。
+            # 快源优先绑定，避免全源慢搜索超过首次播放等待窗口；只有无可靠匹配时
+            # 才全源兜底。两阶段共用同名/变体/年份校验，绝不放宽错片绑定。
             briefs = await asyncio.wait_for(
-                _aggregate_briefs(item["title"], _CHART_BIND_MAXN, fast_only=True,
-                                  soft_timeout=6.0, include_t4=False), timeout=9)
-            # 严格防串片：规范片名必须【完全相等】，且榜单有年份时年份必须一致。
-            # 不做子串包含、不做 briefs[0] 宽松兜底——同名老片/短片/不同版本曾因此
-            # 被绑到榜单卡片，切线路播出与海报不符的另一部片。
-            want = _norm_title(item["title"])
-            want_year = str(item.get("year") or "")
-
-            def _same_title_year(b: dict) -> bool:
-                if _norm_title(b.get("title", "")) != want:
-                    return False
-                by = str(b.get("year") or "")
-                if want_year and by and by != want_year:
-                    return False
-                return True
-
-            same = [b for b in briefs if _same_title_year(b)]
-            best = same[0] if same else None
-            if best is None and guid not in _CHART_SLOW_RUNNING:
-                # 快源无源：后台再查全源（含加固慢源）兜底，不阻塞本次响应/播放页窗口。
-                _CHART_SLOW_RUNNING.add(guid)
-
-                async def _slow_fallback():
-                    try:
-                        if store.get_title_by_guid(guid):
-                            return
-                        fb = await asyncio.wait_for(
-                            _aggregate_briefs(item["title"], _CHART_BIND_MAXN,
-                                              include_t4=False), timeout=25)
-                        fs = [b for b in fb if _same_title_year(b)]
-                        if fs and not store.get_title_by_guid(guid):
-                            fb_best = fs[0]
-                            bound = dict(fb_best)
-                            bound["guid"] = guid
-                            bound["chart"] = {"title": item["title"],
-                                              "cat": item["cat"],
-                                              "cover": item.get("cover", ""),
-                                              "rating": item.get("rating", 0)}
-                            _chart_resolved[guid] = bound
-                            store.remember_merged([bound])
-                            _persist_chart_binding(guid, bound)
-                            schedule_prewarm_title(guid, 0)
-                            _PENDING_MEDIA_CHART.pop(media_guid(guid), None)
-                            _CHART_FAILED_TS.pop(guid, None)
-                            _CHART_FAIL_LEVEL.pop(guid, None)
-                        elif not fs:
-                            # 快源+全源均确认无源：置“dead”长冷却，期间只回占位。
-                            _CHART_FAIL_LEVEL[guid] = "dead"
-                            _CHART_FAILED_TS[guid] = time.time()
-                    except Exception:
-                        pass
-                    finally:
-                        _CHART_SLOW_RUNNING.discard(guid)
-
-                asyncio.create_task(_slow_fallback())
-
-            if best is None and briefs:
-                _log.info("榜单《%s》%s 快源无严格同名同年源，转慢源兜底",
-                          item.get("title"), want_year)
+                _aggregate_briefs(item["title"], _CHART_BIND_MAXN,
+                                  fast_only=True, soft_timeout=6.0,
+                                  include_t4=False), timeout=8.0)
+            best = _best_chart_brief(item, briefs)
+            if best is None:
+                briefs = await asyncio.wait_for(
+                    _aggregate_briefs(item["title"], _CHART_BIND_MAXN), timeout=25)
+                best = _best_chart_brief(item, briefs)
             if best is not None:
                 # 关键：把可播放 brief 的身份换成 chart guid，使播放链挂到榜单卡片
                 bound = dict(best)
@@ -550,6 +553,9 @@ async def resolve_chart(guid: str, *, force: bool = False) -> dict | None:
     单 flight；命中后在内存和 store 都登记，之后整条 season/episode/play 链复用。
     """
     existing = store.get_title_by_guid(guid)
+    if existing and not _chart_binding_matches(guid, existing):
+        _drop_chart_binding(guid)
+        existing = None
     if existing:
         return existing
     fut = start_resolve_chart(guid, force=force)
@@ -614,11 +620,8 @@ _LINE_FILL_INFLIGHT = 0
 
 
 def start_fill_lines(og: str) -> None:
-    """播放普通库片时，后台按片名全网聚合，把同名同部影片的更多 CMS 线路并入
-    当前记录（让非热门库也能像热门库一样显示完整、名称规范的线路菜单）。
-
-    非阻塞：第一次请求先用记录内既有线路秒播，聚合完成后下次取 preset/重开菜单
-    即看到完整线路。只补标准 CMS 直链源（fast），不触碰网盘/加固慢源。"""
+    """仅做同名同年线路数据聚合，不改变242的竞速/选线/清单/分片策略。
+    最多2个后台任务；首次播放仍先用现有线路，聚合完成后重开线路菜单显示全集。"""
     if not og or chart_cache.is_chart_guid(og):
         return
     now = time.time()
@@ -632,7 +635,6 @@ def start_fill_lines(og: str) -> None:
 
     async def work():
         global _LINE_FILL_INFLIGHT
-        # 高负载下补线排队：最多 2 个并发，避免抢占事件循环拖慢海报/播放
         async with _LINE_FILL_SEM:
             _LINE_FILL_INFLIGHT += 1
             try:
@@ -1329,7 +1331,8 @@ async def forward_upstream_streaming(request: Request) -> Response:
 async def _aggregate_briefs(keyword: str, maxn: int | None = None,
                             fast_only: bool = False,
                             soft_timeout: float | None = None,
-                            *, include_t4: bool = True) -> list[dict]:
+                            *, include_t4: bool = True,
+                            refresh: bool = False) -> list[dict]:
     """聚合搜索所有启用源 → 跨源合并 → 去噪/去无直链 → brief 列表（已入库）。
     fast_only=True 时只查秒回的标准 CMS 直链源（跳过加固/drpy 等慢源），供播放
     失败时快速回源，避免被 redroid 慢源拖到网关超时。
@@ -1338,10 +1341,12 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
     搜索复用同一份聚合结果，并以单飞去重并发扇出，不重复拉取所有源。"""
     cache_key = f"{keyword}\x00{int(bool(fast_only))}\x00{int(bool(include_t4))}"
     loop = asyncio.get_event_loop()
-    _hit = _AGG_CACHE.get(cache_key)
+    _hit = None if refresh else _AGG_CACHE.get(cache_key)
     if _hit and (time.time() - _hit[0]) < AGG_CACHE_TTL:
         return [dict(b) for b in _hit[1]]
-    _fut = _AGG_INFLIGHT.get(cache_key)
+    # refresh=True 用于绑定搜索的网络重试：必须绕过负缓存与旧在途任务，
+    # 否则一次偶发空结果会被当成“无源”持续复用。
+    _fut = None if refresh else _AGG_INFLIGHT.get(cache_key)
     if _fut is not None and not _fut.done():
         try:
             return [dict(b) for b in await _fut]
@@ -1643,7 +1648,7 @@ def _hot_card(brief: dict, cat: str) -> dict:
     row["ancestor_name"] = hot_cat_title(cat)
     row["ancestor_category"] = hot_cat_category(cat)
     row["video_guid"] = video_guid(brief["guid"])
-    return row
+    return _vod_directory_card(row)
 
 
 def _hot_cat_items(cat: str) -> list[dict]:
@@ -1665,7 +1670,8 @@ def _hot_rows_all(body: dict, cat: str) -> list[dict]:
             media_wanted.discard("Movie,TV")
             media_wanted.update({"Movie", "TV"})
         if media_wanted:
-            rows = [r for r in rows if r.get("type") in media_wanted]
+            rows = [r for r in rows
+                    if r.get("type") in media_wanted or r.get("type") == "Directory"]
         watched = str(tags.get("watched") or "")
         if watched in {"0", "1"}:
             want_watched = watched == "1"
@@ -1680,7 +1686,8 @@ def _hot_rows_all(body: dict, cat: str) -> list[dict]:
     elif isinstance(tags, list):
         wanted = set(tags) & {"Movie", "TV"}
         if wanted:
-            rows = [r for r in rows if r.get("type") in wanted]
+            rows = [r for r in rows
+                    if r.get("type") in wanted or r.get("type") == "Directory"]
 
     rows = [_apply_marks(r) for r in rows]
     if int(body.get("is_favorite") or 0):
@@ -1728,11 +1735,13 @@ def _chart_rows_all(body: dict, cat: str) -> list[dict]:
             media_wanted.discard("Movie,TV")
             media_wanted.update({"Movie", "TV"})
         if media_wanted:
-            rows = [r for r in rows if r.get("type") in media_wanted]
+            rows = [r for r in rows
+                    if r.get("type") in media_wanted or r.get("type") == "Directory"]
     elif isinstance(tags, list):
         wanted = set(tags) & {"Movie", "TV"}
         if wanted:
-            rows = [r for r in rows if r.get("type") in wanted]
+            rows = [r for r in rows
+                    if r.get("type") in wanted or r.get("type") == "Directory"]
     rows = [_apply_marks(r) for r in rows]
     if int(body.get("is_favorite") or 0):
         rows = [r for r in rows if r.get("is_favorite")]
@@ -1768,7 +1777,7 @@ def _catalog_card(brief: dict, cat: str) -> dict:
     row["ancestor_name"] = catalogmod.catalog_title(cat)
     row["ancestor_category"] = catalogmod.catalog_mdb(cat)
     row["video_guid"] = video_guid(brief["guid"])
-    return row
+    return _vod_directory_card(row)
 
 
 def _catalog_filter(rows: list[dict], body: dict) -> list[dict]:
@@ -1779,11 +1788,13 @@ def _catalog_filter(rows: list[dict], body: dict) -> list[dict]:
         if "Movie,TV" in mw:
             mw.discard("Movie,TV"); mw.update({"Movie", "TV"})
         if mw:
-            rows = [r for r in rows if r.get("type") in mw]
+            rows = [r for r in rows
+                    if r.get("type") in mw or r.get("type") == "Directory"]
     elif isinstance(tags, list):
         wanted = set(tags) & {"Movie", "TV"}
         if wanted:
-            rows = [r for r in rows if r.get("type") in wanted]
+            rows = [r for r in rows
+                    if r.get("type") in wanted or r.get("type") == "Directory"]
     rows = [_apply_marks(r) for r in rows]
     if int(body.get("is_favorite") or 0):
         rows = [r for r in rows if r.get("is_favorite")]
@@ -2161,6 +2172,239 @@ async def mediadb_sum(request: Request):
 
 
 
+_LINE_FOLDER_PREFIX = "fnmedia-line-folder:"
+_LINE_ITEM_PREFIX = "fnmedia-line-item:"
+_LINE_SEASON_PREFIX = "fnmedia-line-season:"
+
+
+def _line_season_guid(og: str, line: str, season: int = 1) -> str:
+    raw = f"{og}|{line}|{int(season or 1)}".encode("utf-8")
+    return _LINE_SEASON_PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _parse_line_season_guid(guid: str) -> tuple[str, str, int] | None:
+    if not isinstance(guid, str) or not guid.startswith(_LINE_SEASON_PREFIX):
+        return None
+    try:
+        token = guid[len(_LINE_SEASON_PREFIX):]
+        token += "=" * (-len(token) % 4)
+        og, line, season = base64.urlsafe_b64decode(token.encode()).decode().split("|", 2)
+        return og, line, int(season or 1)
+    except Exception:
+        return None
+
+
+def _line_folder_guid(og: str) -> str:
+    if isinstance(og, str) and og.startswith(_LINE_FOLDER_PREFIX):
+        return og  # 幂等，避免多次包装
+    return _LINE_FOLDER_PREFIX + og
+
+
+def _parse_line_folder_guid(guid: str) -> str | None:
+    if isinstance(guid, str) and guid.startswith(_LINE_FOLDER_PREFIX):
+        return guid[len(_LINE_FOLDER_PREFIX):]
+    return None
+
+
+def _line_item_guid(og: str, line: str, index: int = 0) -> str:
+    raw = f"{og}|{line}|{int(index or 0)}".encode("utf-8")
+    return _LINE_ITEM_PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _parse_line_item_guid(guid: str) -> tuple[str, str, int] | None:
+    if not isinstance(guid, str) or not guid.startswith(_LINE_ITEM_PREFIX):
+        return None
+    try:
+        token = guid[len(_LINE_ITEM_PREFIX):]
+        token += "=" * (-len(token) % 4)
+        og, line, index = base64.urlsafe_b64decode(token.encode()).decode().split("|", 2)
+        return og, line, int(index or 0)
+    except Exception:
+        return None
+
+
+def _vod_directory_card(row: dict) -> dict:
+    """一级影片卡改为文件夹；进入后陈列该片线路海报，不展开季集。"""
+    row["type"] = "Directory"
+    row["guid"] = _line_folder_guid(row["guid"])
+    row["can_play"] = 0
+    row["play_item_guid"] = ""
+    row["play_error"] = ""
+    row["ancestor_category"] = "Mix"
+    row["number_of_episodes"] = 0
+    row["number_of_seasons"] = 0
+    row["local_number_of_episodes"] = 0
+    row["local_number_of_seasons"] = 0
+    row["season_number"] = 0
+    row["episode_number"] = 0
+    return row
+
+
+def _vod_resume_index(brief: dict) -> int:
+    if not inj.is_tv(brief):
+        return 0
+    try:
+        ep_guids = store.tv_episode_guids(brief.get("guid", ""), regular_only=True)
+        target_eg, _ = history.resume_episode(ep_guids)
+        ep = store.get_episode(target_eg) if target_eg else None
+        return int((ep or {}).get("index", 0) or 0)
+    except Exception:
+        return 0
+
+
+def _vod_line_card(brief: dict, line: str, index: int, parent: str) -> dict:
+    og = brief["guid"]
+    provider = line.split("::", 1)[0]
+    source = _provider_display(provider)
+    title = brief.get("title", "")
+    row = inj.detail_item(brief)
+    item_guid = _line_item_guid(og, line, index)
+    folder_guid = _line_folder_guid(og)
+    is_tv = inj.is_tv(brief)
+    if is_tv:
+        try:
+            ep_count = len(store.list_episodes(og, line))
+        except Exception:
+            ep_count = int(row.get("number_of_episodes") or 0)
+        row.update({
+            "type": "TV",
+            "number_of_seasons": 1,
+            "number_of_episodes": ep_count,
+        })
+    else:
+        row.update({
+            "type": "Movie",
+            "number_of_seasons": 0,
+            "number_of_episodes": 0,
+            "local_number_of_episodes": 0,
+            "local_number_of_seasons": 0,
+        })
+    row.update({
+        "guid": item_guid,
+        "title": f"{source}｜{title}",
+        "can_play": 1,
+        "play_item_guid": item_guid,
+        "parent_guid": folder_guid,
+        "parent_title": title,
+        "ancestor_guid": folder_guid,
+        "ancestor_name": title,
+        "ancestor_category": row.get("type"),
+        "local_number_of_episodes": 0,
+        "local_number_of_seasons": 0,
+        "overview": f"来源：{source}\n点击按该线路直接播放，不自动竞速。\n\n"
+                    + (brief.get("overview") or ""),
+    })
+    return _apply_marks(row)
+
+
+def _fixed_media_target(mg: str, request: Request | None = None) -> dict | None:
+    """线路卡 guid -> 固定线路播放目标；不进入任何自动选优。"""
+    parsed = _parse_line_item_guid(mg)
+    if not parsed:
+        return None
+    og, line, index = parsed
+    if request is not None:
+        try:
+            index = int(request.query_params.get("index", index) or index)
+        except (TypeError, ValueError):
+            pass
+    brief = store.get_title_by_guid(og)
+    if not brief:
+        return None
+    target = store.resolve_episode(og, line, index)
+    if not target:
+        return None
+    is_tv = inj.is_tv(brief)
+    return dict(target, online_guid=og, title=brief.get("title", ""),
+                ep_guid=episode_guid(og, "", index) if is_tv else "",
+                kind="episode" if is_tv else "title", _fixed_line=True)
+
+
+def _vod_folder_detail(guid: str, client) -> JSONResponse | None:
+    """仅专用文件夹 guid 返回目录；原影片详情与播放身份保持不变。"""
+    og = _parse_line_folder_guid(guid)
+    if not og:
+        return None
+    brief = store.get_title_by_guid(og)
+    if brief:
+        row = inj.detail_item(brief)
+    else:
+        item = chart_cache.get_guid(og)
+        if not item:
+            return None
+        row = chart_card(item)
+    row["guid"] = _line_folder_guid(og)
+    row = _vod_directory_card(row)
+    return JSONResponse({"code": 0, "msg": "", "data":
+                         clientmod.normalize_detail(row, client)})
+
+
+def _vod_line_detail(guid: str, client) -> JSONResponse | None:
+    parsed = _parse_line_item_guid(guid)
+    if not parsed:
+        return None
+    og, line, index = parsed
+    brief = store.get_title_by_guid(og)
+    if not brief:
+        return None
+    source = _provider_display(line.split("::", 1)[0])
+    row = _vod_line_card(brief, line, index, og)
+    return JSONResponse({"code": 0, "msg": "", "data":
+                         clientmod.normalize_detail(row, client)})
+
+
+async def _vod_line_folder(parent: str, body: dict, client) -> JSONResponse:
+    """二级线路海报墙：整片/整剧按线路直接播放，不展示每集。
+
+    文件夹打开必须快速返回：已有绑定立即出线路；未绑定只给极短等待，后台单飞继续
+    绑定，下一次轮询/重进即可显示完整线路，避免二级菜单卡 8 秒。
+    """
+    brief = store.get_title_by_guid(parent)
+    if not brief and chart_cache.is_chart_guid(parent):
+        # 客户端不会在空目录上自动轮询，因此冷片首次进入必须在本次请求内等待
+        # 绑定完成。已绑定影片在函数开头即可直接出线路，仍保持毫秒级二级菜单。
+        start_resolve_chart(parent)
+        fut = _chart_resolving.get(parent)
+        if fut is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(fut), timeout=8.0)
+            except Exception:
+                pass
+        brief = store.get_title_by_guid(parent)
+    title = (brief or chart_cache.get_guid(parent) or {}).get("title", "")
+    if not brief:
+        return JSONResponse({"code": 0, "msg": "", "data": {
+            "mdb_name": title or "线路", "mdb_category": "Movie", "top_dir": "",
+            "dir": parent, "total": 0, "list": [], "jump_list": None}})
+    index = _vod_resume_index(brief)
+    lines = store.target_lines({"online_guid": parent, "index": index})
+    # 同一资源站常有“解析线 + m3u8直放线”两种技术线路。二级海报墙按来源聚合，
+    # 每个来源只展示一张卡，优先 m3u8/直放线；解析线仍可进入播放后的线路菜单。
+    source_rows: dict[str, dict] = {}
+    for t in lines:
+        line = t.get("line")
+        if not line:
+            continue
+        provider = line.split("::", 1)[0]
+        old = source_rows.get(provider)
+        if old is None:
+            source_rows[provider] = t
+            continue
+        old_direct = bool(old.get("m3u8") or not old.get("resolve"))
+        new_direct = bool(t.get("m3u8") or not t.get("resolve"))
+        if new_direct and not old_direct:
+            source_rows[provider] = t
+    rows = [_vod_line_card(brief, t["line"], index, parent)
+            for t in source_rows.values() if t.get("line")]
+    rows = clientmod.normalize_cards(rows, client)
+    # 电视剧线路墙仍归入 TV，保证客户端加载剧集模型与选集入口。
+    mdb_category = "TV" if inj.is_tv(brief) else "Movie"
+    return JSONResponse({"code": 0, "msg": "", "data": {
+        "mdb_name": f"{brief.get('title', '')} · {len(rows)}条线路",
+        "mdb_category": mdb_category, "top_dir": "", "dir": parent,
+        "total": len(rows), "list": rows, "jump_list": None}})
+
+
 @app.post("/v/api/v1/item/list")
 async def item_list(request: Request):
     raw = await request.body()
@@ -2213,6 +2457,11 @@ async def item_list(request: Request):
 
     # —— 小雅分类媒体库 ——
 
+    # —— TVBox 式二级线路海报墙：一级影片文件夹，二级固定线路 VOD 卡 ——
+    folder_og = _parse_line_folder_guid(parent)
+    if folder_og:
+        return await _vod_line_folder(folder_og, body, client)
+
     # —— 单源独立媒体库：该源四类交错成一条最近更新流 ——
     sscope = standalone_source_of(aguid) if aguid else None
     if sscope is not None and \
@@ -2241,7 +2490,7 @@ async def item_list(request: Request):
             row["ancestor_category"] = "Mix"
             row["video_guid"] = video_guid(b["guid"])
             _apply_marks(row)
-            rows.append(row)
+            rows.append(_vod_directory_card(row))
         rows = clientmod.normalize_cards(rows, client)
         if offset == 0:
             warm_catalog_briefs(briefs[:18])
@@ -2312,17 +2561,15 @@ async def item_list(request: Request):
     # 匹配一页：用户翻到第 2/3 页点进去时也大多已绑定，preset/main 不必现场等。
     # 仅本页前若干张（≈屏幕可见区）、去重 + 冷却限流，避免翻页压垮聚合源。
     try:
-        _pre = [r.get("guid") for r in out_rows[:18] if r.get("guid")]
+        # 只后台绑定当前屏幕可见的前6张，避免一页18张并发聚合拖慢二次进入；
+        # 绑定是单飞且不阻塞海报墙，二级文件夹可直接复用结果。
+        _pre = [r.get("guid") for r in out_rows[:6] if r.get("guid")]
         for g in _pre:
             if chart_cache.is_chart_guid(g) and not store.get_title_by_guid(g) \
                     and g not in _chart_resolving \
                     and g not in _CHART_SLOW_RUNNING \
                     and _chart_cooldown_left(g) <= 0:
                 start_resolve_chart(g, prefetch=True)
-            elif store.get_title_by_guid(g):
-                # 已绑定的本页影片：后台轻量探测其前几条线，预测出本片最快线，
-                # 用户点进去零竞速秒播（只本页可见区、限并发，不打全站）。
-                schedule_prewarm_title(g, 0)
     except Exception:
         pass
     _payload = {"code": 0, "msg": "", "data": {
@@ -2359,7 +2606,14 @@ async def search_list(request: Request):
             online = await asyncio.wait_for(online_search(q, src_client(request)),
                                             timeout=6.0)
         except asyncio.TimeoutError:
-            online = []
+            # 偶发慢源/直连抖动会撞上 6s 外窗，旧实现直接当“零结果”并造成
+            # 后续播放绑定也失败。只在超时时快速重试一次；正常空结果不重试。
+            _log.info("online search timeout, retry once: %s", q)
+            try:
+                online = await asyncio.wait_for(
+                    online_search(q, src_client(request)), timeout=4.0)
+            except Exception:
+                online = []
         except Exception:
             online = []
     # 在线片库更齐全，默认把在线结果排到前面；可在管理页关闭
@@ -2473,6 +2727,14 @@ async def t4_resource(token: str, request: Request):
 
 @app.get("/v/api/v1/item/{guid}")
 async def item_detail(guid: str, request: Request):
+    if _parse_line_item_guid(guid):
+        fixed_detail = _vod_line_detail(guid, _client_of(request))
+        if fixed_detail is not None:
+            return fixed_detail
+    if _parse_line_folder_guid(guid):
+        folder_detail = _vod_folder_detail(guid, _client_of(request))
+        if folder_detail is not None:
+            return folder_detail
     if guid == T4_LIB_GUID or _t4_node(guid):
         if not _viewer_can_open_lib(request, guid):
             return JSONResponse({"code": -6, "msg": "此媒体库不存在", "data": None})
@@ -2629,17 +2891,36 @@ async def season_list_route(guid: str, request: Request):
     error = await _load_t4_detail(guid, request)
     if error is not None:
         return error
+    parsed_line = _parse_line_item_guid(guid) or _parse_line_season_guid(guid)
+    fixed_line = parsed_line[1] if parsed_line else None
+    fixed_season = parsed_line[2] if parsed_line else 1
+    if parsed_line:
+        guid = parsed_line[0]
     brief = store.get_title_by_guid(guid)
     if not brief or not inj.is_tv(brief):
         return await forward_upstream(request)
     client = _client_of(request)
+    rows = inj.season_list(brief)
+    if fixed_line:
+        for row in rows:
+            try:
+                sn = int(row.get("season_number") or fixed_season or 1)
+            except (TypeError, ValueError):
+                sn = 1
+            row["guid"] = _line_season_guid(guid, fixed_line, sn)
+            row["parent_guid"] = _line_item_guid(guid, fixed_line, 0)
     return JSONResponse({"code": 0, "msg": "",
-                         "data": clientmod.normalize_cards(inj.season_list(brief), client)})
+                         "data": clientmod.normalize_cards(rows, client)})
 
 
 @app.get("/v/api/v1/episode/list/{guid}")
 async def episode_list_route(guid: str, request: Request):
-    # guid 可能是伪造的 season guid，也可能是 tv guid
+    # guid 可能是伪造的 season guid、固定线路卡/线路季 guid，也可能是 tv guid
+    parsed_line = _parse_line_item_guid(guid) or _parse_line_season_guid(guid)
+    fixed_line = parsed_line[1] if parsed_line else None
+    fixed_season = parsed_line[2] if parsed_line else None
+    if parsed_line:
+        guid = parsed_line[0]
     season = store.get_season(guid)
     tv = season["online_guid"] if season else None
     if not tv:
@@ -2652,20 +2933,64 @@ async def episode_list_route(guid: str, request: Request):
     if error is not None:
         return error
     client = _client_of(request)
+    season_number = season["season"] if season else fixed_season
+    rows = inj.episode_list(store.get_title_by_guid(tv), season_number)
+    if fixed_line:
+        line_season = _line_season_guid(tv, fixed_line, season_number or 1)
+        for row in rows:
+            ep_g = row.get("guid")
+            if ep_g:
+                try:
+                    ep_index = int(row.get("episode_number") or 1) - 1
+                except (TypeError, ValueError):
+                    ep_index = 0
+                row["guid"] = _line_item_guid(tv, fixed_line, ep_index)
+                row["media_guid"] = ep_media_guid(ep_g, fixed_line)
+                row["video_guid"] = ep_video_guid(ep_g, fixed_line)
+                row["parent_guid"] = line_season
     return JSONResponse({"code": 0, "msg": "",
-                         "data": clientmod.normalize_cards(
-                             inj.episode_list(store.get_title_by_guid(tv),
-                                              season["season"] if season else None), client)})
+                         "data": clientmod.normalize_cards(rows, client)})
 
 
 @app.get("/v/api/v1/stream/list/{guid}")
 async def stream_list(guid: str, request: Request):
+    return await _stream_list_impl(guid, request)
+
+
+@app.post("/v/api/v1/stream/list")
+async def stream_list_post(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    guid = str(body.get("guid") or body.get("item_guid") or "")
+    if not guid:
+        return await forward_upstream(request)
+    return await _stream_list_impl(guid, request)
+
+
+async def _stream_list_impl(guid: str, request: Request):
     error = await _load_t4_detail(guid, request)
     if error is not None:
         return error
-    ep = store.get_episode(guid)
-    target = None
-    if ep:
+    # TVBox 固定线路卡：按 guid 中携带的影片/线路/集序号返回流容器。
+    fixed = _fixed_media_target(guid, request)
+    if fixed is not None:
+        brief = store.get_title_by_guid(fixed["online_guid"]) or {}
+        ep_guids = store.tv_episode_guids(fixed["online_guid"], regular_only=True) \
+            if inj.is_tv(brief) else []
+        ep = store.get_episode(ep_guids[fixed["index"]]) if ep_guids and fixed["index"] < len(ep_guids) else None
+        if ep is not None:
+            sl = inj.episode_stream_list(ep)
+        else:
+            sl = inj.stream_list(brief)
+        target = fixed
+    else:
+        ep = store.get_episode(guid)
+        target = None
+    if fixed is not None:
+        pass
+    elif ep:
         sl = inj.episode_stream_list(ep)
         target = store.get_episode_target(guid)
     else:
@@ -2741,9 +3066,29 @@ def _online_card_meta(guid: str) -> dict | None:
     return None
 
 
+def _normalize_history_guid(guid: str) -> str:
+    """把带线路身份的复合 guid 归一化为基础影片/集 guid，保证历史、收藏、已看
+    都按原片身份记录，不按资源站拆分；非复合 guid 原样返回。"""
+    if not isinstance(guid, str):
+        return guid or ""
+    parsed = _parse_line_item_guid(guid)
+    if parsed:
+        og, _line, index = parsed
+        brief = store.get_title_by_guid(og)
+        if brief and inj.is_tv(brief):
+            return episode_guid(og, "", index)
+        return og
+    season = _parse_line_season_guid(guid)
+    if season:
+        return season_guid(season[0], season[2])
+    return guid
+
+
 def _is_online_item_guid(guid: str) -> bool:
     if not guid:
         return False
+    if _parse_line_item_guid(guid) or _parse_line_season_guid(guid):
+        return True
     if (guid in CATALOG_GUID_CAT or guid in CHART_GUID_CAT or is_hot_guid(guid)
             or standalone_source_of(guid) is not None):
         return False  # 媒体库根节点不可收藏
@@ -2785,8 +3130,9 @@ async def item_favorite_add(request: Request):
     guid = (body.get("guid") or body.get("item_guid") or "").strip()
     if not _is_online_item_guid(guid):
         return await forward_upstream(request)
-    marks.add_favorite(guid, _mark_extra(guid))
-    return JSONResponse({"code": 0, "msg": "", "data": {"guid": guid}})
+    base = _normalize_history_guid(guid)
+    marks.add_favorite(base, _mark_extra(base))
+    return JSONResponse({"code": 0, "msg": "", "data": {"guid": base}})
 
 
 @app.delete("/v/api/v1/item/favorite")
@@ -2798,7 +3144,7 @@ async def item_favorite_del(request: Request):
     guid = (body.get("guid") or body.get("item_guid") or "").strip()
     if not _is_online_item_guid(guid):
         return await forward_upstream(request)
-    marks.remove_favorite(guid)
+    marks.remove_favorite(_normalize_history_guid(guid))
     return JSONResponse({"code": 0, "msg": "", "data": {"guid": guid}})
 
 
@@ -2817,11 +3163,12 @@ async def item_watched_set(request: Request):
         want = 1
     if not _is_online_item_guid(guid):
         return await forward_upstream(request)
+    base = _normalize_history_guid(guid)
     if want == 0:
-        marks.remove_watched(guid)
+        marks.remove_watched(base)
     else:
-        marks.set_watched(guid, _mark_extra(guid))
-    return JSONResponse({"code": 0, "msg": "", "data": {"guid": guid}})
+        marks.set_watched(base, _mark_extra(base))
+    return JSONResponse({"code": 0, "msg": "", "data": {"guid": base}})
 
 
 @app.delete("/v/api/v1/item/watched")
@@ -2833,7 +3180,7 @@ async def item_watched_del(request: Request):
     guid = (body.get("guid") or body.get("item_guid") or "").strip()
     if not _is_online_item_guid(guid):
         return await forward_upstream(request)
-    marks.remove_watched(guid)
+    marks.remove_watched(_normalize_history_guid(guid))
     return JSONResponse({"code": 0, "msg": "", "data": {"guid": guid}})
 
 
@@ -2938,42 +3285,73 @@ def _online_play_info(guid: str, request: Request) -> dict | None:
     return info
 
 
+def _vod_play_info(guid: str, client) -> JSONResponse | None:
+    parsed = _parse_line_item_guid(guid)
+    if not parsed:
+        return None
+    og, line, index = parsed
+    brief = store.get_title_by_guid(og)
+    if not brief:
+        return None
+    target = store.resolve_episode(og, line, index)
+    if not target:
+        return None
+    is_tv = inj.is_tv(brief)
+    eg = episode_guid(og, "", index)
+    base_guid = eg if is_tv else og
+    if is_tv:
+        ep = store.get_episode(eg)
+        if not ep:
+            return None
+        info = inj.episode_play_info(ep)
+    else:
+        info = inj.play_info(brief)
+    info["guid"] = base_guid
+    # TVBox/VOD：点击即播当前续播集，但保留TV模型以显示选集入口。
+    info["type"] = "TV" if is_tv else "Movie"
+    info["media_guid"] = ep_media_guid(eg, line)
+    info["video_guid"] = ep_video_guid(eg, line)
+    item = inj.detail_item(brief)
+    item.update({
+        "guid": base_guid,
+        "type": "TV" if is_tv else "Movie",
+        "can_play": 1,
+        "play_item_guid": base_guid,
+        "parent_guid": og,
+        "parent_title": brief.get("title", ""),
+        "number_of_episodes": len(store.list_episodes(og, line)) if is_tv else 0,
+        "number_of_seasons": 1 if is_tv else 0,
+        "local_number_of_episodes": 0,
+        "local_number_of_seasons": 0,
+        "overview": f"来源：{_provider_display(line.split('::', 1)[0])}\n"
+                    f"指定线路直接播放，不自动竞速。\n\n{brief.get('overview') or ''}",
+    })
+    info["item"] = item
+    rec = history.get(base_guid)
+    if rec:
+        info["ts"] = rec.get("ts", 0)
+    return JSONResponse({"code": 0, "msg": "", "data":
+                         clientmod.normalize_detail(info, client)})
+
+
 @app.post("/v/api/v1/play/info")
 async def play_info(request: Request):
     import json
     body = json.loads(await request.body() or b"{}")
     guid = body.get("item_guid", "")
     client = _client_of(request)
+    if _parse_line_item_guid(guid):
+        fixed_info = _vod_play_info(guid, client)
+        if fixed_info is not None:
+            return fixed_info
     error = await _load_t4_detail(guid, request)
     if error is not None:
         return error
 
 
     def _prewarm_from_info(info: dict):
-        """点击播放即【并发预热该片全部普通 CMS 线路】的播放列表。
-
-        App/Flutter 拿到 preset master 后会按顺序串行预取每条变体的 main.m3u8，
-        若只预热默认线，其余十几条线在它串行拉到时仍是冷抓（实测 feifan/liangzi/dytt
-        等慢线各 2.5~6s、串行累计成“加载半天”）。play/info 是 App 点片后最早的必经
-        请求，在这里就把全线路清单后台并发建好，等播放器随后串行拉 main 时逐条命中。
-        只预热普通廉价 m3u8（网盘/加固等贵线不碰），与 _warm_preset_lines 同策略。"""
-        try:
-            mg = info.get("media_guid")
-            if not mg:
-                return
-            picked = _pick_episode(mg, request)
-            if not picked:
-                return
-            tgts = store.target_lines(picked)
-            cheap = [t for t in tgts[:_PREWARM_MAX]
-                     if not t.get("_pansou_manual") and not t.get("xsrc")
-                     and not any(t.get(k) for k in ("catvod", "drpy", "guard"))
-                     and (t.get("m3u8") or
-                          re.search(r"\.m3u8(\?|$)", str(t.get("url") or ""), re.I))]
-            if cheap:
-                _warm_preset_lines(mg, cheap, request)
-        except Exception:
-            pass
+        """v0.2.42 按需模式：详情页不触发后台预热。"""
+        return None
 
     ep = store.get_episode(guid)
     rec = history.get(guid)
@@ -2985,6 +3363,10 @@ async def play_info(request: Request):
         return JSONResponse({"code": 0, "msg": "",
                              "data": clientmod.normalize_detail(info, client)})
     brief = store.get_title_by_guid(guid)
+    if brief and chart_cache.is_chart_guid(guid) \
+            and not _chart_binding_matches(guid, brief):
+        _drop_chart_binding(guid)
+        brief = None
     if not brief and chart_cache.is_chart_guid(guid):
         # 网页端必须先拿到 play/info 才会跳转播放页。这里不能长时间等待全网搜源，
         # 否则用户会停在海报墙；先触发解析并给极短窗口，超时立即返回可播骨架，
@@ -3185,7 +3567,7 @@ async def stream_post(request: Request):
     import json
     body = json.loads(await request.body() or b"{}")
     mg = body.get("media_guid", "")
-    target = store.resolve_media_guid(mg)
+    target = _fixed_media_target(mg, request) or store.resolve_media_guid(mg)
     if not target and chart_guid_by_media(mg):
         # 网页播放器会在进入播放页前连续请求 stream；这里必须瞬时返回，不能等待搜源，
         # 否则三个请求串起来仍会把用户留在海报墙。真实匹配推迟到播放器请求 preset。
@@ -3296,7 +3678,7 @@ async def media_range(mg: str, request: Request):
     T4 直接流式交付，保留 Range 和线路选择；CMS 引导到既有代理（302）。
     非在线 mg 原样流式透传官方。
     """
-    target = store.resolve_media_guid(mg)
+    target = _fixed_media_target(mg, request) or store.resolve_media_guid(mg)
     chart_g = "" if target else chart_guid_by_media(mg)
     if not target and chart_g:
         # 无论匹配中、快源未命中还是已确认无源，都【绝不返回 503】（会弹“播放出错”）：
@@ -3319,8 +3701,10 @@ async def media_range(mg: str, request: Request):
     # 选本片实测最快的源秒播，四端（Web/iOS/Android/TV）行为统一；URL 仍带默认线
     # 名是为了在无更快预测时回落到它。用户从线路菜单手切的请求不带 auto=1，
     # 严格尊重所选线。
-    q = urllib.parse.urlencode({"line": target["line"],
-                                "index": target["index"], "auto": "1"})
+    params = {"line": target["line"], "index": target["index"]}
+    if not target.get("_fixed_line"):
+        params["auto"] = "1"
+    q = urllib.parse.urlencode(params)
     if is_hls:
         # 普通库片：后台按片名补齐全网同名 CMS 线路（非阻塞），让线路菜单和热门库
         # 一样完整、名称规范；本次仍用记录内既有线路秒播。
@@ -3370,7 +3754,7 @@ async def play_play(request: Request):
     import json
     body = json.loads(await request.body() or b"{}")
     mg = body.get("media_guid", "")
-    base_target = store.resolve_media_guid(mg)
+    base_target = _fixed_media_target(mg, request) or store.resolve_media_guid(mg)
     if not base_target and chart_guid_by_media(mg):
         # 未绑定榜单片：play/play 也立即返回占位 HLS，播放器先进入加载页；
         # preset/main 请求时再等待后台匹配，避免 play/info+stream+play 串行等待。
@@ -3388,7 +3772,9 @@ async def play_play(request: Request):
     # 播放器「清晰度/线路」菜单切换时会带我们编码的 bitrate，据此选线路
     choices = _line_choices(base_target)
     chosen_line = None
-    if len(choices) > 1:
+    if base_target.get("_fixed_line"):
+        chosen_line = base_target.get("line")
+    elif len(choices) > 1:
         chosen_line = _line_of_bitrate(body.get("bitrate"), [t["line"] for t in choices])
     # 网盘线永不作跨片默认：App 会记住上一部选的 bitrate 并带到新视频，而 PanSou
     # 在每部片菜单都存在，导致换新片仍默认网盘。真正手切网盘必先请求
@@ -3440,9 +3826,11 @@ async def play_play(request: Request):
     # 卡在海报墙像“点了没反应”）。先瞬时返回播放地址让播放器立刻进入加载页转圈，
     # 真正的解析延迟到播放器内部取 main.m3u8 / direct 时再做（那里本就有加载指示）。
     wrapper, is_hls = _guess_wrapper(target)
-    # auto=1：自动起播，main 按冠军线/竞速选最快源，四端统一秒播（见 stream 302）。
-    q = urllib.parse.urlencode({"line": target["line"],
-                                "index": target["index"], "auto": "1"})
+    # 固定线路卡等价于用户手动选线：不带 auto=1，禁止被自动选优覆盖。
+    params = {"line": target["line"], "index": target["index"]}
+    if not target.get("_fixed_line"):
+        params["auto"] = "1"
+    q = urllib.parse.urlencode(params)
     if is_hls:
         play_link = f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{q}"
         # 后台立刻预热全部普通线路（含解析 + 播放列表），播放器取 main 时大概率已就绪
@@ -3607,6 +3995,12 @@ async def play_record(request: Request):
     except Exception:
         body = {}
     ig = body.get("item_guid", "")
+    if _parse_line_item_guid(ig) or _parse_line_season_guid(ig):
+        # 固定线路卡上报：归一化为原影片/基础集 guid 再记录，保证续播身份统一、
+        # 不按资源站拆分；media/video guid 保留线路信息仅作参考，不参与历史键。
+        body["item_guid"] = _normalize_history_guid(ig)
+        history.record(body)
+        return JSONResponse({"code": 0, "msg": "", "data": True})
     if store.get_title_by_guid(ig) or store.get_episode(ig):
         # 记录在线播放进度到本地（继续观看），不上报官方库
         history.record(body)
@@ -3629,7 +4023,9 @@ async def play_record_delete(request: Request):
                 ids = [x.get("item_guid") if isinstance(x, dict) else x for x in j]
     except Exception:
         ids = []
-    ids = [g for g in ids if g and (store.get_title_by_guid(g) or store.get_episode(g))]
+    ids = [_normalize_history_guid(g) for g in ids
+           if g and (_parse_line_item_guid(g) or _parse_line_season_guid(g)
+                     or store.get_title_by_guid(g) or store.get_episode(g))]
     if ids:
         history.delete(ids)
         return JSONResponse({"code": 0, "msg": "", "data": True})
@@ -3751,6 +4147,10 @@ def _line_key_match(want: str, got: str) -> bool:
 
 
 def _pick_episode(mg: str, request: Request) -> dict | None:
+    # 固定线路卡：优先按 guid 中携带的影片/线路/集序号直接解析，禁止自动选优。
+    fixed = _fixed_media_target(mg, request)
+    if fixed is not None:
+        return fixed
     # mg 本身是 chart guid（媒体库直进）：绑定记录挂在其确定性 media guid 上，
     # 先按 media guid 取集；取不到再落入下面的常规解析（兼容旧记录/回源）。
     if mg and chart_cache.is_chart_guid(mg) and not store.resolve_media_guid(mg):
@@ -3844,9 +4244,13 @@ def _dodge_known_bad(picked: dict, request: Request) -> dict:
 async def _await_pending_chart(mg: str) -> str:
     """若该 media 属于秒进播放页、尚未绑定完成的榜单片，等待其后台绑定结束。"""
     og = _PENDING_MEDIA_CHART.get(mg) or store.online_guid_by_media(mg)
-    if og and chart_cache.is_chart_guid(og) and not store.resolve_media_guid(mg):
-        await resolve_chart(og)
-        return og if not store.resolve_media_guid(mg) else ""
+    if og and chart_cache.is_chart_guid(og):
+        existing = store.get_title_by_guid(og)
+        if existing and not _chart_binding_matches(og, existing):
+            _drop_chart_binding(og)
+        if not store.resolve_media_guid(mg):
+            await resolve_chart(og)
+            return og if not store.resolve_media_guid(mg) else ""
     return ""
 
 
@@ -4722,29 +5126,8 @@ class _ProbeReq:
 
 
 def schedule_prewarm_title(og: str, index: int = 0) -> None:
-    """海报/搜索列表渲染时调用：对该片【最可能起播的前几条普通 CMS 线】做一次
-    轻量探活，把本片最快线写进 linepredict；点播放时零竞速秒播。
-
-    非阻塞、去重、限并发；只探普通直链（网盘/加固/爬虫/drpy 等贵线不预热），
-    且不转码不转存。无线路/已记忆/关闭开关时直接跳过。"""
-    try:
-        if not bool(config.get().get("linepredict_enabled", True)):
-            return
-        brief = store.get_title_by_guid(og)
-        if not brief:
-            return
-        ekey = f"{og}|{int(index or 0)}"
-        if linepredict.ready_or_reprobe(ekey):
-            return
-        # 全局在途预热上限：用户快速连翻多个首屏时不无限排队压源站。
-        # 实际并发仍受海报探测信号量(3)约束，这里只限制排队长度。
-        if linepredict.inflight_count() >= 24:
-            return
-        if not linepredict.try_mark_inflight(ekey):
-            return  # 已在预热
-    except Exception:
-        return
-    asyncio.create_task(_prewarm_title_task(og, index, ekey))
+    """v0.2.42 按需模式：不为海报/搜索列表后台预热线路。"""
+    return None
 
 
 def warm_catalog_briefs(briefs: list) -> None:
@@ -5106,43 +5489,11 @@ async def _build_playlist_body(mg: str, picked: dict, request: Request):
     if text is None:
         return None, None
 
-    # m3u8 流层去广告（TVBox/OK影视 Pro rules 引擎 + 通用启发式 + 分片 SPS 指纹）
+    # v0.2.42：清单去广告只跑本地规则，不在起播关键路径读取分片 SPS 指纹。
     try:
         import adfilter as _adfilter
         if _adfilter.enabled():
-            # 分片 SPS 指纹层需要 Range 读分片头：提供回调，只取前 4/32KB，
-            # 用清单同源的防盗链头与【直连】客户端（分片流量/探测不走源代理）。
-            seg_headers = dict(headers or {})
-            seg_headers.setdefault("User-Agent",
-                                   "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-
-            async def _seg_head(url, limit, timeout):
-                r = None
-                try:
-                    client = ext_client(request)
-                    h = dict(seg_headers)
-                    h["Range"] = f"bytes=0-{limit - 1}"
-                    req = client.build_request("GET", url, headers=h)
-                    r = await client.send(req, stream=True)
-                    if r.status_code not in (200, 206):
-                        return None
-                    buf = bytearray()
-                    async for chunk in r.aiter_bytes():
-                        buf.extend(chunk)
-                        if len(buf) >= limit:
-                            break
-                    return bytes(buf[:limit]) or None
-                except Exception:
-                    return None
-                finally:
-                    if r is not None:
-                        try:
-                            await r.aclose()
-                        except Exception:
-                            pass
-
-            text, _ad_removed = await _adfilter.filter_hls_async(
-                text, cur or src_url, _seg_head)
+            text, _ad_removed = _adfilter.filter_hls(text, cur or src_url)
     except Exception:
         _log.info("hls adfilter failed", exc_info=True)
 
@@ -5345,44 +5696,8 @@ def _prewarm_sem() -> "asyncio.Semaphore":
 
 
 def _warm_preset_lines(mg: str, targets: list[dict], request: Request) -> None:
-    _special = ("catv" + "od", "dr" + "py", "gu" + "ard")
-
-    def _cheap(t: dict) -> bool:
-        return (not t.get("_pansou_manual") and not t.get("xsrc")
-                and not any(t.get(k) for k in _special))
-
-    def _todo(t: dict) -> bool:
-        key = _playlist_cache_key(t)
-        hit = _PLAYLIST_CACHE.get(key)
-        if hit and time.time() - hit[0] < _PLAYLIST_TTL:
-            return False
-        return key not in _PLAYLIST_FUT
-
-    cms = [t for t in targets[:_PREWARM_MAX] if _cheap(t)]
-    if not cms:
-        return
-    cms = [t for t in cms if _todo(t)]
-    if not cms:
-        return
-
-    async def _one(tt, gated: bool):
-        try:
-            if gated:
-                async with _prewarm_sem():
-                    await _get_playlist_cached(mg, tt, request)
-            else:
-                # 起播线：不限并发，最先发起
-                await _get_playlist_cached(mg, tt, request)
-        except Exception:
-            pass
-
-    try:
-        # 第一个廉价变体即起播线（排序已在调用方完成），最先、不限并发
-        asyncio.create_task(_one(cms[0], False))
-        for t in cms[1:]:
-            asyncio.create_task(_one(t, True))
-    except RuntimeError:
-        pass
+    """v0.2.42 按需模式：不在后台为所有线路预建清单。"""
+    return None
 
 
 @app.get(f"{ONLINE_PREFIX}/{{mg}}/preset.m3u8")
@@ -5782,14 +6097,17 @@ async def hls_main(mg: str, request: Request):
     if not picked:
         picked = _pick_episode(mg, request)
     if not picked:
-        # 任何入口取不到可播线路：都回占位，保持播放器存活、菜单可切（替代旧 503/404）
-        return _placeholder_playlist_response(mg)
+        # v0.2.42：普通 main 不再用无限占位掩盖“未找到片源”；
+        # 只有显式 phwait 的准备通道保留占位。
+        if failed_g:
+            return Response("暂无可用在线片源", status_code=503)
+        return Response("not found", status_code=404)
 
     # 线路健康探测 + 自动选最快线
     explicit_line = request.query_params.get("line")
-    # auto=1 即“自动起播”：网页(无line)与 App/TV/iOS(302 带默认 line + auto=1)
-    # 都走冠军线复用/竞速选最快源；只有用户手动切线（有 line 且无 auto=1）才不自动。
-    auto_play = request.query_params.get("auto") == "1"
+    # v0.2.42：只有网页自动起播（无显式 line）才竞速；App/iOS 经 media_range
+    # 带来默认 line + auto=1 时直接用该线，不再为每条候选等待 gather 完成。
+    auto_play = request.query_params.get("auto") == "1" and not explicit_line
     request.state._play_mg = mg  # 供探测复用播放列表构建、填充缓存
 
     # ===== 手动 PanSou 高清线：必须有真实手切意图才搜索/转存 =====
@@ -5919,8 +6237,11 @@ async def hls_main(mg: str, request: Request):
                     request.state._failover_picked = alt
                     body = await _get_playlist_cached(mg, _p, request)
         if body is None:
-            # 抓流失败：回占位保持播放器存活，后台 resurrect 找到新源后下次轮询自动恢复
-            return _placeholder_playlist_response(mg)
+            # v0.2.42：普通 CMS 抓流失败直接报错，不返回假 HLS 造成无限占位；
+            # 加固/爬虫等慢源仍保留占位自愈通道。
+            if _is_slow_line(_p):
+                return _placeholder_playlist_response(mg)
+            return Response("fetch fail upstream", status_code=502)
         if body is _NOT_HLS:
             # 预判为 HLS、解析后实为 mp4：302 到直链代理（direct 复用已解析结果）
             q = urllib.parse.urlencode({"line": _p["line"], "index": _p["index"]})
@@ -5938,8 +6259,15 @@ async def hls_main(mg: str, request: Request):
                         return Response(body2, media_type="application/vnd.apple.mpegurl",
                                         headers={"Cache-Control": "no-cache",
                                                  "Access-Control-Allow-Origin": "*"})
-            # fail / running 都回占位：播放器不锁死、菜单可切，后台找源后下次轮询恢复
-            return _placeholder_playlist_response(mg)
+            if status == "fail":
+                return Response("暂无可播线路（该源分片已失效，且未找到其他可用源）",
+                                status_code=502)
+            if _is_slow_line(_p):
+                return _placeholder_playlist_response(mg)
+            # v0.2.42 running：让客户端 3 秒后重试，不返回占位视频。
+            return Response("正在为你寻找可用线路…", status_code=503,
+                            headers={"Retry-After": "3",
+                                     "Access-Control-Allow-Origin": "*"})
         _sk = sourcehealth.source_key_of(_p.get("line"), _p)
         if _sk:
             sourcehealth.record(_sk, True)
@@ -5955,20 +6283,18 @@ async def hls_main(mg: str, request: Request):
     #  - 仅加固/爬虫/drpy/专有解码/小雅这类十几秒的慢源：短预算到点先回占位、后台自愈，
     #    播放器周期重拉转正片（全功能版相对公开 0.2.17 必须保留的兜底）。
     slow_source = _is_slow_line(picked)
+    if not slow_source:
+        # v0.2.42：普通 CMS 每次 main 独立执行。不要在外层再做单飞合并，
+        # 否则前一次探测卡住时，后续重试全部挂在同一个 _serve_normal 上。
+        return await _serve_normal(picked)
+    # 仅慢源保留单飞与短预算自愈，避免后台重复启动昂贵转存/爬虫任务。
     bk = f"{mg}|{picked.get('line')}|{picked.get('index', 0)}"
     fut = _MAIN_SERVE_FUT.get(bk)
     if fut is None:
         fut = asyncio.ensure_future(_serve_normal(picked))
         _MAIN_SERVE_FUT[bk] = fut
         fut.add_done_callback(lambda _f: _MAIN_SERVE_FUT.pop(bk, None))
-    if not slow_source:
-        # 普通 CMS：宽预算同步等真片（对齐 0.2.17），仅防永久挂死才回占位
-        try:
-            return await asyncio.wait_for(asyncio.shield(fut), timeout=8.0)
-        except asyncio.TimeoutError:
-            return _placeholder_playlist_response(mg)
     try:
-        # 慢源：仅在低于客户端~3s 起播超时的预算内等，到点先回占位、后台继续。
         return await asyncio.wait_for(asyncio.shield(fut),
                                       timeout=_budget_left(floor=0.2))
     except asyncio.TimeoutError:
@@ -6286,6 +6612,30 @@ def _poster_fallback() -> Response:
 
 
 
+_POSTER_NETWORK_ERRORS = (
+    httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
+    httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError,
+    httpx.PoolTimeout,
+)
+
+
+async def _poster_fetch(request: Request, url: str, headers: dict,
+                        host: str):
+    """海报回源带一次短重试：直连出现连接级异常时，用全新短生命周期客户端再取一次，
+    避免偶发 ConnectTimeout/ReadError 直接把整面海报墙变成占位图。正常 HTTP 错误不重试。"""
+    try:
+        return await _poster_http(request).get(url, headers=headers)
+    except _POSTER_NETWORK_ERRORS as first:
+        _log.info("poster retry host=%s err=%s", host, type(first).__name__)
+        try:
+            # netutil 复用既有“直连失败按主机自动切代理”能力；未配置代理时
+            # 也相当于一条全新直连，能避开失效连接/连接池中的异常连接。
+            async with netutil.async_client(timeout=12.0) as cli:
+                return await cli.get(url, headers=headers)
+        except Exception:
+            raise first
+
+
 async def _serve_online_poster(tok_path: str, request: Request) -> Response:
     # 兼容 /online/<token>.jpg 与官方图片前缀 /v/api/v1/sys/img/online/<token>.jpg
     # 机制对齐 v0.2.42：纯透传 + 浏览器 max-age 强缓存，服务端不做任何内存/磁盘缓存，
@@ -6308,7 +6658,7 @@ async def _serve_online_poster(tok_path: str, request: Request) -> Response:
             host.endswith("doubanio.viki.moe"):
         headers["Referer"] = "https://movie.douban.com/"
     try:
-        r = await _poster_http(request).get(u, headers=headers)
+        r = await _poster_fetch(request, u, headers, host)
         ctype = (r.headers.get("content-type") or "").lower()
         if r.status_code != 200 or not r.content:
             return _poster_fallback()
@@ -6326,7 +6676,11 @@ async def _serve_online_poster(tok_path: str, request: Request) -> Response:
         if not (ctype.startswith("image/") or sniff):
             return _poster_fallback()
         ctype = ctype if ctype.startswith("image/") else sniff
-    except Exception:
+    except Exception as exc:
+        # 诊断海报回源异常：原实现直接吞异常回占位，无法区分连接超时、读超时、
+        # 连接池耗尽或证书问题。只记录类型与摘要，不改变原有回退行为。
+        _log.info("poster upstream failed host=%s err=%s: %s",
+                  host, type(exc).__name__, str(exc)[:180])
         return _poster_fallback()
 
     # 在海报上烧角标（网盘资源 / 源健康点）。GIF 不动，合成失败回退原图。

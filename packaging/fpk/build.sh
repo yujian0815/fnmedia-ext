@@ -29,7 +29,8 @@ rsync -a --delete \
   --exclude='.venv/' --exclude='__pycache__/' --exclude='*.pyc' \
   --exclude='.git/' --exclude='dist/' --exclude='logs/' \
   --exclude='state/' --exclude='packaging/fpk/.build/' \
-  --exclude='.release/' --exclude='*.fpk' --exclude='.DS_Store' \
+  --exclude='.release/' --exclude='.agents/' --exclude='*.fpk' \
+  --exclude='.DS_Store' \
   --exclude='/proxy/assets/guard/guard.jar' \
   --exclude='/proxy/assets/guard/sites.json' \
   --exclude='/proxy/assets/guard/imported.json' \

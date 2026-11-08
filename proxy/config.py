@@ -149,6 +149,8 @@ _DEPRECATED = {
     "poster_disk_cache_enabled", "poster_cache_dir", "poster_disk_cache_max_mb",
     "poster_mem_cache_max", "poster_cache_ttl",
     "champion_cache_max_mb", "champion_cache_ttl",
+    # 用户已明确撤回的试验功能：按需/短窗竞速、可见海报测速绑定
+    "on_demand_race", "short_window_race", "poster_prewarm",
 }
 _BUILTIN_IDS = {s["id"] for s in DEFAULT_SOURCES}
 

@@ -17,10 +17,27 @@
 """
 from __future__ import annotations
 
+import asyncio
+import functools
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
+
+
+# 阻塞式源适配器（例如需要同步 HTTP/RPC 的源）不能占用 asyncio 默认线程池：
+# 默认池还负责 httpx 的 DNS/连接等异步底层工作，一旦被慢源排队占满，海报、
+# 搜索和播放都会表现为 ConnectTimeout。独立小池把慢源等待隔离在自身内部。
+_BLOCKING_SOURCE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="blocking-source")
+
+
+async def run_blocking_source(func, *args):
+    """在独立小线程池运行同步源适配器，避免饿死全局 asyncio 工作线程。"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _BLOCKING_SOURCE_EXECUTOR, functools.partial(func, *args))
 
 try:
     from urllib.parse import urlsplit
