@@ -504,6 +504,43 @@ def is_drpy_site(site: dict) -> bool:
         ".js" in low or "dr_py" in low or "drpy" in low)
 
 
+def _is_relative_js(v: str) -> bool:
+    """相对路径的 drpy 资源引用（引擎或规则文件）。
+
+    兼容 ./lib/drpy2.min.js 这类 JS 引擎，以及 drpy2 规则常用的 .js/.txt/.json
+    后缀（如 ./js/lf_live.txt、./js/alist.json）。仅认无协议、无协议相对前缀
+    （//host）、且末段带文件扩展名的相对路径，从而排除 csp_ 类名等非文件引用。
+    """
+    s = str(v or "").strip()
+    if not s or "://" in s or s.startswith("//"):
+        return False
+    name = s.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+    return "." in name
+
+
+def absolutize_drpy_site(site: dict, base: str) -> dict:
+    """把 type=3 相对路径 drpy 站点的引擎(api)与规则(ext)补全为绝对 URL。
+
+    GitHub 系订阅（如高天流云 js.json）常用 "./lib/drpy2.min.js" 引擎 +
+    "./js/规则.js"（亦可为 .txt/.json 规则）的相对写法；补全后即可被
+    is_drpy_site 识别并由 drpy.import_remote 经 subfetch 下载，全程 Node
+    执行、不依赖安卓运行时。仅当 api 是相对 JS 引擎时处理，ext 为相对规则
+    文件时一并补全；已是绝对 URL、无 base 或非该形态时原样返回。
+    """
+    if not isinstance(site, dict) or not base:
+        return site
+    if str(site.get("type", 1)) != "3":
+        return site
+    api = str(site.get("api") or "").strip()
+    if not (_is_relative_js(api) and api.split("?", 1)[0].lower().endswith(".js")):
+        return site
+    site["api"] = urljoin(base, api)
+    ext = site.get("ext")
+    if isinstance(ext, str) and _is_relative_js(ext):
+        site["ext"] = urljoin(base, ext.strip())
+    return site
+
+
 # 依赖 ARM 原生库（加固 so 经 ndk_translation 反调试自检会 SIGABRT）的
 # FongMi/Yoursmile 爬虫类：在 x86_64 redroid 上一调用即杀进程，必须在导入/调度前
 # 屏蔽，避免打崩整个 bridge（连累其它正常源）。依据是 jar 内 native so 的 JNI 导出
@@ -707,6 +744,10 @@ async def load_subscription_full(url: str | None = None,
             if isinstance(st, dict):
                 if str(st.get("type")) == "4" and sub_base and st.get("api"):
                     st["api"] = urljoin(sub_base, str(st.get("api") or ""))
+                # type=3 相对路径 drpy JS：用当前订阅地址补全引擎与规则，
+                # 否则下游 is_drpy_site 只认 http 会把它误归为“无法识别运行时”。
+                if sub_base:
+                    absolutize_drpy_site(st, sub_base)
                 if sub_jar and not st.get("_spider_jar"):
                     st["_spider_jar"] = sub_jar
                 # 站点自带 jar（饭太硬部分源用伪装成 PNG 的独立 jar），优先级高于全局。

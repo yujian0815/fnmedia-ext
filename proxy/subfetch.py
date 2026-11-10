@@ -34,31 +34,33 @@ def subscription_proxy() -> str:
         return ""
 
 
+def _proxy_kwargs(px: str) -> dict:
+    """按运行时 httpx 版本返回代理关键字。
+
+    httpx <0.26 的 Client/AsyncClient 只接受 proxies=，0.26+ 改用 proxy= 且
+    proxies= 被移除。配置了代理时必须命中正确参数名，否则 TypeError 会让
+    fetch_first 等低层抓取静默全失败（DRPY 规则、spider jar 都走这里）。
+    """
+    if not px:
+        return {}
+    try:
+        httpx.Client(trust_env=False, proxy=px)
+        return {"proxy": px}
+    except TypeError:
+        return {"proxies": px}
+
+
 def sub_client() -> httpx.Client:
     """同步客户端：仅用于拉取订阅资源。trust_env=False（不读系统代理），
     但显式应用用户配置的订阅代理。"""
-    px = subscription_proxy()
-    try:
-        return httpx.Client(trust_env=False, verify=False, follow_redirects=True,
-                            timeout=SUB_TIMEOUT,
-                            **({"proxy": px} if px else {}))
-    except TypeError:
-        # 极旧版 httpx 用 proxies=
-        return httpx.Client(trust_env=False, verify=False, follow_redirects=True,
-                            timeout=SUB_TIMEOUT,
-                            **({"proxies": px} if px else {}))
+    return httpx.Client(trust_env=False, verify=False, follow_redirects=True,
+                        timeout=SUB_TIMEOUT, **_proxy_kwargs(subscription_proxy()))
 
 
 def async_sub_client() -> httpx.AsyncClient:
     px = subscription_proxy()
-    try:
-        return httpx.AsyncClient(trust_env=False, verify=False, follow_redirects=True,
-                                 timeout=SUB_TIMEOUT,
-                                 **({"proxy": px} if px else {}))
-    except TypeError:
-        return httpx.AsyncClient(trust_env=False, verify=False, follow_redirects=True,
-                                 timeout=SUB_TIMEOUT,
-                                 **({"proxies": px} if px else {}))
+    return httpx.AsyncClient(trust_env=False, verify=False, follow_redirects=True,
+                             timeout=SUB_TIMEOUT, **_proxy_kwargs(px))
 
 
 def github_mirror_candidates(url: str) -> list[str]:
@@ -95,9 +97,7 @@ def fetch_first(urls, *, want_zip: bool = False, timeout: float | None = None):
     for u in urls:
         try:
             kw = {} if timeout is None else {"timeout": httpx.Timeout(timeout, connect=10.0)}
-            px = subscription_proxy()
-            if px:
-                kw["proxy"] = px
+            kw.update(_proxy_kwargs(subscription_proxy()))
             with httpx.Client(trust_env=False, verify=False, follow_redirects=True,
                               **kw) as cli:
                 r = cli.get(u, headers={"User-Agent": _UA})

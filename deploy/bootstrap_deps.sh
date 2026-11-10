@@ -107,5 +107,27 @@ then
   exit 4
 fi
 
+# ---------- 5. 可选：Pillow（播放历史横幅裁切 / 海报角标） ----------
+# 非核心依赖：缺失时相关图像能力优雅降级（历史回退竖幅），绝不阻断主服务启动。
+# 离线 wheelhouse 优先，缺失则按国内镜像在线兜底；任何失败都只记录、不退出。
+if ! "$PYBIN" -c 'import PIL' >/dev/null 2>&1; then
+  log "Pillow 未安装，尝试可选安装（失败不阻断）"
+  _pillow_ok=0
+  if [ "${FNMEDIA_REQUIRE_NET:-0}" != "1" ] && [ -d "$WHEELHOUSE" ] && ls "$WHEELHOUSE"/*illow*.whl >/dev/null 2>&1; then
+    if "$PIP" install "${PIP_BASE[@]}" --no-index --find-links "$WHEELHOUSE" pillow >> "$LOG" 2>&1; then
+      _pillow_ok=1; log "Pillow 离线安装成功"
+    fi
+  fi
+  if [ "$_pillow_ok" != "1" ]; then
+    for idx in "${PIP_MIRRORS[@]}"; do
+      if "$PIP" install "${PIP_BASE[@]}" --index-url "$idx" \
+           --trusted-host "$(echo "$idx" | awk -F/ '{print $3}')" pillow >> "$LOG" 2>&1; then
+        log "Pillow 在线安装成功（$idx）"; _pillow_ok=1; break
+      fi
+    done
+  fi
+  [ "$_pillow_ok" = "1" ] || log "Pillow 安装失败，海报横幅/角标降级（不影响播放）"
+fi
+
 log "依赖就绪"
 exit 0

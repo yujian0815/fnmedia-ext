@@ -94,6 +94,7 @@ def parse_user_agent(ua: str | None) -> Client:
 TV_CARD_KEEP = (
     "guid", "video_guid", "lan", "imdb_id", "trim_id", "tv_title",
     "parent_guid", "parent_title", "title", "type", "poster",
+    "posters", "backdrops",
     "is_favorite", "watched", "watched_ts", "vote_average", "media_stream",
     "release_date", "season_number", "episode_number", "air_date",
     "number_of_seasons", "number_of_episodes",
@@ -102,6 +103,8 @@ TV_CARD_KEEP = (
     "ts", "duration", "single_child_guid", "file_name", "path", "runtime",
     # TV 选集/Episode 节点额外需要的身份字段
     "media_guid", "audio_guid", "subtitle_guid", "is_watched", "logos",
+    # 可播放判定必需：缺失会导致 TV/盒子把二级线路卡当不可播、整页“加载失败”
+    "can_play", "play_item_guid", "play_error",
 )
 
 
@@ -150,6 +153,10 @@ def normalize_card(row: dict, client: Client) -> dict:
     # 列表模型必需的身份/占位键缺失时补齐，不依赖每个构造器自觉。
     out.setdefault("path", "")
     out.setdefault("runtime", 0)
+    # 播放三要素补默认值：TV 严格模型需 can_play/play_item_guid/play_error 形态合法
+    out.setdefault("play_error", "")
+    if "can_play" not in out:
+        out["can_play"] = 1 if out.get("play_item_guid") else None
     if not out.get("video_guid") and out.get("guid"):
         from store import video_guid as _vg
         out["video_guid"] = _vg(out["guid"])

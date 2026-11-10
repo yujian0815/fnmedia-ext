@@ -37,6 +37,40 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(original["release_date"], 2024)
         self.assertEqual(original["item"]["air_date"], None)
 
+    def test_tv_strict_keeps_history_backdrop_fields(self):
+        # 播放历史按横幅排版：backdrops/posters 必须在 TV 严格白名单中保留，
+        # 否则历史卡只剩竖幅 poster，被客户端按竖幅渲染。
+        tv = client.parse_user_agent("com.trim.tv")
+        card = client.normalize_card({
+            "guid": "g1", "type": "Movie", "status": "在线",
+            "poster": "/online/p.jpg", "posters": "/online/p.jpg",
+            "backdrops": "/online/p.jpg",
+        }, tv)
+        self.assertIn("backdrops", card)
+        self.assertIn("posters", card)
+        self.assertEqual(card["backdrops"], "/online/p.jpg")
+
+    def test_tv_strict_keeps_playable_fields_for_line_cards(self):
+        # 二级线路墙卡片必须保留 can_play/play_item_guid/play_error，否则 TV/盒子
+        # 把卡片当不可播、整页“加载失败”（Web 非严格端原样返回，无此问题）。
+        tv = client.parse_user_agent("com.trim.tv")
+        row = {
+            "guid": "fnmedia-line-item:abc", "type": "TV", "status": "在线",
+            "can_play": 1, "play_item_guid": "fnmedia-line-item:abc",
+            "play_error": "", "video_guid": "vg1", "poster": "/online/p.jpg",
+        }
+        card = client.normalize_card(row, tv)
+        self.assertEqual(card["can_play"], 1)
+        self.assertEqual(card["play_item_guid"], "fnmedia-line-item:abc")
+        self.assertEqual(card["play_error"], "")
+        self.assertEqual(card["status"], "1")
+
+    def test_tv_strict_fills_play_defaults_when_missing(self):
+        tv = client.parse_user_agent("com.trim.tv")
+        card = client.normalize_card({"guid": "g1", "type": "Movie"}, tv)
+        self.assertEqual(card["play_error"], "")
+        self.assertIn("can_play", card)
+
     def test_nonstrict_responses_are_not_rewritten(self):
         row = {"release_date": "2024", "status": "在线", "can_play": 1}
         for ua in ("trimemedia-web", "Dalvik/2.1.0 Android",

@@ -608,6 +608,8 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <input type="number" id="fastestTimeout" min="1" max="10" step="0.5" style="width:100%"/></label>
         <label class="switch-row"><input type="checkbox" id="lineAutofail"/>
           <span>坏线自动切换<span class="sub">当前线路失效/文件不存在时自动换到可用线路，并短时跳过坏线（关闭则纯手动切线）</span></span></label>
+        <label class="switch-row"><input type="checkbox" id="directPlay"/>
+          <span>混合直连（视频分片不经 NAS 中转）<span class="sub">仅对验证可裸连的普通 HLS 直放线生效，播放端直连源站分片以省 NAS 带宽/负载；加密、去广告、解析线、网盘等自动回退中转。默认关闭。</span></span></label>
         <div class="btn-row"><button class="primary small" onclick="saveLines()">保存播放设置</button></div>
       </div>
 
@@ -683,13 +685,23 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           如果它让你的飞牛影视更好用，你的一份打赏就是对作者最大的鼓励，
           也会让后续适配新设备、维护资源解析更有动力 🙏
         </p>
-        <div style="display:inline-flex;flex-direction:column;align-items:center;gap:8px">
-          <div style="padding:10px;border:1px solid var(--line);border-radius:12px;background:#fff;display:flex;align-items:center;justify-content:center;height:232px">
-            <img src="/v/ext/alipay-qr" alt="支付宝打赏码"
-                 style="width:200px;height:200px;object-fit:contain;display:block;border-radius:6px"
-                 onerror="this.style.display='none'"/>
+        <div style="display:flex;flex-wrap:wrap;gap:20px;justify-content:center;align-items:flex-start">
+          <div style="display:inline-flex;flex-direction:column;align-items:center;gap:8px">
+            <div style="padding:10px;border:1px solid var(--line);border-radius:12px;background:#fff;display:flex;align-items:center;justify-content:center;height:260px">
+              <img src="/v/ext/alipay-qr" alt="支付宝打赏码"
+                   style="width:200px;height:240px;object-fit:contain;display:block;border-radius:6px"
+                   onerror="this.style.display='none'"/>
+            </div>
+            <div class="muted sm" style="font-weight:600">支付宝扫码打赏</div>
           </div>
-          <div class="muted sm" style="font-weight:600">支付宝扫码打赏</div>
+          <div style="display:inline-flex;flex-direction:column;align-items:center;gap:8px">
+            <div style="padding:10px;border:1px solid var(--line);border-radius:12px;background:#fff;display:flex;align-items:center;justify-content:center;height:260px">
+              <img src="/v/ext/wechat-qr" alt="微信赞赏码"
+                   style="width:176px;height:240px;object-fit:contain;display:block;border-radius:6px"
+                   onerror="this.style.display='none'"/>
+            </div>
+            <div class="muted sm" style="font-weight:600">微信扫码赞赏</div>
+          </div>
         </div>
         <div class="muted sm" style="margin-top:8px">金额随意，感谢支持 ❤️</div>
       </div>
@@ -1744,7 +1756,8 @@ async function saveLines(){
   const body={line_fastest:$("lineFastest").checked,
     line_fastest_max:Math.max(2,Math.min(12,parseInt($("fastestMax").value)||6)),
     line_fastest_timeout:Math.max(1,Math.min(10,parseFloat($("fastestTimeout").value)||4)),
-    line_autofail:$("lineAutofail").checked};
+    line_autofail:$("lineAutofail").checked,
+    direct_play_enabled:$("directPlay").checked};
   const r=await jpost("/v/api/ext/config",body);
   if(r.code===0){toast("已保存");Object.assign(CFG,body);}else toast("保存失败 "+r.msg,"fail");
 }
@@ -1827,22 +1840,35 @@ async function loadStatus(){
   PRIO=STATUS.source_priority||{};
 }
 async function init(){
-  await loadStatus();
-  KWS=Array.isArray(CFG.junk_keywords)?CFG.junk_keywords.slice():[];
-  $("maxn").value=CFG.max_per_keyword;
-  $("junk").checked=CFG.filter_junk;
-  $("onlineFirst").checked=CFG.online_first!==false;
-  $("lineFastest").checked=CFG.line_fastest!==false;
-  $("lineAutofail").checked=CFG.line_autofail!==false;
-  $("fastestMax").value=CFG.line_fastest_max||6;
-  $("fastestTimeout").value=CFG.line_fastest_timeout||4;
-  renderKw();renderSources();initSrcProxy();loadCacheStatus();
-  const gs=$("globalState");gs.textContent="接管运行中 · 已缓存 "+STATUS.cached_titles;gs.className="dot ok";
-  const ed=$("aboutEdition");if(ed)ed.textContent=(FEAT_DDUO?"完整版（本地全功能）":"公开版")+" · 在飞牛原生搜索与媒体库中注入在线影视";
-  loadOnline();
-  renderOverview();
-  loadWhoami();
-  startLivePoll();
+  // 各初始化步骤独立容错：单个模块/元素缺失或接口异常只在控制台记录，
+  // 不再让整个 init reject 导致管理页黑屏（重启窗口/精简构建尤其容易触发）。
+  const safe=async(fn)=>{try{await fn();}catch(e){console.error(e);}};
+  try{await loadStatus();}catch(e){console.error("loadStatus",e);}
+  if(!CFG){
+    const gs=$("globalState");if(gs){gs.textContent="状态接口未就绪，正在重试…";gs.className="dot bad";}
+    setTimeout(()=>location.reload(),1500);return;
+  }
+  try{
+    KWS=Array.isArray(CFG.junk_keywords)?CFG.junk_keywords.slice():[];
+    $("maxn").value=CFG.max_per_keyword;
+    $("junk").checked=CFG.filter_junk;
+    $("onlineFirst").checked=CFG.online_first!==false;
+    $("lineFastest").checked=CFG.line_fastest!==false;
+    $("lineAutofail").checked=CFG.line_autofail!==false;
+    if($("directPlay"))$("directPlay").checked=CFG.direct_play_enabled===true;
+    $("fastestMax").value=CFG.line_fastest_max||6;
+    $("fastestTimeout").value=CFG.line_fastest_timeout||4;
+    renderKw();
+  }catch(e){console.error("search form",e);}
+  safe(renderSources);safe(initSrcProxy);safe(loadCacheStatus);
+  try{
+    const gs=$("globalState");gs.textContent="接管运行中 · 已缓存 "+STATUS.cached_titles;gs.className="dot ok";
+    const ed=$("aboutEdition");if(ed)ed.textContent=(FEAT_DDUO?"完整版（本地全功能）":"公开版")+" · 在飞牛原生搜索与媒体库中注入在线影视";
+  }catch(e){console.error("status bar",e);}
+  safe(loadOnline);
+  safe(renderOverview);
+  safe(loadWhoami);
+  safe(startLivePoll);
 }
 $("liveClear").addEventListener("click",async e=>{e.preventDefault();
   try{await fetch("/v/api/ext/live/clear",{method:"POST"});await loadLive();toast("已清空实时记录");}catch(_){}});

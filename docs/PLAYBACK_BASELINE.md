@@ -43,6 +43,7 @@
 - T4 源、fnusers 子账号、chartbind 绑定：按需调用。
 - TVBox 式二级线路目录只改变展示与入口：一级使用独立 `fnmedia-line-folder:` 目录 guid，不改变原影片 guid 的详情/播放/历史身份；二级按资源站聚合同源解析线/m3u8线，每来源一张卡并优先 m3u8/直放线；电影线路卡为 Movie/VOD，电视剧、动漫、综艺等多集内容统一保持 TV、真实季/集数，点击即播当前续播集；已绑定影片毫秒级返回，冷片首次进入在本次请求内等待绑定，禁止先返回空目录造成“无资源”误解；Season/Episode 使用带线路身份的 guid，每集绑定同一来源线路；固定线路 guid 保留原影片/集身份，play/play 与 media/range 不带 auto=1，禁止竞速和历史最优覆盖，播放记录不得按线路拆分。
 - 播放进度/收藏/已看按基础影片/集身份记录：复合 guid `fnmedia-line-item:`/`fnmedia-line-season:` 经 `_normalize_history_guid` 归一化（多集→对应 `episode_guid`，电影→影片 guid）；复播用 `resume_episode` 精准定位到上次未看完的集与 ts，动漫/综艺/剧集共用同一多集续播语义。
+- PanSou 网盘高清是虚拟手动线（不在 store、不进全局搜索、不参与测速、永不作默认）。完整版在二级线路墙末尾追加一张网盘卡；公开 lite 构建只保留恒返回 None 的 `_vod_pansou_card` 桩并整文件剥离 `pansou.py`，绝不出现网盘卡。点击网盘卡走 user_pick → arm → 搜索 → 转存原画；`_fixed_media_target` 对 `builtin-pansou::` 返回虚拟 target，stream/list 菜单阶段不预热网盘线。
 
 ## 六、2026-11-07 对齐 GitHub v0.2.42 的主链路红线
 
@@ -54,6 +55,6 @@
 
 ## 七、回归验证
 
-1. 191 项单测全过；2. 海报响应头仅 max-age、无 ETag；
+1. 216 项单测全过；2. 海报响应头仅 max-age、无 ETag；
 3. 服务启动无逐片/无界后台任务，空闲 CPU 接近 0；
 4. 实测 App 默认线起播从约 4.7s 降至 0.64s，二次起播毫秒级。

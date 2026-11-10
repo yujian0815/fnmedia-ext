@@ -64,6 +64,53 @@ def available() -> bool:
     return Image is not None
 
 
+# 横幅（backdrop）裁切结果缓存：key=图片字节哈希，value=16:9 JPEG。
+_LANDSCAPE_CACHE: dict[int, bytes] = {}
+_LANDSCAPE_CACHE_MAX = 400
+
+
+def landscape(poster_bytes: bytes, ratio: float = 16 / 9) -> bytes | None:
+    """把任意比例海报中心裁切为横幅（默认 16:9），返回 JPEG 字节。
+
+    在线资源只有竖幅封面，而飞牛「播放历史/继续观看」按横幅 backdrop 排版：
+    直接塞竖图会被按竖幅渲染。这里做中心裁切（保留画面中部主体），结果按图片
+    字节哈希做 LRU 缓存，历史刷新高频、绝大多数命中，PIL 只在首张跑一次。
+    已经是横幅（宽≥高）的图原样转存，不做放大。无法处理时返回 None 回退原图。
+    """
+    if Image is None or not poster_bytes:
+        return None
+    cache_key = hash(poster_bytes) ^ int(ratio * 100)
+    with _LOCK:
+        hit = _LANDSCAPE_CACHE.get(cache_key)
+        if hit is not None:
+            return hit
+    try:
+        im = Image.open(io.BytesIO(poster_bytes)).convert("RGB")
+    except Exception:  # noqa: BLE001
+        return None
+    w, h = im.size
+    target_h = int(round(w / ratio))
+    if target_h < h:
+        # 竖图/过高：按宽度定高，垂直居中裁掉上下
+        top = (h - target_h) // 2
+        im = im.crop((0, top, w, top + target_h))
+    elif target_h > h:
+        # 过窄：按高度定宽，水平居中裁掉两侧
+        target_w = int(round(h * ratio))
+        if target_w < w:
+            left = (w - target_w) // 2
+            im = im.crop((left, 0, left + target_w, h))
+    out = io.BytesIO()
+    im.save(out, format="JPEG", quality=88)
+    data = out.getvalue()
+    with _LOCK:
+        if len(_LANDSCAPE_CACHE) >= _LANDSCAPE_CACHE_MAX:
+            for k in list(_LANDSCAPE_CACHE)[:_LANDSCAPE_CACHE_MAX // 4]:
+                _LANDSCAPE_CACHE.pop(k, None)
+        _LANDSCAPE_CACHE[cache_key] = data
+    return data
+
+
 def badge(poster_bytes: bytes, pan_label: str = "",
           health_grade: int | None = None) -> bytes | None:
     """在海报上合成角标，返回 JPEG 字节；无法处理时返回 None（调用方回退原图）。"""

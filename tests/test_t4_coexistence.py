@@ -144,7 +144,10 @@ with patch('t4_service.T4Service', side_effect=AssertionError('T4 service')), \
             store.remember_merged([brief])
             with patch.object(storemod, "store", store):
                 season = inject.season_list(brief)[0]
+                # 普通 CMS 合成季保持包装形状：集数报 0、can_play=None，
+                # 客户端从 episode/list 自行统计（v1.0.0 行为）。
                 self.assertEqual(season["number_of_episodes"], 0)
+                self.assertIsNone(season["can_play"])
                 episodes = inject.episode_list(brief)
                 self.assertEqual(episodes[0]["overview"], "")
                 self.assertNotIn("posters", episodes[0])

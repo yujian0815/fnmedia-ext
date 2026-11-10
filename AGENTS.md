@@ -36,6 +36,7 @@
 - 海报/搜索/详情预热保持关闭；不得借新功能重新开启。
 - 网络容错和线程池调整必须做新旧 A/B，证明不会增加起播等待或改变选线。
 - TVBox 式二级线路海报目录属于展示层与固定手动选线：一级使用独立 `fnmedia-line-folder:` 目录 guid（不改变原影片 guid 的详情/播放/历史身份）；二级按资源站聚合同源解析线/m3u8线，每来源只展示一张卡并优先 m3u8/直放线；电影线路卡为 Movie/VOD，电视剧、动漫、综艺等多集内容统一保持 TV、季和真实集数，点击即播当前续播集；必须同时支持 Web 的 POST `/v/api/v1/stream/list` 与 GET `/stream/list/{guid}`，Season/Episode 使用带线路身份的 guid，每集绑定同一来源线路；固定线路 guid 必须保留原影片/集身份，play/play 与 media/range 不带 auto=1，禁止竞速或历史最优覆盖，播放记录不得按线路拆分。
+- PanSou 网盘高清是虚拟手动线（不在 store、不进全局搜索、不参与测速、永不作默认）；完整版在二级线路墙末尾追加一张网盘卡（`_vod_pansou_card` 真实实现置于 GUARD 私有特性段，公开 lite 仅保留恒返回 None 的桩，`pansou.py` 整文件剥离）；点击网盘卡走与播放页手切网盘完全一致的 user_pick → arm → 搜索 → 转存原画链路，`_fixed_media_target` 对 `builtin-pansou::` 返回 `_pansou_manual_target` 虚拟 target，stream/list 菜单阶段禁止预热网盘线。
 - 播放进度/收藏/已看必须按基础影片/集身份记录：`fnmedia-line-item:`/`fnmedia-line-season:` 复合 guid 经 `_normalize_history_guid` 归一化（多集→对应 `episode_guid`，电影→影片 guid），`play/record` 等写入口先归一化再落 history；复播用 `resume_episode` 精准定位到上次未看完的集与 ts，动漫/综艺/剧集共用同一多集续播语义。
 - 线路菜单继续按 v0.2.42 的资源站去重规则展示，不能为条数改变播放器预取方式。
 

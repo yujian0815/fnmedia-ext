@@ -499,21 +499,24 @@ def _is_heavy_search_source(s: dict) -> bool:
 
 
 async def _search_cms(keyword: str, sources,
-                            soft_timeout: float | None = None) -> list[OnlineTitle]:
+                            soft_timeout: float | None = None,
+                            *, early_min_wait: float | None = None,
+                            early_min_results: int | None = None) -> list[OnlineTitle]:
     """纯普通 CMS 源：不限并发扇出（保留上游软超时），最大化搜索速度。
 
     与含 T4/真机源时的 Semaphore(8) 交错调度分开，避免几个慢 CMS 源占满槽位拖死其它源。
 
     够快即返回：快源先完成、累计结果达到阈值且过了最小等待后，立即取消仍在途的慢
     源，不必干等满 soft_timeout（实测个别源 7s+，会把整个搜索拖到 5s 多）。软超时仍
-    作为兜底，保证慢词/冷门词能拿全结果。"""
+    作为兜底，保证慢词/冷门词能拿全结果。early_min_wait/results 可由交互入口（二级
+    目录绑定）传入更激进的值以压进客户端加载窗口；不传则用全局搜索默认。"""
     import asyncio
     enabled = [s for s in sources if s.get("enabled")]
     # 提前返回阈值：在线搜索最终去重后只取 max_per_keyword（默认12）组，原始结果
     # 达到该量级即足以铺满首屏，无需等满软超时被慢源拖尾。
-    early_min_results = 25
+    early_min_results = early_min_results if early_min_results is not None else 25
     # 至少等待这么久，避免快源结果太少时过早收手漏掉更多源
-    early_min_wait = 0.8
+    early_min_wait = early_min_wait if early_min_wait is not None else 0.8
     async with netutil.async_client() as client:
         tasks = [asyncio.create_task(search_source(client, s, keyword))
                  for s in enabled]
@@ -565,7 +568,9 @@ async def _search_cms(keyword: str, sources,
 
 async def search_all(keyword: str, sources=None,
                      soft_timeout: float | None = None,
-                     *, budget: float | None = None) -> list[OnlineTitle]:
+                     *, budget: float | None = None,
+                     early_min_wait: float | None = None,
+                     early_min_results: int | None = None) -> list[OnlineTitle]:
     """搜索扇出：纯普通 CMS 不限并发；含远程 T4/真机私有源时限并发交错调度。"""
     import asyncio
     from itertools import zip_longest
@@ -573,8 +578,14 @@ async def search_all(keyword: str, sources=None,
     enabled = [s for s in sources if s.get("enabled")]
     # 纯普通 CMS（无 T4、无加固/爬虫/drpy/小雅等需要真机保护的源）：不限并发扇出。
     if enabled and not any(_is_heavy_search_source(s) for s in enabled):
+        _early = {}
+        if early_min_wait is not None:
+            _early["early_min_wait"] = early_min_wait
+        if early_min_results is not None:
+            _early["early_min_results"] = early_min_results
         return await _search_cms(
-            keyword, sources, soft_timeout if budget is None else budget)
+            keyword, sources, soft_timeout if budget is None else budget,
+            **_early)
     # Imported T4 sources must not wait behind every built-in CMS slow request.
     remote = [s for s in enabled if s.get("kind") == "t4"]
     legacy = [s for s in enabled if s.get("kind") != "t4"]

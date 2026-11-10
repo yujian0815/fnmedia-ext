@@ -94,6 +94,10 @@ class Store:
         self._state: Path = _STATE    # 缓存文件路径（实例级，便于测试/端点引用）
         self._ep_index: dict[str, dict] = {}   # episode guid -> 定位信息（含多线路）
         self._media_index: dict[str, str] = {} # media/video guid -> ("t:"|"e:") + JSON
+        # 索引脏标记：写入 titles 后只标记、不立即全量重建（单次重建 100ms+，安卓并发
+        # 打开多个冷片时反复重建会把 0.9s 搜索拖到 2s+）。读索引前经 _ensure_index 按需
+        # 重建，把短时间内的多次写入合并为一次。
+        self._index_dirty = True
         self._load()
 
     def _ensure_writer(self):
@@ -139,6 +143,7 @@ class Store:
         except Exception:
             self._titles, self._orig = {}, {}
         self._rebuild_index()
+        self._index_dirty = False
 
     def _direct_eps(self, brief: dict, line: str) -> list[dict]:
         # 可直接播放，或可按需解析的播放页（/share/<id>）
@@ -201,6 +206,17 @@ class Store:
                 meta = "e:" + json.dumps({"ep": eg, "line": line or default})
                 self._media_index[ep_media_guid(eg, line)] = meta
                 self._media_index[ep_video_guid(eg, line)] = meta
+
+    def _ensure_index(self):
+        """读索引前调用：仅在脏时重建，合并短时间内的多次写入。
+
+        RLock 可重入，已持锁的写路径调用也安全；重建本身是纯内存操作。"""
+        if not self._index_dirty:
+            return
+        with self._lock:
+            if self._index_dirty:
+                self._rebuild_index()
+                self._index_dirty = False
 
     def _rebuild_index(self):
         """重建 ep / media 反查索引（集身份与线路解耦，media guid 携带线路）。"""
@@ -266,6 +282,7 @@ class Store:
 
     def resolve_media_guid(self, mg: str) -> Optional[dict]:
         """media/video guid -> 可播放目标（含 url/line/index）。"""
+        self._ensure_index()
         ref = self._media_index.get(mg)
         if not ref:
             return None
@@ -286,6 +303,7 @@ class Store:
         return self._ep_resolve(ep_g, line)
 
     def _ep_resolve(self, ep_g: str, line: str | None = None) -> Optional[dict]:
+        self._ensure_index()
         ep = self._ep_index.get(ep_g)
         if not ep:
             return None
@@ -310,6 +328,7 @@ class Store:
         }
 
     def get_episode(self, ep_g: str) -> Optional[dict]:
+        self._ensure_index()
         ep = self._ep_index.get(ep_g)
         if not ep:
             return None
@@ -319,6 +338,7 @@ class Store:
 
     def tv_episode_guids(self, og: str, *, regular_only: bool = False) -> list[str]:
         """某 TV（默认线路）按顺序的全部集 guid（与 episode/list 一致）。"""
+        self._ensure_index()
         line = self.best_line(og)
         if not line:
             return []
@@ -339,6 +359,7 @@ class Store:
         return sorted(rows, key=lambda row: (row["season"] == 0, row["season"]))
 
     def get_season(self, sg: str) -> Optional[dict]:
+        self._ensure_index()
         meta = self._season_index.get(sg)
         if meta is not None:
             return dict(meta)
@@ -349,6 +370,7 @@ class Store:
         return None
 
     def episode_lines(self, ep_g: str) -> list[str]:
+        self._ensure_index()
         ep = self._ep_index.get(ep_g)
         return list(ep["_per"].keys()) if ep else []
 
@@ -495,7 +517,12 @@ class Store:
             self._prune_memory_locked({make_guid(t) for t in titles})
             self._dirty = True
             self._schedule_flush()
-            self._rebuild_index()
+            # T4 索引依赖写入时的内存数据，必须立即重建；普通 CMS 走惰性合并。
+            if any(b.get("locator", {}).get("kind") == "t4" for b in briefs):
+                self._rebuild_index()
+                self._index_dirty = False
+            else:
+                self._index_dirty = True
         return briefs
 
     def remember_merged(self, briefs: list[dict]) -> list[dict]:
@@ -512,7 +539,13 @@ class Store:
             self._prune_memory_locked({b["guid"] for b in briefs})
             self._dirty = True
             self._schedule_flush()
-            self._rebuild_index()
+            # T4 索引依赖写入时的内存数据，必须立即重建；普通 CMS 走惰性合并，
+            # 把并发冷片绑定的多次全量重建（单次 100ms+）合并为读取时一次。
+            if any(b.get("locator", {}).get("kind") == "t4" for b in briefs):
+                self._rebuild_index()
+                self._index_dirty = False
+            else:
+                self._index_dirty = True
         return briefs
 
     def replace_t4_detail(self, guid: str, title: providers.OnlineTitle) -> dict:
@@ -523,7 +556,9 @@ class Store:
             self._orig[guid] = title.online_id
             self._dirty = True
             self._schedule_flush()
+            # T4 索引依赖写入时的内存数据，必须立即重建。
             self._rebuild_index()
+            self._index_dirty = False
             return brief
 
     def get_title_by_guid(self, guid: str) -> Optional[dict]:
@@ -565,7 +600,9 @@ class Store:
             self._prune_memory_locked({g})
             self._dirty = True
             self._schedule_flush()
+            # T4 索引依赖写入时的内存数据，必须立即重建（后续不允许重扫文件）。
             self._rebuild_index()
+            self._index_dirty = False
         return g
 
     def get_detail(self, online_id: str) -> Optional[providers.OnlineTitle]:
@@ -606,6 +643,7 @@ class Store:
         if not brief:
             return 0
         if brief.get("locator", {}).get("kind") == "t4" and not line:
+            self._ensure_index()
             return len(self._t4_episode_guids.get(guid, []))
         ln = line if line in brief.get("lines", {}) else self.best_line(guid)
         if not ln:

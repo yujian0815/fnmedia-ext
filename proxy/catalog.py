@@ -29,6 +29,8 @@ CLASS_REFRESH = 6 * 3600
 PAGE_TTL = 10 * 60
 # 空页（多为慢源抖动超时）只短缓存，避免该页被长时间冻结
 EMPTY_TTL = 15
+# standalone 独立库窗口结果的短缓存：挡住客户端重复打开媒体库的重复深翻
+STANDALONE_WINDOW_TTL = 60
 HTTP_TIMEOUT = 12.0
 
 # 大类 -> 展示名 / MediaDB category
@@ -189,6 +191,10 @@ class Catalog:
         self._dense_count: dict[str, int] = {}
         # (sid, cat) -> [备用叶子 route...]（首选分类探测失败时 rescue 得到）
         self._fallbacks: dict[tuple[str, str], list[dict]] = {}
+        # standalone 独立库窗口的短时结果缓存：key=(scope, offset, limit)，
+        # 避免客户端重复打开同一媒体库时每次都跨四类重新深翻（实测 1~5s），
+        # 同时与 folder 冷片搜索争抢事件循环/连接池。短 TTL 兼顾“最近更新”新鲜度。
+        self._standalone_cache: dict[tuple, tuple[float, list, int]] = {}
 
     def reset(self) -> None:
         """清空海量库分类路由/分页/聚合缓冲（管理页一键清缓存）。
@@ -204,6 +210,7 @@ class Catalog:
             self._scanned_page.clear()
             self._dense_count.clear()
             self._fallbacks.clear()
+            self._standalone_cache.clear()
 
     @staticmethod
     def _scope_key(scope: str, cat: str) -> str:
@@ -410,6 +417,24 @@ class Catalog:
     def available(self, cat: str, scope: str = AGG_SCOPE) -> bool:
         with self._lock:
             return bool(self._routes.get(self._scope_key(scope, cat)))
+
+    def find_brief_by_guid(self, guid: str) -> dict | None:
+        """纯本地、零网络：在已缓存的密集列表/分页里按 guid 反查目录片 brief。
+
+        供二级线路墙对“海量库冷片”（非 chart、尚未 remember 进 store）按需
+        落库使用；找不到返回 None（调用方再走搜索绑定或返回空）。"""
+        if not guid:
+            return None
+        with self._lock:
+            for briefs in list(self._dense.values()):
+                for b in briefs:
+                    if b.get("guid") == guid:
+                        return b
+            for _ts, briefs, _ttl in list(self._page_cache.values()):
+                for b in briefs:
+                    if b.get("guid") == guid:
+                        return b
+        return None
 
     def pagecount(self, cat: str, scope: str = AGG_SCOPE) -> int:
         with self._lock:
@@ -624,16 +649,31 @@ class Catalog:
                     return store.remember_merged(briefs)
             return []
 
-        # 跨源聚合：串行回退（不同源结果应一致，并发会无谓翻倍请求）
-        async with netutil.async_client(verify=False, timeout=HTTP_TIMEOUT) as client:
-            for route in routes:
-                got = await fetch_one(client, route, HTTP_TIMEOUT)
-                if not got:
-                    continue
-                source, _route, vods = got
-                briefs = self._briefs_from_vods(vods, source, route, scope, cat)
-                if briefs:
-                    return store.remember_merged(briefs)
+        # 跨源聚合：并发竞速（旧实现串行回退，首个源超时 12s 才换源，导致 TV 端
+        # 首屏 item/list 卡 4~6s 触发“加载失败”）。所有源同时发，最快返回有效
+        # 列表者胜出并取消其余；单飞去重由上层 _inflight/_page_cache 保证。
+        async with netutil.async_client(verify=False,
+                                        timeout=HTTP_TIMEOUT) as client:
+            tasks = [asyncio.ensure_future(fetch_one(client, r, HTTP_TIMEOUT))
+                     for r in routes]
+            try:
+                for fut in asyncio.as_completed(tasks):
+                    try:
+                        got = await fut
+                    except Exception:
+                        got = None
+                    if not got:
+                        continue
+                    source, route, vods = got
+                    briefs = self._briefs_from_vods(
+                        vods, source, route, scope, cat)
+                    if briefs:
+                        return store.remember_merged(briefs)
+            finally:
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
         return []
 
     async def warm_standalone(self, scope: str):
@@ -680,7 +720,15 @@ class Catalog:
 
         返回 (brief 列表, 估算 total)。四类各取 offset..offset+limit 的窗，
         再按排名轮次合并去重，最后按全局 offset 切片。
+        结果按 (scope, offset, limit) 短时缓存，避免客户端重复打开媒体库时
+        每次都跨四类重新深翻（实测 1~5s）并与二级目录搜索争抢连接池。
         """
+        key = (scope, int(offset), int(limit))
+        now = time.time()
+        with self._lock:
+            hit = self._standalone_cache.get(key)
+            if hit and now - hit[0] < STANDALONE_WINDOW_TTL:
+                return list(hit[1]), hit[2]
         src = self._source_by_id(scope)
         pool = CATS + [ADULT_CAT] if (_adult_on() and src and src.get("adult")) else CATS
         cats = [c for c in pool if self.available(c, scope)]
@@ -710,7 +758,14 @@ class Catalog:
                     if g and g not in seen:
                         seen.add(g)
                         merged.append(b)
-        return merged[offset:offset + limit], total
+        window = merged[offset:offset + limit]
+        # 写短时缓存（限制条目数，避免长会话下无限增长）
+        with self._lock:
+            self._standalone_cache[key] = (time.time(), list(window), total)
+            if len(self._standalone_cache) > 256:
+                for _k in list(self._standalone_cache)[:128]:
+                    self._standalone_cache.pop(_k, None)
+        return window, total
 
     def standalone_available(self, scope: str) -> bool:
         src = self._source_by_id(scope)

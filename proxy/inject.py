@@ -19,6 +19,19 @@ def _poster(url: str) -> str:
     return url
 
 
+def _backdrop(url: str) -> str:
+    """播放历史/继续观看用的横幅图：复用普通海报 token，仅追加裁切查询参数。
+
+    在线资源只有竖幅封面，飞牛历史按横幅 backdrop 排版，直接用竖图会显示成
+    竖幅。这里保持与 _poster 完全相同的 base64 图片路径（客户端可正常加载），
+    只在末尾加 ?crop=16x9，由海报代理中心裁成 16:9；竖幅 poster 仍走 _poster。
+    """
+    path = _poster(url)
+    if not path or not path.startswith("/online/"):
+        return path
+    return f"{path}?crop=16x9"
+
+
 def _poster_badged(url: str, pan_label: str = "",
                    health_grade: int | None = None,
                    speed_grade: int | None = None) -> str:
@@ -50,6 +63,8 @@ def _poster_badged(url: str, pan_label: str = "",
 _TV_TYPE_WORDS = ("电视剧", "连续剧", "日剧", "韩剧", "美剧", "英剧", "泰剧",
                   "国剧", "日本剧", "韩国剧", "欧美剧", "海外剧", "港台剧", "港台",
                   "动漫", "番剧", "动画剧", "综艺")
+# 动漫类 type_name 关键词：命中且仅单集时按电影处理（动画电影/剧场版/番外）。
+_ANIME_TYPE_WORDS = ("动漫", "番剧", "动画")
 _MOVIE_TYPE_WORDS = ("电影", "影片", "剧情片", "动作片", "喜剧片", "爱情片", "科幻片",
                      "恐怖片", "纪录片")
 
@@ -67,8 +82,11 @@ def is_tv(b: dict) -> bool:
     # 苹果 CMS 一部电影在每条线路里也是 1 个“正片”条目，不能因此误判成 TV。
     if any(w in typ for w in _MOVIE_TYPE_WORDS):
         return False
-    # 动漫/综艺：多集才算连载剧集；单集番外/剧场版按电影处理。
+    # 动漫/综艺：多集才算连载剧集；单集番外/剧场版/动画电影按电影处理，
+    # 否则单集动画电影会被当成 TV 的 Episode，播放历史里只能按竖幅展示。
     if "综艺" in typ and _ep_count(b) <= 1:
+        return False
+    if any(w in typ for w in _ANIME_TYPE_WORDS) and _ep_count(b) <= 1:
         return False
     if any(w in typ for w in _TV_TYPE_WORDS):
         if b.get("locator", {}).get("kind") == "t4" and not b.get("lines"):
@@ -136,7 +154,11 @@ def _ep_count(b: dict) -> int:
         for line, eps in b.get("lines", {}).items():
             keys.update(key for key, ep in t4.playlist_entries(eps, line))
         return len(keys)
-    return sum(len(e) for e in b.get("lines", {}).values())
+    # 同一部片的多条线路是平行资源（每线各含相同正片/集序列），不能把各线
+    # 集数相加：否则单集电影有 N 条线路会被错算成 N 集、误判成连载剧。取单条
+    # 线路的最大集数作为该片真实集数。
+    lines = b.get("lines", {}) or {}
+    return max((len(e) for e in lines.values()), default=0)
 
 
 def _season_count(b: dict) -> int:
@@ -334,15 +356,17 @@ def episode_item(ep: dict, b: dict | None = None) -> dict:
 
 
 def season_item(b: dict, season: dict) -> dict:
-    # 普通扁平 CMS 片的“季”是合成包装：集数由客户端从 episode/list 自行统计，这里报 0
-    # 以保持原 CMS 负载形状（避免某些端把包装季当真实季而隐藏集列表）。仅 T4 这类带
-    # 真实季元数据的 locator 才在季卡上给出实际集数。
+    # 普通扁平 CMS 片的“季”是合成包装：集数由客户端从 episode/list 自行统计，
+    # 这里必须报 0 + can_play=None 以保持原生 CMS 负载形状——若给真实集数或
+    # can_play=1，部分端（飞牛 Web）会把包装季当真实季而隐藏集列表/选集入口。
+    # 仅 T4 这类带真实季元数据的 locator 才在季卡上给实际集数。
     is_t4 = b.get("locator", {}).get("kind") == "t4"
     data = _base_item(
         guid=season["guid"], type="Season", title=season_title(season["season"]),
         parent_guid=b["guid"], parent_title=_f(b, "title"), tv_title=_f(b, "title"),
         season_number=season["season"], episode_number=0,
-        number_of_episodes=len(season["episode_guids"]) if is_t4 else 0, can_play=None)
+        number_of_episodes=len(season["episode_guids"]) if is_t4 else 0,
+        can_play=None)
     data.update(_series_metadata(b))
     return data
 
@@ -520,6 +544,11 @@ def history_item(brief: dict, rec: dict, ep: dict | None = None) -> dict:
     # 已看完（进度≥95%）则从0开始，不占继续观看
     if dur and ts >= dur * 0.95:
         ts = 0
+    cover = _poster(_f(brief, "poster"))
+    # 飞牛「继续观看/播放历史」按横幅排版，实际取图字段在不同端不一致，
+    # 三个图片字段统一指向 16:9 中心裁切横图（?crop=16x9），保证无论客户端
+    # 读 poster / posters / backdrops 都拿到横幅；竖幅封面仍保留在详情/海报墙。
+    landscape = _backdrop(_f(brief, "poster"))
     return {
         "guid": item_guid,
         "lan": "zh-CN", "imdb_id": "",
@@ -528,7 +557,9 @@ def history_item(brief: dict, rec: dict, ep: dict | None = None) -> dict:
         "parent_title": parent_title,
         "title": display,
         "type": typ,
-        "poster": _poster(_f(brief, "poster")),
+        "poster": landscape,
+        "posters": landscape,
+        "backdrops": landscape,
         "poster_width": 0, "poster_height": 0,
         "runtime": int(dur / 60) if dur else 0,
         "is_favorite": 0, "watched": 0, "watched_ts": 0,
