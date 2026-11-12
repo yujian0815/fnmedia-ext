@@ -62,7 +62,12 @@ class UnifiedAssetTests(unittest.TestCase):
 class ReleaseProcessTests(unittest.TestCase):
     def test_publish_builds_before_push_and_publishes_after_upload(self):
         root = Path(__file__).resolve().parents[1]
-        script = (root / "tools" / "publish-public.sh").read_text()
+        publish_script = root / "tools" / "publish-public.sh"
+        # 公开构建会剥离整个 tools/（仅保留 gen-moo-json.py），发布流程测试
+        # 只在完整源码树运行；脚本缺失时跳过，不把剥离当成失败。
+        if not publish_script.is_file():
+            self.skipTest("publish-public.sh 已在公开构建中剥离")
+        script = publish_script.read_text()
         self.assertLess(script.index("build_unified\nfi"), script.index("git fetch origin"))
         self.assertIn("--draft \\", script)
         self.assertIn('--draft=false', script)
