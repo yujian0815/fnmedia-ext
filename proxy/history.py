@@ -22,6 +22,21 @@ _LOCK = threading.RLock()
 _FLUSH_INTERVAL = 3.0
 _MAX = 500
 
+# 历史快照（brief snapshot）相关上限。
+# store 的 titles 是易失搜索缓存（受字节上限裁剪、随搜索轮换），播放进度需要的
+# 影片信息可能已被淘汰，导致「继续播放」找不到落点而从头开始。record 时把重建
+# 播放所需的最小 brief 快照一并存入 history，使续播不再依赖 store 是否仍保留该片。
+_SNAPSHOT_KEYS = (
+    "guid", "online_id", "title", "type_name", "year", "poster", "overview",
+    "remarks", "score", "actor", "director", "area", "locator",
+    "catalog_cat", "catalog_scope", "catalog_source",
+)
+# 单条快照（含剧集被播放那一集的线路信息）的软上限，超出则不存 lines（只留元信息）。
+_SNAPSHOT_MAX_BYTES = 64 * 1024
+# 每条历史只快照这一集的线路条目，避免把几百集的整剧 lines 全量塞进 history。
+_SNAPSHOT_EP_LINES = 6
+
+
 # 每个请求设置的当前飞牛账号 guid；"" = 未识别，使用全局分区
 _current_user: "contextvars.ContextVar[str]" = contextvars.ContextVar(
     "fnmedia_history_user", default="")
@@ -45,6 +60,72 @@ def reset_current_user(tokens) -> None:
 
 def current_user() -> str:
     return _current_user.get() or ""
+
+
+def _ep_index_from_guid(item_guid: str) -> int | None:
+    """从【明文】集 guid（ep:<online_guid>:<index>）解析集序号。
+
+    注意：真实落库的 episode guid 是对该明文做 md5 后的 32 位 hash，无法反解，
+    因此剧集场景应优先用显式传入的 ep 元数据，此函数仅兼容明文形态/测试。
+    """
+    if not isinstance(item_guid, str) or not item_guid.startswith("ep:"):
+        return None
+    try:
+        idx = int(item_guid.rsplit(":", 1)[-1])
+        return idx if idx >= 0 else None
+    except (ValueError, IndexError):
+        return None
+
+
+def build_snapshot(brief: dict, item_guid: str = "",
+                   ep: dict | None = None) -> dict | None:
+    """从 store 里的完整 brief 构造精简、可重建播放的历史快照。
+
+    - 元信息字段直接保留（海报/标题/年份/locator 等，体积小）。
+    - 剧集只保留「当前集」在各线路的播放条目（限前 N 条线路），不存整剧几百集，
+      控制单条快照体积；电影保留其（通常单条）线路条目。
+    - 集序号优先取 ep 元数据（真实 ep guid 是 hash 无法反解），其次解析明文 guid。
+    - 超过软上限则丢弃 lines，只留元信息（续播时仍可重新搜索补线）。
+    brief 为空/非 dict 返回 None。
+    """
+    if not isinstance(brief, dict) or not brief.get("guid"):
+        return None
+    snap: dict = {k: brief[k] for k in _SNAPSHOT_KEYS if k in brief}
+    lines = brief.get("lines") or {}
+    # 集序号：优先 ep 元数据；其次明文 guid；电影为 None
+    ep_idx = None
+    if isinstance(ep, dict) and ep.get("index") is not None:
+        try:
+            ep_idx = int(ep["index"])
+        except (TypeError, ValueError):
+            ep_idx = None
+    if ep_idx is None:
+        ep_idx = _ep_index_from_guid(item_guid)
+    if ep_idx is not None:
+        snap["_ep_index"] = ep_idx
+        if isinstance(ep, dict):
+            snap["_ep_guid"] = ep.get("ep_guid", item_guid)
+    slim_lines: dict = {}
+    if isinstance(lines, dict):
+        for line_name, eps in list(lines.items())[:_SNAPSHOT_EP_LINES]:
+            if not isinstance(eps, list) or not eps:
+                continue
+            if ep_idx is None:
+                kept = [dict(e) for e in eps[:1] if isinstance(e, dict)]
+            elif 0 <= ep_idx < len(eps):
+                kept = [dict(eps[ep_idx])]
+            else:
+                kept = []
+            if kept:
+                slim_lines[line_name] = kept
+    snap["lines"] = slim_lines
+    try:
+        if len(json.dumps(snap, ensure_ascii=False).encode("utf-8")) > _SNAPSHOT_MAX_BYTES:
+            snap["lines"] = {}
+            snap["_slim"] = True
+    except (TypeError, ValueError):
+        return None
+    return snap
 
 
 class History:
@@ -121,8 +202,13 @@ class History:
                 self._adopted.add(u)
                 self._dirty = True
 
-    def record(self, body: dict, user: str | None = None) -> bool:
-        """处理一次 play/record 上报，返回是否为我们的在线条目。"""
+    def record(self, body: dict, user: str | None = None,
+               snapshot: dict | None = None) -> bool:
+        """处理一次 play/record 上报，返回是否为我们的在线条目。
+
+        snapshot 为可选的精简 brief 快照（build_snapshot 产物），用于在 store
+        缓存淘汰后仍能重建播放；仅在提供了有效快照时覆盖，避免旧快照被空值清掉。
+        """
         ig = body.get("item_guid", "")
         if not ig:
             return False
@@ -145,6 +231,11 @@ class History:
                 "duration": duration or int(prev.get("duration", 0)),
                 "updated_at": time.time(),
             }
+            # 沿用已有的快照（重复高频上报不必每次重算）；新快照有效才覆盖。
+            if prev.get("snapshot"):
+                rec["snapshot"] = prev["snapshot"]
+            if isinstance(snapshot, dict) and snapshot.get("guid"):
+                rec["snapshot"] = snapshot
             # 只有上报进度回退（重新播放）才允许变小：以更大 ts 为准，除非显式重置
             if ts < int(prev.get("ts", 0)) and body.get("reset"):
                 rec["ts"] = ts
@@ -152,6 +243,41 @@ class History:
             self._dirty = True
             self._flush_locked()
         return True
+
+    def get_snapshot(self, item_guid: str,
+                     user: str | None = None) -> dict | None:
+        """取某条历史的精简 brief 快照（不存在/无快照返回 None）。"""
+        with _LOCK:
+            u = current_user() if user is None else str(user or "")
+            rec = self._users.get(u, {}).get(item_guid) or {}
+            snap = rec.get("snapshot")
+            return dict(snap) if isinstance(snap, dict) else None
+
+    def latest_episode_record(self, online_guid: str,
+                              user: str | None = None) -> dict | None:
+        """给定影片级 online_guid，找该剧名下【最近交互的集级历史记录】。
+
+        播放器点历史卡常以影片 guid 请求 play/info，而进度记在各集 guid 下。
+        集记录的快照 snapshot.guid 等于 online_guid 且带 _ep_index；按 updated_at
+        取最新一条，返回该集记录（含 ts/快照），无则 None。
+        """
+        if not online_guid:
+            return None
+        with _LOCK:
+            u = current_user() if user is None else str(user or "")
+            bucket = self._users.get(u, {})
+            best = None
+            for rec in bucket.values():
+                snap = rec.get("snapshot")
+                if not isinstance(snap, dict):
+                    continue
+                if snap.get("guid") != online_guid:
+                    continue
+                if snap.get("_ep_index") is None:
+                    continue  # 只要集级记录，跳过影片级
+                if best is None or rec.get("updated_at", 0) > best.get("updated_at", 0):
+                    best = rec
+            return dict(best) if best else None
 
     def set_position(self, item_guid: str, ts: int, duration: int = 0,
                      user: str | None = None):

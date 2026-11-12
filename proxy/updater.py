@@ -149,15 +149,50 @@ def _pick_asset(assets: list[dict], full: bool) -> dict | None:
     return lite_plain or lite_alt
 
 
+def _version_key(tag: str) -> tuple:
+    """Release tag → 可比较版本元组（取数字段，兼容 1.0.1-beta.1 这类预发布号）。"""
+    nums = re.findall(r"\d+", str(tag or ""))
+    return tuple(int(x) for x in (nums + [0, 0, 0])[:3])
+
+
 def _fetch_release_sync() -> dict | None:
-    """拉取 latest Release（同步，固定在工作线程执行，绝不阻塞事件循环）。"""
-    with httpx.Client(timeout=15, follow_redirects=True, trust_env=False,
-                      headers={"Accept": "application/vnd.github+json",
-                               "User-Agent": "fnmedia-ext-updater"}) as client:
-        r = client.get(f"{API_BASE}/latest")
-        if r.status_code != 200:
-            raise RuntimeError(f"GitHub 返回 {r.status_code}")
-        return r.json()
+    """拉取最新 Release（同步，固定在工作线程执行，绝不阻塞事件循环）。
+
+    注意不能只用 /releases/latest：GitHub 的 latest 端点会跳过 prerelease，
+    导致公开测试版（如 1.0.1-beta.1）永远检测不到。这里拉 Release 列表，
+    取非草稿中版本号最高的一个（含预发布）。同时复用预留的更新/订阅代理通道，
+    国内直连 api.github.com 不稳定时可经代理获取。
+    """
+    headers = {"Accept": "application/vnd.github+json",
+               "User-Agent": "fnmedia-ext-updater"}
+    last_err = ""
+    for proxy in _proxy_candidates():
+        try:
+            kwargs = dict(timeout=httpx.Timeout(20, connect=12),
+                          follow_redirects=True, trust_env=False,
+                          headers=headers)
+            if proxy:
+                kwargs["proxy"] = proxy
+            with httpx.Client(**kwargs) as client:
+                r = client.get(f"{API_BASE}?per_page=20")
+                if r.status_code != 200:
+                    raise RuntimeError(f"GitHub 返回 {r.status_code}")
+                releases = r.json()
+            # 过滤草稿，按版本号取最高（含 prerelease）；同版本优先正式版
+            candidates = [x for x in releases
+                          if isinstance(x, dict) and not x.get("draft")]
+            if not candidates:
+                raise RuntimeError("Release 列表为空")
+            candidates.sort(
+                key=lambda x: (_version_key(x.get("tag_name", "")),
+                               0 if x.get("prerelease") else 1),
+                reverse=True)
+            return candidates[0]
+        except Exception as exc:  # noqa: BLE001
+            last_err = f"{'代理' if proxy else '直连'}：" \
+                       f"{type(exc).__name__} {str(exc)[:80]}"
+            continue
+    raise RuntimeError("检查更新的所有网络通道均失败：" + last_err)
 
 
 def _normalize(release: dict, full: bool) -> dict:

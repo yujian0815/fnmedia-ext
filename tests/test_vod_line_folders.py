@@ -188,6 +188,46 @@ class VodLineFolderTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(k, data, f"folder 详情卡缺列表必填字段 {k}")
         self.assertTrue(data["video_guid"])
 
+    def test_folder_play_info_uses_playback_envelope_not_bare_detail(self):
+        # 回归：folder 的 play/info 不能把 item 详情对象直接当作播放信息返回；
+        # 客户端在进入线路列表前就会因缺 playback 外层字段而解析失败。
+        folder_guid = appmod._line_folder_guid("og")
+        with patch.object(appmod.store, "get_title_by_guid", return_value=brief(tv=True)):
+            response = appmod._vod_folder_play_info(
+                folder_guid, clientmod.Client(kind="ios"))
+        data = json.loads(response.body)["data"]
+        for key in ("grand_guid", "guid", "parent_guid", "play_config", "ts",
+                    "type", "video_guid", "audio_guid", "subtitle_guid",
+                    "media_guid", "item", "direct_link_audio_index"):
+            self.assertIn(key, data, f"folder play/info 缺播放外层字段 {key}")
+        self.assertEqual(data["guid"], folder_guid)
+        self.assertEqual(data["type"], "Directory")
+        self.assertTrue(data["media_guid"])
+        self.assertEqual(data["item"]["guid"], folder_guid)
+        self.assertEqual(data["item"]["type"], "Directory")
+        self.assertEqual(data["item"]["can_play"], 0)
+
+    def test_folder_play_info_also_works_before_binding(self):
+        # 冷片尚未绑定时，chart 目录同样返回完整 play/info，不退回官方透传。
+        folder_guid = appmod._line_folder_guid("og")
+        chart = {"guid": "og", "cat": "tv", "title": "冷片", "year": "2026",
+                 "rating": 0.0, "cover": "https://img.test/p.jpg",
+                 "tags": ["律政", "连续上榜3周"], "desc": ""}
+        with patch.object(appmod.store, "get_title_by_guid", return_value=None), \
+                patch.object(appmod.chart_cache, "get_guid", return_value=chart):
+            response = appmod._vod_folder_play_info(
+                folder_guid, clientmod.Client(kind="android"))
+            detail = appmod._vod_folder_detail(
+                folder_guid, clientmod.Client(kind="android"))
+        data = json.loads(response.body)["data"]
+        self.assertEqual(data["type"], "Directory")
+        self.assertIsInstance(data["item"], dict)
+        self.assertEqual(data["item"]["title"], "冷片")
+        self.assertTrue(data["video_guid"])
+        # 冷片 chart 的文字标签不能进入原生 genres（数字 ID 列表）契约
+        self.assertEqual(data["item"]["genres"], [])
+        self.assertEqual(json.loads(detail.body)["data"]["genres"], [])
+
     async def test_folder_tag_list_is_local_empty_filter_not_upstream(self):
         # 回归：line-folder 的 tag/list 必须本地返回空筛选条，透传官方会让 TV/盒子
         # 因未知 guid 的异常响应而整页“加载失败”。
@@ -367,16 +407,19 @@ class VodLineFolderTests(unittest.IsolatedAsyncioTestCase):
             response = await appmod._vod_line_folder(
                 "chart-og", {}, clientmod.Client(kind="android"))
         data = json.loads(response.body)["data"]
+        # 未命中返回空列表（total=0），客户端保持加载中并自动重试，后台绑定命中出线路
         self.assertEqual(data["total"], 0)
+        self.assertEqual(data["list"], [])
         self.assertEqual(called["guid"], "chart-og")
         self.assertNotIn("chart-og", appmod._CHART_FAILED_TS)
         self.assertNotIn("chart-og", appmod._CHART_FAIL_LEVEL)
 
     async def test_cold_folder_wait_constants_within_client_timeout(self):
-        # 用户要求：给足加载时间，宁可在加载画面内等待也不提前返回空。实测客户端
-        # 可容忍 6s+，全源最慢 ~3.7s，故总窗口放宽到 8s；快源软/硬超时均小于总窗口。
-        self.assertLessEqual(appmod._FOLDER_BIND_WAIT, 8.0)
-        self.assertLessEqual(appmod._FOLDER_DETAIL_BIND_WAIT, 8.0)
+        # 用户要求：给足加载时间，宁可在加载画面内等待也不提前返回空。客户端对
+        # item/list 的等待可容忍很久（真机长轮询 300s 仍不报错），故首次绑定等待窗口
+        # 放宽到 25s，让冷片在客户端「加载中」内完成全网绑定，而不是 8s 就放弃返回空。
+        self.assertLessEqual(appmod._FOLDER_BIND_WAIT, 25.0)
+        self.assertLessEqual(appmod._FOLDER_DETAIL_BIND_WAIT, 25.0)
         self.assertLess(appmod._FOLDER_FAST_SOFT, appmod._FOLDER_BIND_WAIT)
         self.assertLess(appmod._FOLDER_FAST_HARD, appmod._FOLDER_BIND_WAIT)
 

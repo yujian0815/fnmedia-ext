@@ -72,6 +72,7 @@ class CatalogFolderTests(unittest.IsolatedAsyncioTestCase):
             resp = await appmod._vod_line_folder(
                 g, {}, clientmod.Client(kind="ios"))
         data = json.loads(resp.body)["data"]
+        # 未命中返回空列表，客户端保持「加载中」并自动重试，后台绑定命中后出线路
         self.assertEqual(data["total"], 0)
         self.assertEqual(data["list"], [])
 

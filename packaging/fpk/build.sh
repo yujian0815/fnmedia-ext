@@ -31,6 +31,8 @@ rsync -a --delete \
   --exclude='state/' --exclude='packaging/fpk/.build/' \
   --exclude='.release/' --exclude='.agents/' --exclude='*.fpk' \
   --exclude='.DS_Store' \
+  --exclude='/spider-runner/android/.buildtools/' \
+  --exclude='/spider-runner/android/.gradle/' \
   --exclude='/proxy/assets/guard/guard.jar' \
   --exclude='/proxy/assets/guard/sites.json' \
   --exclude='/proxy/assets/guard/imported.json' \

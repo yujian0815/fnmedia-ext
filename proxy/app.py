@@ -2573,8 +2573,8 @@ def _fixed_media_target(mg: str, request: Request | None = None) -> dict | None:
                 kind="episode" if is_tv else "title", _fixed_line=True)
 
 
-def _vod_folder_detail(guid: str, client) -> JSONResponse | None:
-    """仅专用文件夹 guid 返回目录；原影片详情与播放身份保持不变。"""
+def _vod_folder_detail_data(guid: str) -> dict | None:
+    """构造二级线路文件夹的 Directory 详情对象（不含响应包装）。"""
     og = _parse_line_folder_guid(guid)
     if not og:
         return None
@@ -2588,6 +2588,12 @@ def _vod_folder_detail(guid: str, client) -> JSONResponse | None:
         row = chart_card(item)
     row["guid"] = _line_folder_guid(og)
     row = _vod_directory_card(row)
+    # chart_card 的 genres 是豆瓣文字标签（如“律政/连续上榜”），而原生详情与
+    # play/info 的 genres 契约是数字类型 ID 列表。冷片首次进入若原样下发，严格
+    # 客户端会在绑定完成前就解析失败；绑定后 detail_item 又变回 []，形成“首次
+    # 失败、刷新就好”的假象。folder 目录没有官方类型 ID，统一使用合法空列表。
+    row["genres"] = [g for g in (row.get("genres") or [])
+                     if isinstance(g, int) and not isinstance(g, bool)]
     # Directory 卡同样走列表模型，缺 video_guid/poster/path 等会导致 TV/盒子整库
     # “加载失败”、iOS 不渲染（见 inject.search_item 注释）。detail_item/chart_card
     # 不含这些列表字段，这里按 search_item 合规形状补齐。
@@ -2602,8 +2608,44 @@ def _vod_folder_detail(guid: str, client) -> JSONResponse | None:
     row.setdefault("file_name", "")
     row.setdefault("ts", 0)
     row.setdefault("watched", 0)
+    return row
+
+
+def _vod_folder_detail(guid: str, client) -> JSONResponse | None:
+    """仅专用文件夹 guid 返回目录；原影片详情与播放身份保持不变。"""
+    row = _vod_folder_detail_data(guid)
+    if row is None:
+        return None
     return JSONResponse({"code": 0, "msg": "", "data":
                          clientmod.normalize_detail(row, client)})
+
+
+def _vod_folder_play_info(guid: str, client) -> JSONResponse | None:
+    """二级线路文件夹的原生 play/info。
+
+    play/info 与 item 详情不是同一模型：前者必须携带 playback 外层字段和嵌套
+    item，直接返回 Directory 详情会让客户端在进入线路列表前解析失败。
+    """
+    og = _parse_line_folder_guid(guid)
+    row = _vod_folder_detail_data(guid)
+    if not og or row is None:
+        return None
+    info = {
+        "grand_guid": "",
+        "guid": guid,
+        "parent_guid": "",
+        "play_config": None,
+        "ts": 0,
+        "type": "Directory",
+        "video_guid": row.get("video_guid") or video_guid(og),
+        "audio_guid": "",
+        "subtitle_guid": "",
+        "media_guid": media_guid(og),
+        "item": row,
+        "direct_link_audio_index": -1,
+    }
+    return JSONResponse({"code": 0, "msg": "", "data":
+                         clientmod.normalize_detail(info, client)})
 
 
 def _vod_line_detail(guid: str, client) -> JSONResponse | None:
@@ -2654,15 +2696,17 @@ def _vod_line_season_detail(guid: str, client) -> JSONResponse | None:
 
 
 # 二级目录绑定等待策略（按用户要求：给足加载时间，宁可在加载画面内等待也不提前返回空）。
-# 实测飞牛客户端可容忍 6s+ 的 item/list（安卓成功请求 P99≈6.3s）；全源搜索中位 ~2s、
-# 最慢 ~3.7s。总等待窗口 8s：快源未命中即在同一请求内继续全源搜索直到命中或耗尽预算。
-_FOLDER_BIND_WAIT = 8.0
+# 实测客户端对 item/list 的等待可容忍很久（真机长轮询 300s 仍不报错、不显示加载失败），
+# 因此把首次绑定等待窗口从 8s 放宽到 25s：冷片进入二级目录时，在客户端「加载中」
+# 画面内完成全网搜索绑定，命中即出线路，避免「等不及就先返回空→显示加载失败」。
+# 快源未命中即在同一请求内继续全源搜索直到命中或耗尽预算，后台兜底继续。
+_FOLDER_BIND_WAIT = 25.0
 _FOLDER_FAST_SOFT = 2.0
 # 快源搜索的硬超时（wait_for 上限）：并发争用时快源可能 1.5s+ 才返回，给 4s 防止
 # 本来能命中的搜索被短超时截断。正常情况下提前返回参数会让它在 ~0.5s 就收手。
 _FOLDER_FAST_HARD = 4.0
 # 详情请求内等待绑定的上限：与列表一致，二者经 _FOLDER_BIND_FUT 单飞共享同一任务。
-_FOLDER_DETAIL_BIND_WAIT = 8.0
+_FOLDER_DETAIL_BIND_WAIT = 25.0
 # 二级目录快源搜索的提前返回参数：最快 CMS 源 ~0.46s 即返回 20 条，达到首屏量
 # （15 条）且过 0.4s 最小等待就提前收手；不满足时继续等满软超时，不会因早退而漏片。
 _FOLDER_EARLY_WAIT = 0.4
@@ -2675,6 +2719,17 @@ async def _vod_line_folder(parent: str, body: dict, client) -> JSONResponse:
     文件夹打开必须快速返回：已有绑定立即出线路；未绑定只给极短等待，后台单飞继续
     绑定，下一次轮询/重进即可显示完整线路，避免二级菜单卡 8 秒。
     """
+    # 强制刷新指令：body 带 refresh=1/force=1 时清除该 guid 的绑定缓存与在途任务，
+    # 重新触发全网搜索绑定。用于「刷出空白/加载中」时手动强制刷新出资源。
+    _force = str(body.get("refresh") or body.get("force") or "") in ("1", "true", "yes")
+    if _force:
+        try:
+            store._titles.pop(parent, None)
+            store._orig.pop(parent, None)
+            store._rebuild_index()
+            _FOLDER_BIND_FUT.pop(parent, None)
+        except Exception:  # noqa: BLE001
+            pass
     brief = store.get_title_by_guid(parent)
     if not brief:
         # 冷片（榜单 chart 或海量分类 catalog，均可能尚未落库）：进入二级目录即
@@ -2687,6 +2742,10 @@ async def _vod_line_folder(parent: str, body: dict, client) -> JSONResponse:
     title = (brief or chart_cache.get_guid(parent) or
              catalog.find_brief_by_guid(parent) or {}).get("title", "")
     if not brief:
+        # 未命中：客户端对 item/list 的等待可容忍很久（实测 300s 仍不报错），
+        # 这里返回空列表让客户端继续显示「加载中」并自动重试；后台绑定
+        # （单飞 + 全源兜底）命中后，客户端重试/重进即出真实线路。
+        # 不塞占位卡——can_play=None 会被 TV 严格模型解析为「无数据/加载失败」。
         return JSONResponse({"code": 0, "msg": "", "data": {
             "mdb_name": title or "线路", "mdb_category": "Movie", "top_dir": "",
             "dir": parent, "total": 0, "list": [], "jump_list": None}})
@@ -3226,6 +3285,26 @@ async def item_detail(guid: str, request: Request):
 
 @app.get("/v/api/v1/season/list/{guid}")
 async def season_list_route(guid: str, request: Request):
+    # TVBox 二级线路文件夹（fnmedia-line-folder:...）：它是「按线路聚合」的目录，
+    # 不是原生季。官方后端不认识该 guid，透传会 invalid sign → 客户端「加载失败」。
+    # 本地返回单个合成季卡（原生 CMS 包装形状），让客户端继续用 episode/list 渲染集。
+    if _parse_line_folder_guid(guid):
+        _og = _parse_line_folder_guid(guid)
+        _brief = store.get_title_by_guid(_og)
+        _title = (_brief or chart_cache.get_guid(_og) or
+                  catalog.find_brief_by_guid(_og) or {}).get("title", "")
+        _sg = _line_season_guid(_og, "", 1)
+        rows = [inj._base_item(
+            guid=_sg, type="Season", title="第1季",
+            parent_guid=_line_item_guid(_og, "", 0) if _brief else guid,
+            parent_title=_title, tv_title=_title,
+            ancestor_guid=_line_folder_guid(_og), ancestor_name=_title,
+            ancestor_category="TV" if (_brief and inj.is_tv(_brief)) else "Movie",
+            season_number=1,
+            number_of_episodes=_line_episode_count(_og, "") if _brief else 0,
+            can_play=None, poster="")]
+        return JSONResponse({"code": 0, "msg": "",
+                             "data": clientmod.normalize_cards(rows, _client_of(request))})
     error = await _load_t4_detail(guid, request)
     if error is not None:
         return error
@@ -3619,9 +3698,29 @@ def _online_play_info(guid: str, request: Request) -> dict | None:
             info["ts"] = rec0.get("ts", 0)
         return info
     brief = store.get_title_by_guid(guid)
+    # store 缓存淘汰兜底：用历史快照重建（续播不再依赖易失的搜索缓存）
+    snap_rec = history.get(guid)
+    if not brief and snap_rec:
+        brief, snap_ep = _history_from_snapshot(snap_rec)
+        if brief is not None:
+            info = (inj.episode_play_info(snap_ep) if snap_ep
+                    else inj.play_info(brief))
+            info["ts"] = snap_rec.get("ts", 0)
+            return info
     if not brief:
         return None
     rec = history.get(guid)
+    # 播放器常以影片级 online_guid 请求，但进度记在各集 guid 下。先找该剧名下
+    # 最近交互的集级记录，用它的快照恢复到具体集与 ts（覆盖 store 剧集结构缺失
+    # 或只有影片级旧记录的情况）。T4 剧集有独立的 resume 语义，跳过此兜底。
+    if brief.get("locator", {}).get("kind") != "t4":
+        latest_ep_rec = history.latest_episode_record(guid)
+        if latest_ep_rec:
+            _sb, _se = _history_from_snapshot(latest_ep_rec)
+            if _se is not None:
+                info = inj.episode_play_info(_se)
+                info["ts"] = latest_ep_rec.get("ts", 0)
+                return info
     if inj.is_tv(brief):
         ep_guids = store.tv_episode_guids(guid, regular_only=True)
         if ep_guids:
@@ -3650,6 +3749,15 @@ def _vod_play_info(guid: str, client) -> JSONResponse | None:
     if not brief:
         return None
     is_pansou = _is_pansou_line_name(line)
+    # 续播定位：用户从固定线路卡点进某剧，应从「上次看到的那集」续播，而不是
+    # 机械地用线路卡默认的 index（通常第1集）。用该剧名下最近交互的集记录定位，
+    # 保留其 ts；无集记录时才沿用请求 index（首次观看/从头看）。T4 保留原语义。
+    if not is_pansou and brief.get("locator", {}).get("kind") != "t4":
+        _latest = history.latest_episode_record(og)
+        if _latest and _latest.get("snapshot", {}).get("_ep_index") is not None:
+            _resume_idx = int(_latest["snapshot"]["_ep_index"])
+            if _resume_idx >= 0:
+                index = _resume_idx
     if is_pansou:
         # PanSou 虚拟手动线不在 store，用其专用 target，不做普通集解析。
         target = _pansou_manual_target(index)
@@ -3730,6 +3838,13 @@ async def play_info(request: Request):
     body = json.loads(await request.body() or b"{}")
     guid = body.get("item_guid", "")
     client = _client_of(request)
+    # TVBox 二级线路文件夹（fnmedia-line-folder:...）：play/info 对该目录 guid
+    # 官方后端不认识（透传 invalid sign → 客户端「加载失败」）。本地返回原生
+    # play/info 外层结构（含嵌套 item），不能只返回 item 详情对象。
+    if _parse_line_folder_guid(guid):
+        _fd = _vod_folder_play_info(guid, client)
+        if _fd is not None:
+            return _fd
     if _parse_line_item_guid(guid):
         fixed_info = _vod_play_info(guid, client)
         if fixed_info is not None:
@@ -4404,13 +4519,97 @@ async def play_record(request: Request):
         # 固定线路卡上报：归一化为原影片/基础集 guid 再记录，保证续播身份统一、
         # 不按资源站拆分；media/video guid 保留线路信息仅作参考，不参与历史键。
         body["item_guid"] = _normalize_history_guid(ig)
-        history.record(body)
+        history.record(body, snapshot=_history_snapshot(ig, body["item_guid"]))
         return JSONResponse({"code": 0, "msg": "", "data": True})
     if store.get_title_by_guid(ig) or store.get_episode(ig):
         # 记录在线播放进度到本地（继续观看），不上报官方库
-        history.record(body)
+        history.record(body, snapshot=_history_snapshot(ig, ig))
+        return JSONResponse({"code": 0, "msg": "", "data": True})
+    # store 缓存可能已淘汰该片，但 history 里已有该 guid（含快照）：进度仍应更新，
+    # 不能因此 forward 到官方（否则在线片的续播点会丢失、从头播放）。
+    if history.get(ig):
+        prev_snap = history.get_snapshot(ig)
+        history.record(body, snapshot=prev_snap)
         return JSONResponse({"code": 0, "msg": "", "data": True})
     return await forward_upstream(request)
+
+
+def _history_snapshot(raw_guid: str, norm_guid: str) -> dict | None:
+    """为一次播放记录构造精简 brief 快照（离线容错，任何异常返回 None）。
+
+    store 缓存可能已淘汰该片；快照让续播不依赖 store 是否仍保留。剧集按归一化
+    后的集 guid 提取当前集线路条目，电影存首条可播线路。
+    """
+    try:
+        import history as _hmod
+        brief = None
+        ep = store.get_episode(norm_guid)
+        if ep:
+            brief = store.get_title_by_guid(ep.get("online_guid", ""))
+        if brief is None:
+            brief = store.get_title_by_guid(norm_guid)
+        if brief is None:
+            # 复合线路卡：解析出原影片 guid 再试
+            parsed = _parse_line_item_guid(raw_guid)
+            if parsed:
+                brief = store.get_title_by_guid(parsed[0])
+                if brief is None and ep is None:
+                    ep = store.get_episode(norm_guid) or None
+        if brief is None:
+            return None
+        return _hmod.build_snapshot(brief, norm_guid, ep)
+    except Exception:  # noqa: BLE001  快照失败不得影响进度记录主流程
+        return None
+
+
+def _history_from_snapshot(rec: dict):
+    """store 缓存淘汰后，用历史快照重建 (brief, ep)。
+
+    返回 (brief, ep_or_None)；快照缺失/无效返回 (None, None)。
+    剧集快照的 lines 只含当前集条目，据此构造最小 ep 供 history_item/play_info 复用。
+    """
+    try:
+        snap = rec.get("snapshot")
+        if not isinstance(snap, dict) or not snap.get("guid"):
+            return None, None
+        brief = dict(snap)
+        ig = rec.get("item_guid", "")
+        # 集序号：真实 ep guid 是 hash 无法反解，依赖快照写入时存的 _ep_index
+        ep_idx = snap.get("_ep_index")
+        if ep_idx is None and isinstance(ig, str) and ig.startswith("ep:"):
+            try:
+                ep_idx = int(ig.rsplit(":", 1)[-1])
+            except ValueError:
+                ep_idx = None
+        ep = None
+        if ep_idx is not None:
+            try:
+                ep_idx = int(ep_idx)
+            except (TypeError, ValueError):
+                ep_idx = None
+        if ep_idx is not None:
+            lines = brief.get("lines") or {}
+            default_line = next(iter(lines), "")
+            ep = {
+                "ep_guid": snap.get("_ep_guid") or ig,
+                "online_guid": brief["guid"],
+                "index": ep_idx,
+                "episode_number": ep_idx + 1,
+                "season": 1,
+                "season_guid": season_guid(brief["guid"]),
+                "title": brief.get("title", ""),
+                "default_line": default_line,
+                "lines": list(lines.keys()),
+                "ep_title": (lines.get(default_line) or [{}])[0].get("title", "")
+                if default_line else "",
+                "line": default_line,
+            }
+        # 注意：不把精简快照回注 store 主缓存。快照每条线路只含当前集，回注会
+        # 覆盖 store 里可能存在的完整 brief（导致 is_tv 误判、ep_guid 对不上）。
+        # 快照仅在本次请求内用于构造 play/info 卡片，store 仍由搜索链路自行维护。
+        return brief, ep
+    except Exception:  # noqa: BLE001
+        return None, None
 
 
 @app.delete("/v/api/v1/play/record")
@@ -4461,15 +4660,25 @@ async def play_list(request: Request):
         if ep:
             brief = store.get_title_by_guid(ep["online_guid"])
         if not brief:
-            continue  # 缓存已淘汰的标题不再展示
+            # store 缓存已淘汰：用历史快照重建，使「继续播放」不丢失
+            brief, snap_ep = _history_from_snapshot(rec)
+            if snap_ep and not ep:
+                ep = snap_ep
+        if not brief:
+            continue  # 既无缓存也无快照（旧记录），无法展示
         show = ep.get("online_guid") if ep else brief.get("guid") or ig
         up = float(rec.get("updated_at", 0) or 0)
         card = inj.history_item(brief, rec, ep)
         card["_show"] = show
+        # 同一部剧可能同时有影片级记录和各集记录：集级（快照带 _ep_index）才是
+        # 真实续播点，优先于影片级；同级再按最近交互时间。
+        is_ep_rec = isinstance(rec.get("snapshot"), dict) and \
+            rec["snapshot"].get("_ep_index") is not None
+        rank = (1 if is_ep_rec else 0, up)
         if show:
             prev = best_by_show.get(show)
-            if prev is None or up >= prev[0]:
-                best_by_show[show] = (up, card)
+            if prev is None or rank >= prev[0]:
+                best_by_show[show] = (rank, card)
         else:
             standalone.append(card)
     online_items = [c for _, c in best_by_show.values()] + standalone
