@@ -119,26 +119,14 @@
               "size_mb": 19.84
             }
           }
-        },
-        "1.0.1-beta.3": {
-          "updated_at": "2026-11-12T06:22:25Z",
-          "changelog": "# v1.0.1-beta.3\n\n## 续播彻底修复\n- 修复飞牛客户端把续播位置钳成 0 导致从头播放：在线片 item.duration 默认为 0，\n  新增起播定位兜底，真实时长随后由播放流覆盖，不影响实际播放。\n- 固定线路 play/info 在搜索缓存淘汰后回退历史快照，复合线路 guid 不再返回空；\n  显式集序号得到尊重，手动选集与自动连播不会退回最近观看集。\n- 续播完全由插件历史快照驱动，不写入官方媒体库表，零侵入官方数据。\n\n## 片头/片尾/中段跳过与自动连播\n- 接入原生 play_config.skip_opening/skip_ending 与 /play/setConfigByItem，按账号保存。\n- 新增显式开启的中段 HLS 跳过，保留加密密钥/初始化标签与空清单回退，默认关闭。\n- 自动连播沿用 Episode 身份与 episode/list，不新增下一集路由。\n\n## 源测试与订阅\n- 批量探活支持受控并发、实时进度与中止；小众源不再因基准热门词缺失被误判失效。\n- 订阅支持刷新周期、失败退避、XML 接口保留与根错误显式提示。\n\n## 运行时瘦身\n- 移除 redroid/Android/Guard 运行时、APK/JAR 与管理入口；完整 FPK 约 29MB、公开包约 20MB。\n- 管理台侧栏可纵向滚动，窄窗口不再截断导航。",
-          "packages": {
-            "all": {
-              "download_url": "https://github.com/yujian0815/fnmedia-ext/releases/download/v1.0.1-beta.3/fnmedia-ext-1.0.1-beta.3.fpk",
-              "sha256": "50ba4eba21239f695554ed84b3866b1ef1866e2c8d773d81372489939c347eb6",
-              "size": 20821489,
-              "size_mb": 19.86
-            }
-          }
         }
       },
-      "version": "1.0.1-beta.3",
-      "download_url": "https://github.com/yujian0815/fnmedia-ext/releases/download/v1.0.1-beta.3/fnmedia-ext-1.0.1-beta.3.fpk",
-      "sha256": "50ba4eba21239f695554ed84b3866b1ef1866e2c8d773d81372489939c347eb6",
-      "size": 19.86,
-      "updated_at": "2026-11-12T06:22:25Z",
-      "changelog": "# v1.0.1-beta.3\n\n## 续播彻底修复\n- 修复飞牛客户端把续播位置钳成 0 导致从头播放：在线片 item.duration 默认为 0，\n  新增起播定位兜底，真实时长随后由播放流覆盖，不影响实际播放。\n- 固定线路 play/info 在搜索缓存淘汰后回退历史快照，复合线路 guid 不再返回空；\n  显式集序号得到尊重，手动选集与自动连播不会退回最近观看集。\n- 续播完全由插件历史快照驱动，不写入官方媒体库表，零侵入官方数据。\n\n## 片头/片尾/中段跳过与自动连播\n- 接入原生 play_config.skip_opening/skip_ending 与 /play/setConfigByItem，按账号保存。\n- 新增显式开启的中段 HLS 跳过，保留加密密钥/初始化标签与空清单回退，默认关闭。\n- 自动连播沿用 Episode 身份与 episode/list，不新增下一集路由。\n\n## 源测试与订阅\n- 批量探活支持受控并发、实时进度与中止；小众源不再因基准热门词缺失被误判失效。\n- 订阅支持刷新周期、失败退避、XML 接口保留与根错误显式提示。\n\n## 运行时瘦身\n- 移除 redroid/Android/Guard 运行时、APK/JAR 与管理入口；完整 FPK 约 29MB、公开包约 20MB。\n- 管理台侧栏可纵向滚动，窄窗口不再截断导航。",
+      "version": "1.0.1-beta.2",
+      "download_url": "https://github.com/yujian0815/fnmedia-ext/releases/download/v1.0.1-beta.2/fnmedia-ext-1.0.1-beta.2.fpk",
+      "sha256": "b347ababa6269939a092885c276b72f1263f92dc1e301d07fcd3ce6279b68068",
+      "size": 19.84,
+      "updated_at": "2026-11-12T01:47:28Z",
+      "changelog": "## v1.0.1-beta.2 — 2026-11-12（1.0 公开测试版）\n\n### 🗂 二级目录首次加载修复\n\n- 修正二级线路文件夹的 `play/info` 播放信息结构，季列表与播放信息均改为本地\n  处理，避免虚拟目录 guid 被透传给官方后端而导致首次进入“加载失败”。\n- 冷片详情的 `genres` 统一为合法数字 ID 列表，不再混入豆瓣文字标签，解决冷片\n  首次解析失败、绑定后第二次刷新却正常的问题；真机确认短暂空白后约 1 秒自动\n  刷出线路，无需手动二次刷新。\n- 保留严格同名同年绑定、后台全源兜底与强制刷新指令；未改变播放、选线、清单和\n  分片策略。\n\n### ⏯ 播放记录与精准续播\n\n- 历史记录持久化保存影片与当前集快照，搜索缓存淘汰后仍能恢复上次观看的具体集\n  与时间点，不再因缓存缺失从头播放。\n- 修复影片级与集级 guid 的续播身份错配、单集快照污染完整剧集结构，以及缓存淘汰\n  后进度上报被错误转发而丢失的问题；同一部剧优先采用集级最新进度并防止进度倒退。\n\n### 🧩 运行时与更新能力\n\n- 去安卓方向完成阶段 A 只读框架接入，补充 drpy JS 源批量探活与管理状态展示，\n  并缩减完整安装包中不再需要的 Android 构建缓存。\n- 更新检测支持预发布版本与既有代理通道；全量 345 项自动化测试与 v0.2.42 播放\n  基线通过。",
       "readme_url": "README.md"
     }
   }

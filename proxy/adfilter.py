@@ -310,6 +310,29 @@ def _ad_like_duration(total: float) -> bool:
     return 10.0 <= total <= 180.0
 
 
+def _median(values: list[int]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    return float(ordered[len(ordered) // 2])
+
+
+def _lead_group_looks_routine(lead_size: int,
+                               other_sizes: list[int]) -> bool:
+    """片头组防误判（独立实现，思路对齐 LibreTV 的中位数保护）。
+
+    采集站常把正片按固定块切分并在每个衔接处打 DISCONTINUITY，这种“片头组”
+    与后续组的分片规模接近，是常规封装边界而非广告。若片头组分片数与后续各
+    组中位数之差不超过 max(3, 中位数的一半)，判定为常规封装，不应删除。
+    """
+    if lead_size <= 0 or not other_sizes:
+        return False
+    median = _median(other_sizes)
+    if median <= 0:
+        return False
+    return abs(lead_size - median) <= max(3.0, median * 0.5)
+
+
 def _split_segments(lines: list[str]):
     """把 m3u8 行解析为 (segs[(dur,url)], blocks[[seg_idx...]])。
     块以 #EXT-X-DISCONTINUITY 为界。"""
@@ -363,6 +386,8 @@ def _detect_ad_blocks(text: str) -> tuple[str, int]:
 
     pre_duration = 0.0
     drop: set[int] = set()
+    # 各分组分片数，用于片头组的常规封装防误判
+    block_sizes = [len(b) for b in blocks]
     for k, blk in enumerate(blocks):
         if k == main_blk:
             pre_duration += sum(segs[idx][0] for idx in blk)
@@ -373,8 +398,19 @@ def _detect_ad_blocks(text: str) -> tuple[str, int]:
         hosts = {_host_of(segs[idx][1]) for idx in blk if _host_of(segs[idx][1])}
         url_blob = " ".join(segs[idx][1] for idx in blk).lower()
 
+        # 片头组若与后续各分组的分片规模中位数接近，属于常规 DISCONTINUITY
+        # 封装边界（采集站固定切块），不是广告，跳过启发式删除；URL 强信号除外。
+        is_lead = pre_duration < 60.0 and k < main_blk
+        has_kw = any(kw in url_blob for kw in _AD_URL_HINTS)
+        if is_lead and not has_kw:
+            other_sizes = [sz for j, sz in enumerate(block_sizes)
+                           if j != k and sz > 0]
+            if _lead_group_looks_routine(len(blk), other_sizes):
+                pre_duration += total
+                continue
+
         score = 0
-        if pre_duration < 60.0 and k < main_blk:
+        if is_lead:
             score += 2            # 片头
         elif k != main_blk:
             score += 1            # 片中/片尾边界
@@ -386,9 +422,6 @@ def _detect_ad_blocks(text: str) -> tuple[str, int]:
             score += 2            # CDN 域名切换
         if _ad_like_duration(total):
             score += 1
-        has_kw = any(kw in url_blob for kw in _AD_URL_HINTS)
-        if has_kw:
-            score += 3
 
         if (has_kw and _ad_like_duration(total)) or score >= 4:
             drop.update(blk)

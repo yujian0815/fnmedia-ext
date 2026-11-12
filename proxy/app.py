@@ -3712,6 +3712,13 @@ def _ensure_resume_duration(info: dict) -> dict:
             if dur <= ts:
                 # 留出余量，避免边界相等仍被判定 ts > duration
                 item["duration"] = ts + 60
+            # Web 读外层 ts；App/TV（Flutter）严格模型读 item.ts / item.watched_ts。
+            # 三处续播点必须一致，否则移动端拿到 item.ts=0 会从头播放。
+            item["ts"] = ts
+            item["watched_ts"] = ts
+            _dur = int(float(item.get("duration") or 0))
+            if _dur > 0:
+                item["runtime"] = max(1, int(_dur / 60))
     except (TypeError, ValueError):
         pass
     return info
@@ -3908,6 +3915,16 @@ def _vod_play_info(guid: str, client) -> JSONResponse | None:
     if rec:
         info["ts"] = rec.get("ts", 0)
     _ensure_resume_duration(info)
+    # App/TV（Flutter 严格模型）起播定位读 item.watched_ts / runtime，而 Web 读
+    # 外层 ts。TV 模型若只给外层 ts、item.watched_ts=0/runtime=0，移动端会从头播。
+    # 这里把同一份续播点与时长同步到移动端字段，单位与 Web 保持秒/分钟一致。
+    _resume_ts = int(info.get("ts") or 0)
+    if _resume_ts > 0:
+        item["watched_ts"] = _resume_ts
+        item["ts"] = _resume_ts
+        _item_dur = int(float(item.get("duration") or 0))
+        if _item_dur > 0:
+            item["runtime"] = max(1, int(_item_dur / 60))
     return JSONResponse({"code": 0, "msg": "", "data":
                          clientmod.normalize_detail(info, client)})
 
@@ -6292,6 +6309,35 @@ def _custom_hls_skip_ranges(picked: dict) -> list[tuple[float, float]] | None:
     return _sm.hls_ranges(season_guid(og, int(picked.get("season") or 1)))
 
 
+def _inject_hls_start(body: str, picked: dict) -> str:
+    """给点播清单注入 #EXT-X-START，让原生 HLS 播放器（App/TV）从续播点起播。
+
+    Web 的 hls.js 用 JS startPosition 定位，但 Flutter 原生播放器（ExoPlayer/
+    AVPlayer）不读 JS，只认 HLS 标准的 EXT-X-START。本地文件靠 Range seek 续播
+    正常，在线 HLS 没有该标签就会从头播。仅对带 ENDLIST 的点播 VOD 注入，直播
+    不加；同一清单只注入一次。失败原样返回，不影响播放。
+    """
+    try:
+        if not body or "#EXT-X-START" in body or "#EXT-X-ENDLIST" not in body:
+            return body
+        eg = picked.get("ep_guid")
+        if not eg:
+            return body
+        rec = history.get(eg)
+        ts = int(float((rec or {}).get("ts") or 0))
+        if ts <= 0:
+            return body
+        # PRECISE=YES 要求精确从该偏移起播；TIME-OFFSET 为正表示距片头秒数
+        tag = f"#EXT-X-START:TIME-OFFSET={ts},PRECISE=YES\n"
+        lines = body.split("\n")
+        # 插在 #EXTM3U 之后、其它标签之前（HLS 规范允许在媒体清单任意位置）
+        if lines and lines[0].strip() == "#EXTM3U":
+            return "\n".join([lines[0], tag.rstrip("\n")] + lines[1:])
+        return tag + body
+    except Exception:  # noqa: BLE001  注入失败不得影响清单可用性
+        return body
+
+
 async def _build_playlist_body(mg: str, picked: dict, request: Request):
     """抓取该线路的上游媒体列表，并把分片改写为经本代理的绝对地址。
     返回 (body_text, base_url)；失败返回 (None, None)。"""
@@ -6457,7 +6503,8 @@ async def _build_playlist_body(mg: str, picked: dict, request: Request):
                     extra = sel_qs
                 out_lines.append(_seg_url(mg, urllib.parse.urljoin(cur, line), extra))
             seg_index += 1
-    return "\n".join(out_lines) + "\n", cur
+    _body = "\n".join(out_lines) + "\n"
+    return _inject_hls_start(_body, picked), cur
 
 
 async def _get_playlist_cached(mg: str, picked: dict, request: Request,

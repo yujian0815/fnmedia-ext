@@ -81,6 +81,37 @@ class VodResumeTests(unittest.IsolatedAsyncioTestCase):
         # Web 端多集内容为 Episode 形状（显示选集入口）；续播定位不受影响
         self.assertEqual(data["type"], "Episode")
 
+    def test_ios_tv_model_carries_watched_ts_and_runtime_for_resume(self):
+        # App/TV（Flutter）固定线路走 TV 模型，起播定位读 item.watched_ts/runtime；
+        # 若这两个字段为 0 而只有外层 ts，移动端会从头播放。
+        all_eg = [episode_guid("og", "", i) for i in range(8)]
+        appmod.history.set_position(all_eg[4], 2130, 2830)
+        with patch.object(appmod.store, "get_title_by_guid", return_value=self.brief), \
+                patch.object(appmod.store, "tv_episode_guids", return_value=all_eg), \
+                patch.object(appmod.store, "get_episode",
+                             side_effect=lambda g: {
+                                 "index": all_eg.index(g), "ep_guid": g,
+                                 "online_guid": "og", "season_guid": "season",
+                                 "title": self.brief["title"],
+                                 "ep_title": f"第{all_eg.index(g)+1}集"}
+                             if g in all_eg else None), \
+                patch.object(appmod.store, "resolve_episode",
+                             side_effect=lambda og, line, idx: target(line, idx)), \
+                patch.object(appmod.store, "list_episodes",
+                             side_effect=lambda og, line=None: self.brief["lines"][line]):
+            line_guid = appmod._line_item_guid("og", "lzi::lzm3u8", 4)
+            response = appmod._vod_play_info(
+                line_guid, clientmod.Client(kind="ios"))
+        data = json.loads(response.body)["data"]
+        item = data["item"]
+        self.assertEqual(data["type"], "TV")
+        self.assertEqual(data["ts"], 2130)
+        # Flutter 定位字段必须带续播点（秒）与非零时长（分钟）
+        self.assertEqual(item["watched_ts"], 2130)
+        self.assertEqual(item["ts"], 2130)
+        self.assertGreater(item["duration"], 2130)
+        self.assertGreaterEqual(item["runtime"], 1)
+
     def test_explicit_episode_guid_is_not_overridden_by_latest_snapshot(self):
         # 原生自动连播会请求“下一集”的 line-item guid；即使最近观看记录停在第2集，
         # 也不能把显式第6集再改回第2集，否则连播/手动选集都会错集。
