@@ -71,8 +71,9 @@ class ReleaseProcessTests(unittest.TestCase):
         self.assertIn('"$LEGACY_FULL" "${LEGACY_FULL}.sha256"', script)
         self.assertNotIn('"$LITE_BASE"', script)
         self.assertNotIn('"$LITE_FPK"', script)
-        self.assertIn('git pull --rebase --autostash origin main',
-                      (root / ".github" / "workflows" / "moo-json.yml").read_text())
+        workflow = (root / ".github" / "workflows" / "moo-json.yml").read_text()
+        self.assertIn('git pull --rebase --autostash origin main', workflow)
+        self.assertIn('gh release list --limit 1', workflow)
 
 
 if __name__ == "__main__":

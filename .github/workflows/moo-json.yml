@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "要同步的 Release tag（留空=触发本次运行的 release）"
+        description: "要同步的 Release tag（留空=最新 Release）"
         required: false
         type: string
 
@@ -34,13 +34,18 @@ jobs:
 
       - name: Resolve tag
         id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [[ -n "${{ github.inputs.tag }}" ]]; then
             echo "tag=${{ github.inputs.tag }}" >> "$GITHUB_OUTPUT"
           elif [[ "${{ github.event_name }}" == "release" ]]; then
             echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
           else
-            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            # 手动派发未给 tag 时同步最新 Release，而不是误用 main 分支名。
+            latest="$(gh release list --limit 1 --json tagName --jq '.[0].tagName')"
+            test -n "$latest"
+            echo "tag=${latest}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Setup Python
