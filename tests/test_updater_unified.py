@@ -74,6 +74,9 @@ class ReleaseProcessTests(unittest.TestCase):
         # 公开 worktree 必须先快进到远端，防止本地旧 moo 覆盖 CI 更新。
         self.assertIn('git merge --ff-only --quiet origin/main', script)
         self.assertIn('禁止覆盖远端 Moo 索引', script)
+        # moo.json 不参与私有 main → 公开线的源码覆盖，且要保留公开线索引。
+        self.assertIn("--exclude='moo.json'", script)
+        self.assertIn('MOO_KEEP', script)
         workflow = (root / ".github" / "workflows" / "moo-json.yml").read_text()
         self.assertIn('git pull --rebase --autostash origin main', workflow)
         self.assertIn('gh release list --limit 1', workflow)
