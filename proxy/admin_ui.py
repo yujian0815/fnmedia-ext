@@ -29,13 +29,15 @@ body{font:15px/1.6 -apple-system,"PingFang SC","Microsoft YaHei","Noto Sans CJK 
 .sidebar{width:232px;flex:none;padding:22px 14px;background:var(--card);
   border-right:1px solid var(--line);display:flex;flex-direction:column;gap:16px;
   position:sticky;top:0;height:100vh;height:100dvh}
-.brand{display:flex;align-items:center;gap:11px;padding:0 8px}
+.brand{display:flex;align-items:center;gap:11px;padding:0 8px;flex:none}
 .brand-mark{width:42px;height:42px;border-radius:12px;flex:none;display:flex;
   align-items:center;justify-content:center;font-size:22px;background:var(--accent-soft);
   box-shadow:0 2px 8px rgba(47,111,237,.16)}
 .brand-name{font-weight:700;font-size:16px}
 .brand-sub{font-size:12px;color:var(--muted)}
-.nav{display:flex;flex-direction:column;gap:4px}
+.nav{display:flex;flex-direction:column;gap:4px;flex:1 1 auto;min-height:0;
+  overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;
+  padding-right:4px;margin-right:-4px}
 .nav-group-label{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
   color:var(--muted);padding:14px 12px 5px;opacity:.75}
 .nav-group-label:first-child{padding-top:2px}
@@ -45,7 +47,7 @@ body{font:15px/1.6 -apple-system,"PingFang SC","Microsoft YaHei","Noto Sans CJK 
 .nav-item:hover{background:var(--accent-soft)}
 .nav-item.active{background:var(--accent);color:#fff;
   box-shadow:0 4px 12px rgba(47,111,237,.28);font-weight:600}
-.sidebar-foot{margin-top:auto;font-size:12px;color:var(--muted);padding:0 8px}
+.sidebar-foot{margin-top:auto;font-size:12px;color:var(--muted);padding:0 8px;flex:none}
 
 /* ---------- 主区 ---------- */
 .main{flex:1;min-width:0;width:100%;padding:28px 32px 96px;max-width:960px}
@@ -460,6 +462,8 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <input type="text" id="srcFilter" placeholder="筛选名称/地址…" oninput="renderSources()"
                  style="margin-left:auto;max-width:168px;font-size:12px;padding:5px 9px"/>
           <button class="small" onclick="testAll()">全部测速</button>
+          <button class="small" id="srcProbeBtn" onclick="sourceProbeStart()">批量探活</button>
+          <button class="small ghost" id="srcProbeCancelBtn" style="display:none" onclick="sourceProbeCancel()">中止</button>
           <button class="small ghost" onclick="restoreBuiltin()">恢复内置源</button>
           <button class="small" onclick="exportCmsSources()" title="导出当前纯 CMS 源为 JSON 备份">⬇ 导出</button>
           <label class="btn-sm" style="border-color:var(--ok);background:var(--ok);color:#fff" title="从 JSON 文件导入 CMS 源，自动去重">
@@ -473,6 +477,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <tbody id="srcRows"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
         </table>
         </div>
+        <div id="srcProbeProgress" class="hint" style="display:none"></div>
         <div class="collapse-bar collapsed" id="srcCollapseBar" onclick="toggleSrcCollapse()">
           <span class="chev">▾</span><span id="srcCollapseTxt">展开完整列表</span></div>
         <div class="row mt" style="display:grid;grid-template-columns:150px 1fr 90px auto;gap:10px" id="addGrid">
@@ -562,6 +567,9 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
             <input type="checkbox" id="subStandalone" style="width:15px;height:15px;accent-color:var(--accent)"/>
             苹果CMS源同时「作为独立媒体库」</label>
+          <label style="display:flex;align-items:center;gap:5px;font-size:12px">自动刷新
+            <input type="number" id="subRefreshDays" value="1" min="0" max="365" title="0=纯手动；1–365 天，连续失败 3 次暂停" style="width:58px"/> 天
+          </label>
           <button class="primary small" onclick="importSubscription('text')">解析并导入</button>
         </div>
         <div id="subResult"></div>
@@ -780,8 +788,7 @@ async function switchPage(page){
   if(page==="quality")renderQuality();
   if(page==="sources"){try{loadHealth();}catch(e){}try{initSrcProxy();}catch(e){}}
   if(page==="search"){try{loadCacheStatus();}catch(e){}}
-  if(page==="tvbox"){try{loadGuardZone();}catch(e){}try{gbInit();}catch(e){}}
-  if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{loadAdfilter();}catch(e){}try{if(typeof loadSpiderMgmt==="function")loadSpiderMgmt();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}}
+  if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{loadAdfilter();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}}
   if(page==="about"){loadUpdate(false);}
 }
 $$("[data-page]").forEach(b=>b.addEventListener("click",()=>switchPage(b.dataset.page)));
@@ -1349,7 +1356,7 @@ function openSrcEdit(id){
   $("seId").value=id;$("seName").value=s.name||"";$("seApi").value=s.api||"";
   const apiInp=$("seApi"),hint=$("seHint"),isGuard=!!s.guard;
   apiInp.disabled=isGuard||!!s.builtin;
-  hint.textContent=isGuard?"加固源订阅请在「TVBox 加固」页管理，这里仅可改名称。"
+  hint.textContent=isGuard?"该源仅可改显示名称。"
     :(s.builtin?"内置源仅可改显示名称；更换接口请删除后以自定义源重新添加。"
     :"自定义源可改名称与接口地址；改地址后源 ID 会重建，搜索缓存自动清空。");
   $("srcEditMask").classList.add("show");setTimeout(()=>$("seName").focus(),50);
@@ -1403,6 +1410,36 @@ async function testAll(){
     if(d.ok)setSt(tr,`✓ ${d.elapsed_ms}ms · ${d.count}条${d.direct?(' · '+d.direct+'直链'):''}`,"ok");
     else setSt(tr,"✕ "+(d.error||"失败"),"bad");});
   toast("测速完成");
+}
+let SRC_PROBE_TIMER=null;
+async function sourceProbeStart(){
+  try{
+    await jpost("/v/api/ext/source/probe/start",{concurrency:4});
+    $("srcProbeCancelBtn").style.display="";$("srcProbeProgress").style.display="";
+    if(SRC_PROBE_TIMER)clearInterval(SRC_PROBE_TIMER);
+    SRC_PROBE_TIMER=setInterval(sourceProbePoll,700);await sourceProbePoll();
+  }catch(e){toast("启动探活失败："+e.message,"fail");}
+}
+async function sourceProbePoll(){
+  try{
+    const r=await jget("/v/api/ext/source/probe/status"),d=r.data||{};
+    $("srcProbeProgress").textContent=`探活 ${d.done||0}/${d.total||0} · 可用 ${d.alive_count||0} · ${d.running?"进行中":"已结束"}`;
+    (d.results||[]).forEach(x=>{
+      const tr=$("srcRows").querySelector(`tr[data-id="${x.id}"]`);if(!tr)return;
+      if(x.alive)setSt(tr,`✓ ${x.elapsed_ms||0}ms · ${x.count||0}条 · ${x.hit||"命中"}`,"ok");
+      else setSt(tr,"✕ "+(x.error||"失效"),"bad");
+    });
+    if(!d.running){
+      if(SRC_PROBE_TIMER){clearInterval(SRC_PROBE_TIMER);SRC_PROBE_TIMER=null;}
+      $("srcProbeCancelBtn").style.display="none";
+    }
+  }catch(e){/* 单次轮询失败下轮再试，不清空已保留结果 */}
+}
+async function sourceProbeCancel(){
+  await jpost("/v/api/ext/source/probe/cancel",{});
+  if(SRC_PROBE_TIMER){clearInterval(SRC_PROBE_TIMER);SRC_PROBE_TIMER=null;}
+  $("srcProbeCancelBtn").style.display="none";
+  $("srcProbeProgress").textContent="探活已中止，已完成结果保留";
 }
 async function loadHealth(){
   const box=$("healthRows");if(!box)return;box.innerHTML='<tr><td colspan="6" class="muted">加载中…</td></tr>';
@@ -1513,6 +1550,7 @@ async function toggleAdfilterDynamic(on){
 async function importSubscription(kind){
   const standalone=$("subStandalone").checked;
   const payload={standalone:standalone,enable_guard:"smart"};
+  payload.refresh_days=parseInt(($("subRefreshDays")?.value||"1"),10)||0;
   if(kind==="url"){payload.url=$("subUrl").value.trim();if(!payload.url){toast("请填写订阅 URL","fail");return;}}
   else{payload.text=$("subText").value.trim();if(!payload.text){toast("请粘贴配置 JSON","fail");return;}}
   const out=$("subResult");out.innerHTML='<div class="muted sm">正在解析订阅并探测源，请稍候…</div>';
@@ -1523,8 +1561,6 @@ async function importSubscription(kind){
     toast("导入完成");
     try{loadAdfilter();}catch(e){}
     try{await loadStatus();}catch(e){}
-    try{await loadGuard();}catch(e){}
-    try{await loadSpiderMgmt();}catch(e){}
     try{await loadDrpyMgmt();}catch(e){}
   }catch(e){out.innerHTML='<div class="hint" style="color:var(--danger)">导入出错：'+esc(String(e))+'</div>';}
 }
@@ -1551,8 +1587,6 @@ async function importFantaiying(){
     toast("饭太硬导入完成（耗时 "+Math.round((Date.now()-t0)/1000)+" 秒）");
     try{loadAdfilter();}catch(e){}
     try{await loadStatus();}catch(e){}
-    try{await loadGuard();}catch(e){}
-    try{await loadSpiderMgmt();}catch(e){}
     try{await loadDrpyMgmt();}catch(e){}
   }catch(e){
     clearInterval(waitTimer);
@@ -1561,26 +1595,13 @@ async function importFantaiying(){
     if(btn){btn.disabled=false;btn.style.opacity="";btn.style.cursor="";}
   }
 }
-function goDeploy(){switchPage("tvbox");setTimeout(()=>{const b=$("scInstallAll");if(b)b.click();},80);}
 function renderSubResult(d){
-  const cms=d.cms||{},g=d.guard||{},rt=d.runtime,skips=d.skipped_detail||[];
+  const cms=d.cms||{},skips=d.skipped_detail||[];
   let h="";
-  // 运行时引导（加固源已登记但运行时未就绪 / 公开构建）
-  if(g && !g.skipped_build && g.items && g.items.length && rt && !rt.ready){
-    h+='<div style="margin:10px 0;padding:10px 12px;border:1px solid var(--warn,#d59a2b);border-radius:8px;background:rgba(213,154,43,.08)">'
-     + '<div style="font-weight:600;margin-bottom:4px">已导入 '+g.items.length+' 个加固秒播源，但本地安卓运行时未就绪</div>'
-     + '<div class="muted sm" style="margin-bottom:8px">'+esc(rt.reason||"运行时未连接")+'。源已保存，部署运行时后立即可播，无需重新导入。</div>'
-     + '<button class="primary small" onclick="goDeploy()">一键部署外挂运行时</button></div>';
-  }
-  if(g && g.skipped_build){
-    h+='<div class="hint" style="margin:10px 0">订阅中含加固源，但当前为公开构建（无安卓运行时），已仅导入苹果CMS源。</div>';
-  }
   // 汇总
-  const cmsOk=cms.added||0, gOk=(g.items||[]).filter(x=>x.enabled).length;
-  const csp=d.csp||{}, dr=d.drpy||{};
-  const cspOk=(csp.items||[]).filter(x=>x.enabled).length;
+  const cmsOk=cms.added||0, dr=d.drpy||{};
   const drOk=(dr.items||[]).filter(x=>x.enabled).length;
-  const totalOk=cmsOk+gOk+cspOk+drOk;
+  const totalOk=cmsOk+drOk;
   h+='<div style="margin:8px 0;font-weight:600">共扫描 '+(d.scanned||0)+' 个站点'
     +(d.subscriptions?('（含 '+d.subscriptions+' 个子订阅）'):'')+'，新增可直接使用 <b style="color:var(--ok,#3a9)">'+totalOk+'</b> 个。</div>';
   // 苹果CMS
@@ -1589,49 +1610,6 @@ function renderSubResult(d){
     (cms.added_names||[]).forEach(n=>{h+='<div class="subrow ok"><span>＋ '+esc(n)+'</span><span class="tag">已启用</span></div>';});
     h+='</div>';
   }
-  // 加固
-  if(g && g.items && g.items.length){
-    h+='<div class="subgrp"><div class="subgrp-t">🛡️ Guard 加固秒播源　自动启用 '+gOk+' · 风险默认关 '+(g.risk_names||[]).length+'</div>';
-    g.items.forEach(it=>{
-      const tag=it.enabled?'<span class="tag">已启用</span>'
-        : ('<span class="tag warn">'+(it.risk?esc(it.risk_reason||"风险源"):"默认关")+'</span>');
-      const cb='<label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">'
-        +'<input type="checkbox" '+(it.enabled?"checked":"")
-        +' onchange="subToggleGuard(\''+esc(it.key)+'\',this.checked)" style="width:14px;height:14px;accent-color:var(--accent)"/>启用</label>';
-      h+='<div class="subrow"><span>'+esc(it.name||it.key)+'</span><span style="display:flex;align-items:center;gap:8px">'+tag+cb+'</span></div>';
-    });
-    h+='</div>';
-  }
-  if(g && g.error){h+='<div class="hint" style="color:var(--danger)">加固源写入失败：'+esc(g.error)+'</div>';}
-  // 普通 csp_ 爬虫
-  if(csp && csp.skipped_build){
-    h+='<div class="hint" style="margin:10px 0">订阅中含普通爬虫源，但当前为公开构建（无安卓运行时），已跳过。</div>';
-  } else if(csp && (csp.items||[]).length){
-    const jar=csp.jar||{};
-    const jarBad=jar && jar.ok===false;
-    h+='<div class="subgrp"><div class="subgrp-t">🕷️ 普通爬虫源（csp_）　自动启用 '+cspOk+' / '+(csp.items||[]).length
-      +(jarBad?' <span class="tag warn">jar 未就绪</span>':'')+'</div>';
-    if(jarBad){
-      h+='<div style="margin:6px 0;padding:8px 10px;border:1px solid var(--warn,#d59a2b);border-radius:8px;background:rgba(213,154,43,.08)">'
-       + '<div class="muted sm">爬虫 jar 自动下载失败：'+esc(jar.error||"源站不可达")+'</div>'
-       + '<div class="muted sm" style="margin:3px 0 6px;word-break:break-all">'+esc(jar.url||"")+'</div>'
-       + '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">'
-       + '<button class="small" onclick="retryJar(this,\''+esc(jar.url||"")+'\')">重试下载</button>'
-       + '<label class="small" style="border:1px solid var(--line,#ccc);border-radius:6px;padding:4px 10px;cursor:pointer">手动补传 jar'
-       + '<input type="file" accept=".jar,.zip" style="display:none" onchange="uploadJar(this,\''+esc(jar.url||"")+'\')"></label></div></div>';
-    }
-    csp.items.forEach(it=>{
-      const state=it.enabled?'<span class="tag">已启用</span>'
-        : (it.risk?'<span class="tag warn">风险源·默认关</span>'
-           : (it.has_jar?'<span class="tag warn">默认关</span>':'<span class="tag warn">缺 jar</span>'));
-      const cb='<label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">'
-        +'<input type="checkbox" '+(it.enabled?"checked":"")
-        +' onchange="spToggle(this,\''+esc(it.key)+'\')" style="width:14px;height:14px;accent-color:var(--accent)"/>启用</label>';
-      h+='<div class="subrow"><span>'+esc(it.name||it.key)+'</span><span style="display:flex;align-items:center;gap:8px">'+state+cb+'</span></div>';
-    });
-    h+='</div>';
-  }
-  if(csp && csp.error){h+='<div class="hint" style="color:var(--danger)">普通爬虫写入失败：'+esc(csp.error)+'</div>';}
   // 远程 DRPY
   if(dr && dr.skipped_build){
     h+='<div class="hint" style="margin:10px 0">订阅中含远程 JS 爬虫，但当前为公开构建（无 Node 运行时），已跳过。</div>';
@@ -1772,6 +1750,52 @@ async function loadOnline(){
     <td>${esc(x.provider)}</td><td>${x.episodes}</td></tr>`).join("");
 }
 
+/* ---------- PanSou 盘搜（二级线路墙网盘高清来源） ---------- */
+async function loadPansou(){
+  const card=$("pansouCard");
+  if(!card)return;
+  try{
+    const r=await jget("/v/api/ext/pansou/config");
+    const d=r.data||{};
+    if(d.supported===false){card.style.display="none";return;}
+    card.style.display="";
+    $("psEnabled").checked=!!d.enabled;
+    $("psUrl").value=d.url||"http://127.0.0.1:8080";
+    const types=(d.cloud_types||"quark,uc,aliyun").split(",").map(x=>x.trim()).filter(Boolean);
+    $$(".ps-cloud").forEach(cb=>{cb.checked=types.includes(cb.value);});
+    // 网盘登录态提示：三家全未登录时高亮，引导去下方扫码登录
+    const login=d.pan_logged_in||{};
+    const nameMap={quark:"夸克",uc:"UC",ali:"阿里云盘"};
+    const stateTxt=Object.keys(nameMap).map(k=>`${nameMap[k]}:${login[k]?"已登录":"未登录"}`).join("　");
+    const stateEl=$("psLoginState");if(stateEl)stateEl.textContent=stateTxt;
+    const anyLogin=Object.values(login).some(Boolean);
+    const warn=$("psLoginWarn");if(warn)warn.style.display=anyLogin?"none":"block";
+  }catch(e){console.error("loadPansou",e);}
+}
+async function savePansou(){
+  const msg=$("psMsg");
+  try{
+    const cloud=$$(".ps-cloud").filter(cb=>cb.checked).map(cb=>cb.value);
+    if(!cloud.length){msg.textContent="至少选择一种可原画网盘";msg.style.color="var(--err)";return;}
+    const r=await jpost("/v/api/ext/pansou/config",{
+      enabled:$("psEnabled").checked,
+      url:$("psUrl").value.trim(),
+      cloud_types:cloud.join(",")
+    });
+    if(r.code===0){msg.textContent="已保存";msg.style.color="var(--ok)";toast("PanSou 配置已保存");}
+    else{msg.textContent=r.msg||"保存失败";msg.style.color="var(--err)";}
+  }catch(e){msg.textContent="请求失败："+e;msg.style.color="var(--err)";}
+}
+async function testPansou(){
+  const msg=$("psMsg");
+  try{
+    msg.textContent="测试中…";msg.style.color="var(--muted,#6b7280)";
+    const r=await jpost("/v/api/ext/pansou/test",{url:$("psUrl").value.trim()});
+    const d=r.data||{};
+    if(r.code===0&&d.ok){msg.textContent="连接成功（搜索 total="+d.total+"）";msg.style.color="var(--ok)";}
+    else{msg.textContent=r.msg||"连接失败";msg.style.color="var(--err)";}
+  }catch(e){msg.textContent="请求失败："+e;msg.style.color="var(--err)";}
+}
 
 
 /* ---------- 资源站取源代理（搜索/分类/测速，视频流仍直连） ---------- */

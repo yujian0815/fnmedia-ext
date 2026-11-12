@@ -381,11 +381,13 @@ def classify_site(site: dict) -> tuple[str, dict | None]:
         else:
             return "skip", None
     is_json = bool(re.search(r"at/json|/json(\?|$)|format=json", api, re.I))
-    if is_json:
+    is_xml = bool(re.search(r"at/xml|/xml(\?|$)|format=xml", api, re.I))
+    if is_json or is_xml:
+        # 显式 at/xml 必须保留原接口；不能再强制改写成 at/json，否则 XML-only
+        # 站点会在搜索与探活时被误判为不支持。
         norm_api = api
     else:
-        # 统一为苹果CMS JSON 接口：/provide/vod[/] → /provide/vod/at/json，
-        # 保留原有 query（如采集站 token）。仅支持 XML 的站点会在探测时被剔除。
+        # 仅未声明格式的 /provide/vod 补全为 at/json，保留原有 query。
         m = re.match(r"^(.*?/provide/vod)/?(\?.*)?$", api, re.I)
         if m:
             norm_api = m.group(1).rstrip("/") + "/at/json" + (m.group(2) or "")
@@ -728,15 +730,20 @@ async def load_subscription_full(url: str | None = None,
                 import subfetch
                 async with subfetch.async_sub_client() as client:
                     raw = await fetch_text(client, u)
-            except Exception:
-                return
+            except Exception as exc:  # noqa: BLE001
+                if depth == 0:
+                    raise RuntimeError(f"订阅根地址拉取失败：{exc}") from exc
+                return  # 子订阅失败不拖垮整个根订阅
         cfg = parse_config_text(raw or "")
         if not cfg:
+            if depth == 0:
+                raise ValueError("订阅根内容为空或格式无法识别")
             return
         sub_spider = cfg.get("spider") if isinstance(cfg.get("spider"), str) else ""
         if not spider and (depth == 0) and sub_spider:
             spider = sub_spider
-        if depth == 0 and isinstance(cfg.get("rules"), list):
+        if isinstance(cfg.get("rules"), list):
+            # 子订阅也允许携带去广告规则；合并时由 adfilter 按 hosts+regex 去重。
             rules.extend(cfg["rules"])
         sub_base = u or ""
         sub_jar = _spider_jar_url(sub_spider, sub_base)

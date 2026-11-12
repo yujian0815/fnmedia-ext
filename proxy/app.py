@@ -1099,6 +1099,18 @@ async def lifespan(app: FastAPI):
     app.state.update_task = asyncio.create_task(
         updater.periodic_loop(app.state.stop_update))
 
+    # 订阅按各自周期有界刷新：单次≤5、并发≤2、连续失败3次暂停；
+    # 失败保留旧源，不在起播/搜索关键路径执行。
+    async def _refresh_subscription(url: str):
+        class _Req:
+            async def json(self):
+                return {"url": url}
+        resp = await ext_import_subscription(_Req())
+        if resp.get("code") != 0:
+            raise RuntimeError(resp.get("msg") or "订阅刷新失败")
+    import subscriptions as _subs
+    app.state.subscription_task = _subs.start_scheduler(_refresh_subscription)
+
 
     try:
         yield
@@ -1194,7 +1206,8 @@ async def _access(request: Request, call_next):
     _hist_tokens = None
     try:
         if request.url.path.startswith(("/v/api/v1/play/", "/v/api/v1/item/",
-                                        "/v/api/v1/play", "/v/media/online")):
+                                        "/v/api/v1/play", "/v/media/online",
+                                        "/v/api/ext/skip-marks")):
             _u = fnusers.resolve(request)
             if _u.get("known"):
                 _hist_tokens = histmod.set_current_user(
@@ -3683,6 +3696,27 @@ async def favorite_list(request: Request):
     return JSONResponse(ldata)
 
 
+def _ensure_resume_duration(info: dict) -> dict:
+    """防止飞牛起播定位把有效 ts 钳成 0。
+
+    飞牛 Web 起播用 ``e.ts > item.duration ? item.duration : e.ts`` 定位；
+    在线片 item.duration 默认为 0（真实时长在 streamData 就绪后才覆盖），
+    会把任何 ts>0 钳成 0，导致从头播放。这里在 duration=0 且有 ts 时给一个
+    仅用于起播定位的兜底值，真实 video_stream.duration 随后仍会覆盖它。
+    """
+    try:
+        ts = int(float(info.get("ts") or 0))
+        item = info.get("item")
+        if isinstance(item, dict) and ts > 0:
+            dur = int(float(item.get("duration") or 0))
+            if dur <= ts:
+                # 留出余量，避免边界相等仍被判定 ts > duration
+                item["duration"] = ts + 60
+    except (TypeError, ValueError):
+        pass
+    return info
+
+
 def _online_play_info(guid: str, request: Request) -> dict | None:
     """对已绑定的在线标题（brief）构造原生播放 info。
 
@@ -3696,7 +3730,7 @@ def _online_play_info(guid: str, request: Request) -> dict | None:
         rec0 = history.get(guid)
         if rec0:
             info["ts"] = rec0.get("ts", 0)
-        return info
+        return _ensure_resume_duration(info)
     brief = store.get_title_by_guid(guid)
     # store 缓存淘汰兜底：用历史快照重建（续播不再依赖易失的搜索缓存）
     snap_rec = history.get(guid)
@@ -3706,7 +3740,7 @@ def _online_play_info(guid: str, request: Request) -> dict | None:
             info = (inj.episode_play_info(snap_ep) if snap_ep
                     else inj.play_info(brief))
             info["ts"] = snap_rec.get("ts", 0)
-            return info
+            return _ensure_resume_duration(info)
     if not brief:
         return None
     rec = history.get(guid)
@@ -3720,7 +3754,7 @@ def _online_play_info(guid: str, request: Request) -> dict | None:
             if _se is not None:
                 info = inj.episode_play_info(_se)
                 info["ts"] = latest_ep_rec.get("ts", 0)
-                return info
+                return _ensure_resume_duration(info)
     if inj.is_tv(brief):
         ep_guids = store.tv_episode_guids(guid, regular_only=True)
         if ep_guids:
@@ -3733,11 +3767,61 @@ def _online_play_info(guid: str, request: Request) -> dict | None:
                 if ep:
                     info = inj.episode_play_info(ep)
                     info["ts"] = resume_ts
-                    return info
+                    return _ensure_resume_duration(info)
     info = inj.play_info(brief)
     if rec:
         info["ts"] = rec.get("ts", 0)
-    return info
+    return _ensure_resume_duration(info)
+
+
+def _vod_play_info_from_snapshot(og: str, line: str, index: int,
+                                 client) -> JSONResponse | None:
+    """store 淘汰后，用历史快照为固定线路卡重建 play/info。
+
+    快照按基础集 guid 存了当前集线路；这里尊重请求里显式的 line/index，
+    只借快照里的 brief 元数据与 ts，不回注 store，避免污染完整缓存。
+    """
+    try:
+        eg = episode_guid(og, "", index)
+        rec = history.get(eg) or history.get(og)
+        if not rec:
+            rec = history.latest_episode_record(og)
+        if not rec:
+            return None
+        brief, snap_ep = _history_from_snapshot(rec)
+        if not brief or not snap_ep:
+            return None
+        snap_ep = dict(snap_ep)
+        snap_ep["index"] = index
+        snap_ep["ep_guid"] = eg
+        snap_ep["season"] = snap_ep.get("season") or 1
+        snap_ep["season_guid"] = season_guid(og, int(snap_ep.get("season") or 1))
+        # 能从快照重建出 snap_ep（带集序号）即按剧集 Episode 处理；不能依赖
+        # is_tv(brief)，因为快照只含当前集线路，_ep_count 会把连载剧误判成电影。
+        if snap_ep.get("index") is not None:
+            info = inj.episode_play_info(snap_ep)
+            info["type"] = "Episode"
+            info["guid"] = eg
+            info["media_guid"] = ep_media_guid(eg, line)
+            info["video_guid"] = ep_video_guid(eg, line)
+            witem = info.get("item") or {}
+            witem["guid"] = _line_item_guid(og, line, index)
+            witem["parent_guid"] = _line_season_guid(
+                og, line, int(snap_ep.get("season") or 1))
+            witem["media_guid"] = ep_media_guid(eg, line)
+            witem["video_guid"] = ep_video_guid(eg, line)
+            info["ts"] = rec.get("ts", 0)
+        else:
+            info = inj.play_info(brief)
+            info["media_guid"] = ep_media_guid(og, line)
+            info["video_guid"] = ep_video_guid(og, line)
+            info["ts"] = rec.get("ts", 0)
+        _ensure_resume_duration(info)
+        return JSONResponse({"code": 0, "msg": "", "data":
+                             clientmod.normalize_detail(info, client)})
+    except Exception:
+        _log.info("fixed-line snapshot fallback failed", exc_info=True)
+        return None
 
 
 def _vod_play_info(guid: str, client) -> JSONResponse | None:
@@ -3747,31 +3831,25 @@ def _vod_play_info(guid: str, client) -> JSONResponse | None:
     og, line, index = parsed
     brief = store.get_title_by_guid(og)
     if not brief:
-        return None
+        return _vod_play_info_from_snapshot(og, line, index, client)
     is_pansou = _is_pansou_line_name(line)
-    # 续播定位：用户从固定线路卡点进某剧，应从「上次看到的那集」续播，而不是
-    # 机械地用线路卡默认的 index（通常第1集）。用该剧名下最近交互的集记录定位，
-    # 保留其 ts；无集记录时才沿用请求 index（首次观看/从头看）。T4 保留原语义。
-    if not is_pansou and brief.get("locator", {}).get("kind") != "t4":
-        _latest = history.latest_episode_record(og)
-        if _latest and _latest.get("snapshot", {}).get("_ep_index") is not None:
-            _resume_idx = int(_latest["snapshot"]["_ep_index"])
-            if _resume_idx >= 0:
-                index = _resume_idx
+    # 必须尊重请求中显式编码的集 index：线路卡已用 _vod_resume_index 生成默认
+    # 续播卡，而 episode/list 的每一集与原生自动连播的“下一集”都有明确 guid。
+    # 不能再拿 latest_episode_record 覆盖它，否则手动选集和连播都会退回最近观看集。
     if is_pansou:
         # PanSou 虚拟手动线不在 store，用其专用 target，不做普通集解析。
         target = _pansou_manual_target(index)
     else:
         target = store.resolve_episode(og, line, index)
         if not target:
-            return None
+            return _vod_play_info_from_snapshot(og, line, index, client)
     is_tv = inj.is_tv(brief)
     eg = episode_guid(og, "", index)
     base_guid = eg if is_tv else og
     if is_tv:
         ep = store.get_episode(eg)
         if not ep:
-            return None
+            return _vod_play_info_from_snapshot(og, line, index, client)
         # 飞牛 Web 只在 play/info 为 Episode 形状（type=Episode、parent 指向季、
         # 带 season/episode 序号）时渲染「选集」入口；TV/detail 形状会被当成独立影片而
         # 不显示选集。故 Web 多集内容复用 episode_play_info 的原生形状（与播放历史入口
@@ -3792,6 +3870,7 @@ def _vod_play_info(guid: str, client) -> JSONResponse | None:
             _rec = history.get(eg) or history.get(og)
             if _rec:
                 info["ts"] = _rec.get("ts", 0)
+            _ensure_resume_duration(info)
             return JSONResponse({"code": 0, "msg": "", "data":
                                  clientmod.normalize_detail(info, client)})
         info = inj.episode_play_info(ep)
@@ -3828,6 +3907,7 @@ def _vod_play_info(guid: str, client) -> JSONResponse | None:
     rec = history.get(base_guid)
     if rec:
         info["ts"] = rec.get("ts", 0)
+    _ensure_resume_duration(info)
     return JSONResponse({"code": 0, "msg": "", "data":
                          clientmod.normalize_detail(info, client)})
 
@@ -3865,6 +3945,7 @@ async def play_info(request: Request):
         if rec:
             info["ts"] = rec.get("ts", 0)
         _prewarm_from_info(info)
+        _ensure_resume_duration(info)
         return JSONResponse({"code": 0, "msg": "",
                              "data": clientmod.normalize_detail(info, client)})
     brief = store.get_title_by_guid(guid)
@@ -3918,6 +3999,53 @@ async def play_info(request: Request):
     _prewarm_from_info(info)
     return JSONResponse({"code": 0, "msg": "",
                          "data": clientmod.normalize_detail(info, client)})
+
+
+@app.post("/v/api/v1/play/setConfigByItem")
+async def play_set_config_by_item(request: Request):
+    """飞牛原生跳片头/片尾配置；同时接受通用 opening/middle/ending 标记。
+
+    body 直接是配置对象（不是 {data:{...}} 包装），与官方 Web 调用一致。
+    线路季 guid 先归一化为基础季身份，保证换线后仍共享同一份标记。
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    guid = _normalize_history_guid(str(body.get("guid") or body.get("parent_guid") or ""))
+    if not guid:
+        return JSONResponse({"code": 400, "msg": "缺少 guid", "data": None},
+                            status_code=400)
+    import skip_marks as _sm
+    try:
+        _sm.set_mark(guid, body)
+    except ValueError as exc:
+        return JSONResponse({"code": 400, "msg": str(exc), "data": None},
+                            status_code=400)
+    return JSONResponse({"code": 0, "msg": "", "data": {
+        "guid": guid, "play_config": _sm.play_config(guid)}})
+
+
+@app.get("/v/api/ext/skip-marks")
+async def ext_skip_marks_get(request: Request):
+    import skip_marks as _sm
+    guid = _normalize_history_guid(request.query_params.get("guid") or "")
+    if not guid:
+        return JSONResponse({"code": 400, "msg": "缺少 guid", "data": None},
+                            status_code=400)
+    return JSONResponse({"code": 0, "msg": "", "data": {
+        "guid": guid, "mark": _sm.get(guid), "play_config": _sm.play_config(guid)}})
+
+
+@app.delete("/v/api/ext/skip-marks")
+async def ext_skip_marks_delete(request: Request):
+    import skip_marks as _sm
+    guid = _normalize_history_guid(request.query_params.get("guid") or "")
+    if not guid:
+        return JSONResponse({"code": 400, "msg": "缺少 guid", "data": None},
+                            status_code=400)
+    _sm.delete(guid)
+    return JSONResponse({"code": 0, "msg": "", "data": True})
 
 
 def _line_choices(target: dict, *, include_pansou: bool = True) -> list[dict]:
@@ -6155,6 +6283,15 @@ def _playlist_cache_key(picked: dict) -> str:
     return f'{picked.get("online_guid","")}|{picked.get("line","")}|{int(picked.get("index",0) or 0)}'
 
 
+def _custom_hls_skip_ranges(picked: dict) -> list[tuple[float, float]] | None:
+    """仅用户显式开启的 middle 清单跳过；默认 None，保持既有播放语义。"""
+    og = picked.get("online_guid")
+    if not og or picked.get("t4"):
+        return None
+    import skip_marks as _sm
+    return _sm.hls_ranges(season_guid(og, int(picked.get("season") or 1)))
+
+
 async def _build_playlist_body(mg: str, picked: dict, request: Request):
     """抓取该线路的上游媒体列表，并把分片改写为经本代理的绝对地址。
     返回 (body_text, base_url)；失败返回 (None, None)。"""
@@ -6201,7 +6338,9 @@ async def _build_playlist_body(mg: str, picked: dict, request: Request):
     try:
         import adfilter as _adfilter
         if _adfilter.enabled():
-            text, _ad_removed = _adfilter.filter_hls(text, cur or src_url)
+            text, _ad_removed = _adfilter.filter_hls(
+                text, cur or src_url,
+                skip_ranges=_custom_hls_skip_ranges(picked))
     except Exception:
         _log.info("hls adfilter failed", exc_info=True)
 
@@ -8198,21 +8337,22 @@ async def ext_source_test(request: Request):
 @app.post("/v/api/ext/source/test-all")
 async def ext_source_test_all(request: Request):
     """并发探测全部源，返回 [{id,name,...result}]（对齐 v0.2.42 管理台）。"""
+    sem = asyncio.Semaphore(4)  # 有界并发，避免一次性打爆多个源站
+
     async def one(s):
-        try:
-            r = await providers.probe_source(
-                s["api"], keyword="庆余年", source=s)
-            if not isinstance(r, dict):
-                r = {}
-            r.update(id=s["id"], name=s["name"],
-                     enabled=bool(s.get("enabled")),
-                     builtin=bool(s.get("builtin")))
-            return r
-        except Exception:
-            return {"id": s.get("id"), "name": s.get("name"),
-                    "ok": False, "error": "探测异常",
-                    "enabled": bool(s.get("enabled")),
-                    "builtin": bool(s.get("builtin"))}
+        async with sem:
+            try:
+                if not isinstance(r, dict):
+                    r = {}
+                r.update(id=s["id"], name=s["name"],
+                         enabled=bool(s.get("enabled")),
+                         builtin=bool(s.get("builtin")))
+                return r
+            except Exception:
+                return {"id": s.get("id"), "name": s.get("name"),
+                        "ok": False, "error": "探测异常",
+                        "enabled": bool(s.get("enabled")),
+                        "builtin": bool(s.get("builtin"))}
     results = await asyncio.gather(
         *[one(s) for s in config.all_sources()], return_exceptions=True)
     out = [r for r in results if isinstance(r, dict)]
@@ -8247,8 +8387,9 @@ async def ext_source_health_check(request: Request):
                      "elapsed_ms": 0, "count": 0, "sample": "",
                      "error": type(exc).__name__, "hit": "", "tried": []}
             sk = sourcehealth.source_key_of(s.get("id"), s) or s.get("id", "")
-            # 回写源健康：失效累计失败（达阈值熔断），有效则清零失败计数
-            if sk:
+            # 回写源健康：仅明确的有效/失效才累计；可访问但无基准热门命中
+            # （alive=None）不进入播放熔断，避免误伤小众正常源。
+            if sk and r.get("alive") is not None:
                 sourcehealth.record(sk, bool(r.get("alive")),
                                     (r.get("elapsed_ms") or 0) / 1000.0)
             return {
@@ -8267,6 +8408,35 @@ async def ext_source_health_check(request: Request):
         "dead": len(results) - alive_n,
         "keywords": list(providers.PROBE_HOT_KEYWORDS),
         "results": results}}
+
+
+@app.post("/v/api/ext/source/probe/start")
+async def ext_source_probe_start(request: Request):
+    """启动可取消的 CMS 源批量探活（默认并发 4，实时进度）。"""
+    import source_probe as _probe
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        concurrency = max(1, min(8, int(body.get("concurrency") or 4)))
+    except (TypeError, ValueError):
+        concurrency = 4
+    targets = [s for s in config.all_sources() if _is_pure_cms(s)]
+    return {"code": 0, "msg": "", "data": await _probe.start(
+        targets, concurrency=concurrency)}
+
+
+@app.get("/v/api/ext/source/probe/status")
+async def ext_source_probe_status():
+    import source_probe as _probe
+    return {"code": 0, "msg": "", "data": _probe.status()}
+
+
+@app.post("/v/api/ext/source/probe/cancel")
+async def ext_source_probe_cancel():
+    import source_probe as _probe
+    return {"code": 0, "msg": "", "data": _probe.cancel()}
 
 
 def _is_pure_cms(s: dict) -> bool:
@@ -8340,19 +8510,6 @@ async def ext_source_import_file(request: Request):
     return {"code": 0, "msg": "", "data": {"added": added, "skipped": skipped,
                                             "ignored_noncms": noncms}}
 
-
-
-async def ext_source_test_all(request: Request):
-    """并发探测全部源，返回 [{id,name,...result}]。"""
-    async def one(s):
-        r = await providers.probe_source(s["api"], source=s)
-        r.update(id=s["id"], name=s["name"], enabled=bool(s.get("enabled")),
-                 builtin=bool(s.get("builtin")))
-        return r
-    results = await asyncio.gather(*[one(s) for s in config.all_sources()],
-                                   return_exceptions=True)
-    out = [r for r in results if isinstance(r, dict)]
-    return {"code": 0, "msg": "", "data": out}
 
 
 @app.post("/v/api/ext/source/import-tvbox")
@@ -8497,7 +8654,7 @@ async def ext_import_subscription(request: Request):
                                 status_code=400)
     except Exception as exc:
         return JSONResponse({"code": 502,
-                             "msg": f"获取/解析订阅失败：{type(exc).__name__}"},
+                             "msg": f"获取/解析订阅失败：{type(exc).__name__}: {str(exc)[:200]}"},
                             status_code=502)
 
     # 合并订阅自带的 m3u8 去广告规则（TVBox/OK影视 Pro rules），去重持久化
@@ -8569,6 +8726,12 @@ async def ext_import_subscription(request: Request):
         _search_cache.clear(); _AGG_CACHE.clear()
         _schedule_routes_refresh()
 
+    sub_url = str(body.get("url") or "").strip()
+    if sub_url:
+        import subscriptions as _subs
+        _subs.register(sub_url, name=str(body.get("name") or ""),
+                       refresh_days=body.get("refresh_days", 1))
+
     return {"code": 0, "msg": "", "data": {
         "scanned": len(raw_sites),
         "subscriptions": _subs,
@@ -8578,6 +8741,8 @@ async def ext_import_subscription(request: Request):
             "added": len(cms_added),
             "added_names": cms_added,
             "duplicate": cms_dup,
+            "probe_truncated": max(0, len(cms_cands) - 80),
+            "add_truncated": max(0, len(cms_cands) - 60),
         },
         "guard": guard_report,
         "csp": csp_report,
@@ -8587,6 +8752,38 @@ async def ext_import_subscription(request: Request):
         "skipped_detail": skipped[:60],
         "ad_rules_added": ad_rules_added,
     }}
+
+
+@app.get("/v/api/ext/subscriptions")
+async def ext_subscriptions_list():
+    import subscriptions as _subs
+    return {"code": 0, "msg": "", "data": _subs.list_subscriptions()}
+
+
+@app.post("/v/api/ext/subscriptions/refresh-days")
+async def ext_subscriptions_refresh_days(request: Request):
+    import subscriptions as _subs
+    body = await request.json()
+    url = str(body.get("url") or "").strip()
+    if not url:
+        return JSONResponse({"code": 400, "msg": "缺少 url", "data": None},
+                            status_code=400)
+    return {"code": 0, "msg": "", "data": _subs.set_refresh_days(
+        url, body.get("refresh_days", 0))}
+
+
+@app.post("/v/api/ext/subscriptions/refresh")
+async def ext_subscriptions_refresh_now():
+    import subscriptions as _subs
+    # 与后台调度共用同一导入路径；手动成功会清除失败暂停状态。
+    async def _refresh(url: str):
+        class _Req:
+            async def json(self):
+                return {"url": url}
+        resp = await ext_import_subscription(_Req())
+        if resp.get("code") != 0:
+            raise RuntimeError(resp.get("msg") or "订阅刷新失败")
+    return {"code": 0, "msg": "", "data": await _subs.refresh_due(_refresh)}
 
 
 @app.get("/v/api/ext/adfilter/status")

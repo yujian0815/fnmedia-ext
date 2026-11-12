@@ -436,7 +436,7 @@ async def probe_source(api: str, keyword: str = "庆余年",
                 r2 = await client.get(
                     api, params={"ac": "list", "pg": 1},
                     headers={"User-Agent": "Mozilla/5.0"})
-                j2 = r2.json()
+                j2 = parse_cms_xml(r2.text) if _is_xml_api(api) else r2.json()
             if isinstance(j2, dict) and j2.get("code") in (1, "1"):
                 return {"ok": True, "status": 200, "elapsed_ms": ms,
                         "count": 0, "sample": "",
@@ -474,7 +474,12 @@ async def probe_source_alive(source: dict, timeout: float = 8.0,
             hit = kw
             return {**r, "alive": True, "hit": hit, "tried": tried,
                     "elapsed_ms": int((time.monotonic() - t0) * 1000)}
-    # 全部关键词都无结果：判定失效（保留最后一次的错误/状态供展示）
+    # 全部关键词都无结果：若接口仍能返回合法 CMS 结构，只说明没有这些热门片，
+    # 不能据此把正常小众源熔断。用 alive=None 表示“可访问但无基准命中”。
+    if last.get("ok"):
+        return {**last, "alive": None, "reachable": True, "hit": "", "tried": tried,
+                "reason": "接口正常但基准热门词无结果",
+                "elapsed_ms": int((time.monotonic() - t0) * 1000)}
     return {**last, "alive": False, "hit": "", "tried": tried,
             "elapsed_ms": int((time.monotonic() - t0) * 1000)}
 

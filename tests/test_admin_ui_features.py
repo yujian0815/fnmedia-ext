@@ -17,7 +17,7 @@ class AdminUiFeatureTests(unittest.TestCase):
         html = admin_ui.ADMIN_HTML
         ids = re.findall(r'id="([A-Za-z0-9_]+)"', html)
         self.assertEqual({k: v for k, v in Counter(ids).items() if v > 1}, {})
-        self.assertEqual(len(re.findall(r'<section class="page', html)), 10)
+        self.assertEqual(len(re.findall(r'<section class="page', html)), 9)
         for page in ("overview", "library", "sources", "quality", "importsub", "search", "about"):
             self.assertIn(f'id="page-{page}"', html)
 
@@ -37,7 +37,21 @@ class AdminUiFeatureTests(unittest.TestCase):
                       'function exportCmsSources(', 'function importCmsFile(',
                       'id="srcEditMask"', 'id="srcProxyUrl"', 'function initSrcProxy(',
                       'id="cacheGrid"', 'function loadCacheStatus(', 'function clearCaches(',
-                      'id="t4Enabled"', 'function saveT4Cfg('):
+                      'id="t4Enabled"', 'function saveT4Cfg(',
+                      'function sourceProbeStart(', 'function sourceProbeCancel('):
+            self.assertIn(token, html)
+
+    def test_android_runtime_ui_removed_and_sidebar_scrolls(self):
+        html = admin_ui.ADMIN_HTML
+        for token in ('id="page-tvbox"', 'id="ovAndroid"', 'id="naPill"',
+                      'sidecarInstall(', 'loadSpiderMgmt(', 'redroid', 'no-android'):
+            self.assertNotIn(token, html)
+        # 非安卓能力保留：DRPY/Node、网盘和 CMS 管理不被误删。
+        self.assertIn('drpyProbe', html)
+        self.assertIn('id="page-pan"', html)
+        # 侧栏导航在窗口高度不足时自身滚动，不依赖最大化窗口。
+        for token in ('flex:1 1 auto;min-height:0', 'overflow-y:auto',
+                      'overscroll-behavior:contain', 'scrollbar-width:thin'):
             self.assertIn(token, html)
 
     def test_272_button_system_covers_real_button_elements(self):

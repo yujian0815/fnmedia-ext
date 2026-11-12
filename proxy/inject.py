@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64 as _b64
 
 import providers
+import skip_marks as _skip_marks
 import t4
 from store import (make_guid, media_guid, video_guid,
                    season_guid, episode_guid, ep_media_guid, ep_video_guid)
@@ -426,7 +427,7 @@ def play_info(b: dict) -> dict:
         "grand_guid": "",
         "guid": guid,
         "parent_guid": "",
-        "play_config": None,
+        "play_config": _skip_marks.play_config(guid),
         "ts": 0,
         "type": typ,
         "video_guid": video_guid(guid),
@@ -445,7 +446,7 @@ def episode_play_info(ep: dict) -> dict:
         "grand_guid": "",
         "guid": eg,
         "parent_guid": ep.get("season_guid", ""),
-        "play_config": None,
+        "play_config": _skip_marks.play_config(ep.get("season_guid") or eg),
         "ts": 0,
         "type": "Episode",
         "video_guid": ep_video_guid(eg),

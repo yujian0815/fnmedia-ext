@@ -246,7 +246,12 @@ def _apply_heuristic(text: str) -> tuple[str, int]:
             i += 1
             continue
         if in_cue:
-            # 广告区间内：吞掉 EXTINF+URL（以及裸标签）
+            # 广告区间内吞掉 EXTINF+URL；但加密密钥与初始化 MAP 必须保留，
+            # 否则删除广告后剩余正片无法解密/初始化（LibreTV 同样保留 KEY/MAP）。
+            if s.startswith("#EXT-X-KEY") or s.startswith("#EXT-X-MAP"):
+                out.append(ln)
+                i += 1
+                continue
             if s.startswith("#EXTINF"):
                 removed += 1
                 i += 2
@@ -425,8 +430,45 @@ def _detect_ad_blocks(text: str) -> tuple[str, int]:
     return "\n".join(cleaned) + ("\n" if text.endswith("\n") else ""), len(drop)
 
 
+def _drop_time_ranges(text: str, ranges: list[tuple[float, float]]) -> tuple[str, int]:
+    """按播放时间轴删除显式 middle 区间；保留所有非媒体标签（含 KEY/MAP）。
+
+    只有用户显式提供的 ranges 才会进入此函数。区间与分片有重叠即跳过该分片，
+    累计 EXTINF 计算时间轴，不重排其它分片。
+    """
+    if not ranges:
+        return text, 0
+    out: list[str] = []
+    lines = text.splitlines()
+    cursor = 0.0
+    removed = 0
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        m = _EXTINF_DUR.search(ln)
+        if not m:
+            out.append(ln)
+            i += 1
+            continue
+        try:
+            dur = float(m.group(1))
+        except ValueError:
+            dur = 0.0
+        start, end = cursor, cursor + max(0.0, dur)
+        hit = any(start < r_end and end > r_start for r_start, r_end in ranges)
+        if hit:
+            removed += 1
+            i += 2  # EXTINF + URL；其余标签保留，由后续清理处理间断
+        else:
+            out.append(ln)
+            i += 1
+        cursor = end
+    return "\n".join(out), removed
+
+
 def filter_hls(text: str | None, media_url: str = "",
-               use_heuristic: bool = True) -> tuple[str, int]:
+               use_heuristic: bool = True,
+               skip_ranges: list[tuple[float, float]] | None = None) -> tuple[str, int]:
     """对一份 m3u8 文本去广告（同步、不探测分片）。
 
     返回 (过滤后文本, 删除的媒体分片数估计)。任何异常都回退原文。
@@ -450,7 +492,11 @@ def filter_hls(text: str | None, media_url: str = "",
             if patterns:
                 text = _apply_host_regex(text, patterns)
 
-        # 2) 通用启发式（SCTE35/关键字）
+        # 2) 用户显式标记的 middle 跳过区间（默认 None，零行为变更）
+        if skip_ranges:
+            text, _ = _drop_time_ranges(text, skip_ranges)
+
+        # 3) 通用启发式（SCTE35/关键字）
         if use_heuristic:
             text, removed_h = _apply_heuristic(text)
         else:
@@ -461,7 +507,9 @@ def filter_hls(text: str | None, media_url: str = "",
             text, removed_dyn = _detect_ad_blocks(text)
 
         after = _segment_url_count(text)
-        removed = max(0, before - after) + removed_h
+        # before/after 已包含启发式与动态检测删掉的全部媒体分片；再叠加 removed_h
+        # 会把同一批分片重复计数，状态展示因此失真。
+        removed = max(0, before - after)
 
         # 安全护栏：媒体分片被清空说明规则误伤，回退
         if before > 0 and _segment_url_count(text) == 0:

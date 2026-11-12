@@ -6,7 +6,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from starlette.requests import Request
 
@@ -80,6 +80,88 @@ class VodResumeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["ts"], 600)
         # Web 端多集内容为 Episode 形状（显示选集入口）；续播定位不受影响
         self.assertEqual(data["type"], "Episode")
+
+    def test_explicit_episode_guid_is_not_overridden_by_latest_snapshot(self):
+        # 原生自动连播会请求“下一集”的 line-item guid；即使最近观看记录停在第2集，
+        # 也不能把显式第6集再改回第2集，否则连播/手动选集都会错集。
+        all_eg = [episode_guid("og", "", i) for i in range(8)]
+        appmod.history.record({"item_guid": all_eg[1], "ts": 500}, snapshot={
+            "guid": "og", "title": self.brief["title"], "type_name": self.brief["type_name"],
+            "_ep_index": 1, "_ep_guid": all_eg[1], "lines": {}})
+        with patch.object(appmod.store, "get_title_by_guid", return_value=self.brief), \
+                patch.object(appmod.store, "get_episode",
+                             side_effect=lambda g: {
+                                 "index": all_eg.index(g), "ep_guid": g,
+                                 "online_guid": "og", "season_guid": "season",
+                                 "title": self.brief["title"],
+                                 "ep_title": f"第{all_eg.index(g)+1}集"}
+                             if g in all_eg else None), \
+                patch.object(appmod.store, "resolve_episode",
+                             side_effect=lambda og, line, idx: target(line, idx)), \
+                patch.object(appmod.store, "list_episodes",
+                             side_effect=lambda og, line=None: self.brief["lines"][line]):
+            line_guid = appmod._line_item_guid("og", "lzi::lzm3u8", 5)
+            response = appmod._vod_play_info(
+                line_guid, clientmod.Client(kind="web"))
+        data = json.loads(response.body)["data"]
+        self.assertEqual(data["guid"], all_eg[5])
+        self.assertEqual(data["item"]["episode_number"], 6)
+
+    def test_fixed_line_play_info_survives_store_eviction_via_snapshot(self):
+        # 复现真实故障：store 已淘汰该片，真机仍持复合 line-item guid 重进。
+        # 必须靠历史快照恢复正确的集与 ts，而不是返回 None 导致从头播放。
+        all_eg = [episode_guid("og", "", i) for i in range(8)]
+        appmod.history.record({"item_guid": all_eg[4], "ts": 1243}, snapshot={
+            "guid": "og", "title": self.brief["title"],
+            "type_name": self.brief["type_name"], "_ep_index": 4,
+            "_ep_guid": all_eg[4],
+            "lines": {"lzi::lzm3u8": [{"title": "第05集",
+                        "url": "https://cdn.test/v5.m3u8", "direct": True,
+                        "headers": {}, "redirect": False}]}})
+        line_guid = appmod._line_item_guid("og", "lzi::lzm3u8", 4)
+        with patch.object(appmod.store, "get_title_by_guid", return_value=None), \
+                patch.object(appmod.store, "resolve_episode", return_value=None), \
+                patch.object(appmod.store, "get_episode", return_value=None):
+            response = appmod._vod_play_info(
+                line_guid, clientmod.Client(kind="android"))
+        self.assertIsNotNone(response)
+        data = json.loads(response.body)["data"]
+        self.assertEqual(data["guid"], all_eg[4])
+        self.assertEqual(data["ts"], 1243)
+        self.assertEqual((data.get("item") or {}).get("episode_number"), 5)
+
+    def test_resume_duration_prevents_client_ts_clamp_to_zero(self):
+        # 飞牛 Web 起播用 e.ts > item.duration ? item.duration : e.ts 定位；
+        # item.duration=0 会把任何 ts>0 钳成 0 导致从头播放。
+        all_eg = [episode_guid("og", "", i) for i in range(8)]
+        appmod.history.record({"item_guid": all_eg[4], "ts": 1834,
+                                "duration": 0}, snapshot={
+            "guid": "og", "title": self.brief["title"],
+            "type_name": self.brief["type_name"], "_ep_index": 4,
+            "_ep_guid": all_eg[4],
+            "lines": {"lzi::lzm3u8": [{"title": "第05集",
+                        "url": "https://cdn.test/v5.m3u8", "direct": True,
+                        "headers": {}, "redirect": False}]}})
+        with patch.object(appmod.store, "get_title_by_guid", return_value=None), \
+                patch.object(appmod.store, "resolve_episode", return_value=None), \
+                patch.object(appmod.store, "get_episode", return_value=None):
+            info = appmod._online_play_info(all_eg[4], MagicMock())
+        self.assertEqual(info["ts"], 1834)
+        self.assertGreaterEqual((info.get("item") or {}).get("duration"), 1834)
+
+    def test_ensure_resume_duration_helper(self):
+        # ts>0 且 duration=0 时，兜底 duration 必须大于 ts，避免客户端钳成 0
+        info = {"ts": 1834, "item": {"duration": 0}}
+        out = appmod._ensure_resume_duration(info)
+        self.assertGreater(out["item"]["duration"], 1834)
+        # duration 已足够大时不改写
+        info2 = {"ts": 100, "item": {"duration": 2830}}
+        out2 = appmod._ensure_resume_duration(info2)
+        self.assertEqual(out2["item"]["duration"], 2830)
+        # ts=0 时不强制写入 duration
+        info3 = {"ts": 0, "item": {"duration": 0}}
+        out3 = appmod._ensure_resume_duration(info3)
+        self.assertEqual(out3["item"]["duration"], 0)
 
     def test_history_guid_normalization_collapses_line_identity(self):
         with patch.object(appmod.store, "get_title_by_guid", return_value=self.brief):
