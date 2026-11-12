@@ -71,7 +71,7 @@ class ReleaseProcessTests(unittest.TestCase):
         self.assertIn('"$LEGACY_FULL" "${LEGACY_FULL}.sha256"', script)
         self.assertNotIn('"$LITE_BASE"', script)
         self.assertNotIn('"$LITE_FPK"', script)
-        self.assertIn('git pull --rebase origin main',
+        self.assertIn('git pull --rebase --autostash origin main',
                       (root / ".github" / "workflows" / "moo-json.yml").read_text())
 
 

@@ -71,7 +71,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # 本地发布脚本也可能更新 moo；先 rebase 避免并发提交造成 non-fast-forward。
-          git pull --rebase origin main
+          git pull --rebase --autostash origin main
           git add moo.json
           if git diff --cached --quiet; then
             echo "moo.json 无变化，跳过提交"
