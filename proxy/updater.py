@@ -117,7 +117,7 @@ def is_newer(latest: str, current: str | None = None) -> bool:
 
 
 def edition_full() -> bool:
-    """当前运行副本是否为全功能版（决定默认推荐下载哪个 fpk）。"""
+    """旧安装副本类型，仅用于兼容历史 full/lite Release 的资产选择。"""
     try:
         return bool(getattr(features, "DDUO", False) or getattr(features, "GUARD", False))
     except Exception:
@@ -127,26 +127,27 @@ def edition_full() -> bool:
 # --------------------------------------------------------------- GitHub
 
 def _pick_asset(assets: list[dict], full: bool) -> dict | None:
-    """在 Release 附件里挑目标安装包。
+    """选择统一安装包，同时兼容 1.0 及更早的 full/lite 双资产。
 
-    全功能版：fnmedia-ext-<ver>-full.fpk
-    轻量版：fnmedia-ext-<ver>.fpk（排除 -full / -lite / -public），
-            找不到则退回 -lite.fpk。
+    1.1 起 Release 只有一个裸名 fpk，旧 full 与 lite 用户都迁移到它；旧 Release
+    仍优先选择与旧副本类型一致的资产，避免跨类型降级。
     """
-    lite_plain = lite_alt = full_pkg = None
+    lite_plain = lite_named = public_named = full_pkg = None
     for a in assets:
         name = a.get("name") or ""
         if not name.endswith(".fpk"):
             continue
         if re.search(r"-full\.fpk$", name):
             full_pkg = a
-        elif re.search(r"-(lite|public)\.fpk$", name):
-            lite_alt = a
+        elif re.search(r"-lite\.fpk$", name):
+            lite_named = a
+        elif re.search(r"-public\.fpk$", name):
+            public_named = a
         elif re.match(r"^fnmedia-ext-.+\.fpk$", name):
             lite_plain = a
     if full:
-        return full_pkg
-    return lite_plain or lite_alt
+        return full_pkg or lite_plain
+    return lite_plain or lite_named or public_named
 
 
 def _version_key(tag: str) -> tuple:
@@ -212,7 +213,7 @@ def _normalize(release: dict, full: bool) -> dict:
         "notes": (release.get("body") or "").strip(),
         "published_at": release.get("published_at") or "",
         "html_url": release.get("html_url") or "",
-        "edition": "full" if full else "lite",
+        "edition": "standard",
         "asset": (pkg.get("browser_download_url") if pkg else ""),
         "asset_name": (pkg.get("name") if pkg else ""),
         "asset_size": (pkg.get("size") if pkg else 0),
@@ -265,7 +266,7 @@ def _snapshot() -> dict:
     return {
         "code": 0,
         "current_version": current_version(),
-        "edition": "full" if edition_full() else "lite",
+        "edition": "standard",
         "status": _STATE["status"],
         "progress": _STATE["progress"],
         "last_check": _STATE["last_check"],

@@ -143,6 +143,11 @@ label.btn:hover,label.btn-sm:hover{background:var(--accent-soft)}
 .subrow{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;padding:3px 0}
 .subrow.ok span:first-child{color:var(--ok,#1a8d3a)}
 .subrow.muted{color:var(--muted)}
+.subgrp.android-dep{border-style:dashed;background:#f6f7f9}
+.subgrp.android-dep .subgrp-t,.subrow.android-dep{color:var(--muted)}
+.subrow.android-dep{opacity:.72}
+tr.android-dep{background:#f6f7f9;opacity:.62}
+.tag.off{color:var(--muted);background:#e9edf2}
 
 /* ---------- 实时播放诊断 ---------- */
 .live-dev{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:8px 0;background:#fbfcfe}
@@ -226,7 +231,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
 #toast.ok{background:var(--ok)}#toast.fail{background:var(--err)}
 
 /* ---------- 移动端 ---------- */
-.bottom-nav{display:none}
+.bottom-nav,.more-menu{display:none}
 @media(max-width:760px){
   .sidebar{display:none}
   .main{padding:max(16px,env(safe-area-inset-top,0px)) 14px
@@ -242,24 +247,14 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
   .bottom-nav .nav-item{flex:1;display:flex;align-items:center;justify-content:center;
     height:58px;text-align:center;padding:0 2px;font-size:12px;border-radius:0;white-space:nowrap}
   .bottom-nav .nav-item.active{background:transparent;color:var(--accent);font-weight:700}
+  .more-menu{position:fixed;left:10px;right:10px;bottom:calc(62px + env(safe-area-inset-bottom,0px));
+    z-index:46;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;padding:10px;
+    background:var(--card);border:1px solid var(--line);border-radius:14px;
+    box-shadow:0 12px 36px rgba(16,30,54,.18);max-height:62vh;overflow-y:auto}
+  .more-menu.show{display:grid}
+  .more-menu .nav-item{min-height:42px;font-size:13px;border:1px solid var(--line);background:#fafbfc}
 }
-/* 加固影视浏览：海报墙 + 播放器 */
-.gb-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px;margin-top:6px}
-.gb-card{cursor:pointer;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--card);
-  transition:transform .12s,box-shadow .12s;display:flex;flex-direction:column}
-.gb-card:hover{transform:translateY(-2px);box-shadow:0 6px 18px rgba(0,0,0,.12)}
-.gb-poster{position:relative;width:100%;aspect-ratio:2/3;background:#0f1115 center/cover no-repeat;display:block}
-.gb-rem{position:absolute;right:4px;top:4px;background:rgba(0,0,0,.65);color:#fff;font-size:10px;
-  padding:1px 6px;border-radius:99px;max-width:90%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.gb-cap{padding:5px 6px;font-size:12px;line-height:1.3}
-.gb-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:30px}
-.gb-src{color:var(--muted);font-size:10px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.gb-mask{position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:9999;display:flex;align-items:center;
-  justify-content:center;padding:14px}
-.gb-player{width:min(960px,100%);background:#111;border-radius:12px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.5)}
-.gb-player-bar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#1c1f26;color:#eee;font-size:13px}
 </style>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js" async></script>
 </head>
 <body>
 <div class="layout">
@@ -271,16 +266,22 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
     <nav class="nav" id="nav">
       <div class="nav-group-label">总览</div>
       <button class="nav-item active" data-page="overview">📊 概览</button>
-      <button class="nav-item" data-page="library">🎞 虚拟媒体库</button>
 
-      <div class="nav-group-label">片源管理</div>
+      <div class="nav-group-label">内容</div>
+      <button class="nav-item" data-page="library">🎞 媒体库</button>
+
+      <div class="nav-group-label">片源</div>
       <button class="nav-item" data-page="sources">📡 资源站</button>
-      <button class="nav-item" data-page="quality">⭐ 片源质量</button>
-      <button class="nav-item" data-page="importsub">📥 导入订阅</button>
+      <button class="nav-item" data-page="importsub">📥 订阅与 JS 源</button>
 
-      <div class="nav-group-label">设置</div>
+      <div class="nav-group-label">播放与搜索</div>
+      <button class="nav-item" data-page="playback">▶️ 播放设置</button>
       <button class="nav-item" data-page="search">🔍 搜索设置</button>
-      <button class="nav-item" data-page="about">ℹ️ 关于</button>
+
+      <div class="nav-group-label">系统</div>
+      <button class="nav-item" data-page="network">🌐 网络与代理</button>
+      <button class="nav-item" data-page="data">🗄 数据与维护</button>
+      <button class="nav-item" data-page="about">ℹ️ 关于与更新</button>
     </nav>
     <div class="sidebar-foot">
       <span id="globalState" class="dot wait">检测中…</span>
@@ -295,9 +296,9 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       <p class="page-desc">在飞牛原生搜索与媒体库中注入在线影视，点击直接调用飞牛原生播放器。</p>
 
       <div class="card">
-        <div class="card-title">虚拟媒体库</div>
-        <p class="card-sub">两个方向：① 各类目热门资源（豆瓣真实榜单，点击搜源播放）；② 海量片库（资源站分类深翻）。</p>
-        <div class="lib-grid" id="ovLibs"><div class="muted sm">加载中…</div></div>
+        <div class="card-title">当前能力</div>
+        <p class="card-sub">统一无安卓版：苹果 CMS / T4 / DRPY JS 源、虚拟媒体库、网盘转存与小雅聚合。
+          Guard 与普通 csp_ 不再导入；播放、续播、去广告与多线路策略保持原有基线。</p>
       </div>
 
       <div class="card">
@@ -380,7 +381,17 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
 
       <div class="card">
-        <div class="card-title">③ 媒体库显示开关与排序</div>
+        <div class="card-title">③ T4 选片</div>
+        <div class="lib-grid" id="t4Libs"></div>
+        <label class="switch-row">
+          <input type="checkbox" id="t4Enabled" onchange="saveT4Cfg()"/>
+          <span>在飞牛影视媒体库显示 T4 选片</span>
+        </label>
+      </div>
+
+
+      <div class="card">
+        <div class="card-title">⑤ 媒体库显示开关与排序</div>
         <p class="card-sub">勾选=在飞牛影视里显示；取消=隐藏（对所有账号不显示，可随时恢复）。
           ↑/↓ 调整虚拟媒体库之间的先后顺序；下方选择整体放在本地媒体库之前还是之后。</p>
         <div class="btn-row" style="margin-bottom:8px">
@@ -397,7 +408,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
 
       <div class="card">
-        <div class="card-title">④ 子账号观看权限（家庭多用户）</div>
+        <div class="card-title">⑥ 子账号观看权限（家庭多用户）</div>
         <p class="card-sub">飞牛影视支持多账号登录。可为孩子/家人账号单独勾选可见媒体库；未单独配置的账号按下方默认策略。
           被限制的账号搜索时只出本地结果，不会误点播在线片源；<b>各账号的在线播放记录与续播进度彼此隔离</b>。</p>
         <label class="switch-row">
@@ -416,41 +427,6 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div id="aclBox" class="stack"></div>
       </div>
 
-      <div class="card">
-        <div class="card-title">T4 选片</div>
-        <div class="lib-grid" id="t4Libs"></div>
-        <label class="switch-row">
-          <input type="checkbox" id="t4Enabled" onchange="saveT4Cfg()"/>
-          <span>在飞牛影视媒体库显示 T4 选片</span>
-        </label>
-      </div>
-    </section>
-
-    <!-- ============ 片源质量 ============ -->
-    <section class="page" id="page-quality">
-      <h2 class="page-title">片源质量优先级</h2>
-      <p class="page-desc">热门资源点击搜源时，按「源质量权重 → 可播直链数」排序，优先选择高质量源。</p>
-      <div class="card">
-        <label class="switch-row">
-          <input type="checkbox" id="preferQ" checked/>
-          <span>热门资源优先高质量源
-            <span class="sub">关闭后只按可播直链总数选择来源</span></span>
-        </label>
-        <div class="btn-row">
-          <button class="primary small" onclick="savePreferQ()">保存</button>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-title">各源质量权重 <span class="badge" id="prioCount"></span>
-          <button class="small" style="margin-left:auto" onclick="resetPriority()">恢复默认权重</button>
-        </div>
-        <p class="card-sub">数值越大越优先（-100–100，留空/0 用内省默认）。修改后点底部「保存权重」。</p>
-        <table>
-          <thead><tr><th>资源站</th><th style="width:120px">质量权重</th><th>相对优先级</th></tr></thead>
-          <tbody id="prioRows"><tr><td colspan="3" class="muted">加载中…</td></tr></tbody>
-        </table>
-        <div class="btn-row"><button class="primary small" onclick="savePriority()">保存权重</button></div>
-      </div>
     </section>
 
     <!-- ============ 资源站 ============ -->
@@ -491,26 +467,27 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           删除内置源仅隐藏，可恢复。批量导入 TVBox 订阅请用左侧「导入订阅」。</div>
       </div>
 
-      <details class="card">
-        <summary class="card-title" style="cursor:pointer">🌐 资源站取源代理（可选 · 直连慢时）</summary>
-        <p class="card-sub" style="margin-top:8px">仅用于搜索、分类深翻、测速和播放地址解析；视频分片仍直连，不占代理带宽。留空即直连，不改变现有播放策略。</p>
-        <div class="row">
-          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
-            <input type="checkbox" id="srcProxyEnable" style="width:14px;height:14px;accent-color:var(--accent)" onchange="onSrcProxyToggle()"/> 已配置代理</label>
+      <div class="card">
+        <div class="card-title">片源质量策略</div>
+        <p class="card-sub">热门资源点击搜源时，按「源质量权重 → 可播直链数」排序，优先选择高质量源。</p>
+        <label class="switch-row">
+          <input type="checkbox" id="preferQ" checked/>
+          <span>热门资源优先高质量源
+            <span class="sub">关闭后只按可播直链总数选择来源</span></span>
+        </label>
+        <div class="btn-row"><button class="primary small" onclick="savePreferQ()">保存</button></div>
+      </div>
+      <div class="card">
+        <div class="card-title">各源质量权重 <span class="badge" id="prioCount"></span>
+          <button class="small" style="margin-left:auto" onclick="resetPriority()">恢复默认权重</button>
         </div>
-        <div class="row">
-          <input type="text" id="srcProxyUrl" placeholder="http://Clash:密码@192.168.x.x:7890" style="flex:2" disabled/>
-          <button class="small primary" id="srcProxySaveBtn" onclick="saveSrcProxy(true)" disabled>保存并测速</button>
-          <button class="small ghost danger" id="srcProxyClearBtn" onclick="clearSrcProxy()" disabled>清空</button>
-        </div>
-        <div class="seg" id="srcProxyMode" style="margin-top:10px" role="tablist">
-          <button type="button" data-mode="auto" onclick="setSrcProxyMode('auto')">🪄 智能（推荐）</button>
-          <button type="button" data-mode="on" onclick="setSrcProxyMode('on')">始终走代理</button>
-          <button type="button" data-mode="off" onclick="setSrcProxyMode('off')">全部直连</button>
-        </div>
-        <div class="hint" id="srcProxyModeHint" style="margin-top:6px"></div>
-        <div id="srcProxyMsg" class="muted sm" style="margin-top:6px"></div>
-      </details>
+        <p class="card-sub">数值越大越优先（-100–100，留空/0 用内省默认）。历史 Guard/csp 仅只读展示，不参与有效源策略。</p>
+        <table>
+          <thead><tr><th>资源站</th><th style="width:120px">质量权重</th><th>相对优先级</th></tr></thead>
+          <tbody id="prioRows"><tr><td colspan="3" class="muted">加载中…</td></tr></tbody>
+        </table>
+        <div class="btn-row"><button class="primary small" onclick="savePriority()">保存权重</button></div>
+      </div>
 
       <div class="card">
         <div class="card-title">源健康画像
@@ -528,37 +505,13 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
 
     <!-- ============ 导入 TVBox 订阅（独立页） ============ -->
     <section class="page" id="page-importsub">
-      <h2 class="page-title">导入订阅</h2>
-      <p class="page-desc">粘贴一个 TVBox / 影视仓 / OK影视 订阅 URL 或整段配置，自动识别并分类导入，<strong>导入即可在搜索与播放源中使用</strong>。支持 base64 与多订阅聚合。</p>
-      <div class="card">
-        <div class="card-title">订阅抓取代理（可选）
-          <label style="float:right;display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400;cursor:pointer">
-            <input type="checkbox" id="subProxyEnable" style="width:14px;height:14px;accent-color:var(--accent)" onchange="onSubProxyToggle()"/> 启用代理</label></div>
-        <p class="card-sub">仅用于<strong>拉取订阅配置、爬虫 jar、DRPY 脚本</strong>（GitHub 等被墙/解析失败时可走 Clash）。<strong>播放、搜索、CMS 探测一律不走此代理</strong>。形如 <code>http://用户:密码@主机:端口</code>，清空=直连。</p>
-        <div class="row">
-          <input type="text" id="subProxyUrl" placeholder="http://Clash:密码@192.168.x.x:7890" style="flex:2" disabled/>
-          <button class="small" id="subProxySaveBtn" onclick="saveSubProxy(true)" disabled>保存并测试</button>
-          <button class="small" id="subProxyClearBtn" onclick="clearSubProxy()" disabled>清空(直连)</button>
-        </div>
-        <div id="subProxyMsg" class="muted sm" style="margin-top:6px"></div>
-      </div>
-      <div class="card">
-        <div class="card-title">🛡 播放去广告（m3u8 流层）
-          <label style="float:right;display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400;cursor:pointer">
-            <input type="checkbox" id="adfEnable" style="width:14px;height:14px;accent-color:var(--accent)" onchange="toggleAdfilter(this.checked)"/> 启用去广告</label></div>
-        <p class="card-sub">播放时实时检测当前线路并去除广告，兼容 TVBox / OK影视 Pro：<strong>① 动态检测</strong>——按分片间断边界、切片时长模式、CDN 切换、片头/片中位置实时识别广告段（无需订阅自带规则）；<strong>② 订阅 rules</strong>——导入订阅时自动收录其去广告正则，按线路域名精准剥除；<strong>③ 选集过滤</strong>——剔除“关注公众号/加微信/下载APP”假选集。识别不确定或可能误伤时自动保留，不影响播放。</p>
-        <div style="margin:6px 0">
-          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
-            <input type="checkbox" id="adfDynamic" style="width:14px;height:14px;accent-color:var(--accent)" onchange="toggleAdfilterDynamic(this.checked)"/>
-            播放时动态检测（识别订阅未提供规则的广告段）</label>
-        </div>
-        <div id="adfStatus" class="muted sm" style="margin-top:6px">正在加载去广告规则…</div>
-      </div>
+      <h2 class="page-title">订阅与 JS 源</h2>
+      <p class="page-desc">导入 TVBox / 影视仓 / OK影视 订阅，统一管理远程 DRPY JavaScript 源；支持苹果 CMS、T4 与 DRPY，Guard/普通 csp_ 仅报告不导入。</p>
       <div class="card">
         <div class="card-title">TVBox / 影视仓 / OK影视 订阅</div>
-        <p class="card-sub">自动识别并分类：标准苹果CMS影视站（type 0/1）
-          能直接播放的<strong>自动启用</strong>；P2P/磁力/云盘等慢源与 jar/脚本暂未就绪的源导入后默认关闭，可在结果里开启或补传；
-          网盘/直播/无法识别的源跳过并说明原因。</p>
+        <p class="card-sub">自动识别并分类：标准苹果CMS影视站（type 0/1）、T4 选片源
+          能直接播放的<strong>自动启用</strong>；DRPY 脚本暂未就绪的源导入后默认关闭，可稍后重试；
+          Guard/普通 csp_ 等安卓依赖源仅列出识别结果、不导入；网盘/直播/无法识别的源跳过并说明原因。</p>
         <div class="row"><input type="text" id="subUrl" placeholder="配置订阅 URL（支持 base64 与多订阅聚合）" style="flex:2"/>
           <button class="primary small" onclick="importSubscription('url')">按 URL 导入</button>
         </div>
@@ -579,8 +532,39 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
     </section>
 
 
+    <!-- ============ 播放设置 ============ -->
+    <section class="page" id="page-playback">
+      <h2 class="page-title">播放设置</h2>
+      <p class="page-desc">仅管理播放链路：线路选择、坏线切换、分片直连与去广告；不改变订阅、源站或媒体库配置。</p>
+      <div class="card">
+        <div class="card-title">播放线路</div>
+        <label class="switch-row"><input type="checkbox" id="lineFastest"/>
+          <span>自动选最快线路<span class="sub">起播时并行测速、自动选首字节最快的线路；同一集短时间内固定用它</span></span></label>
+        <label class="field" style="max-width:260px"><span>参与测速的线路数</span>
+          <input type="number" id="fastestMax" min="2" max="12" style="width:100%"/></label>
+        <label class="field" style="max-width:260px"><span>测速超时（秒）</span>
+          <input type="number" id="fastestTimeout" min="1" max="10" step="0.5" style="width:100%"/></label>
+        <label class="switch-row"><input type="checkbox" id="lineAutofail"/>
+          <span>坏线自动切换<span class="sub">当前线路失效/文件不存在时自动换到可用线路，并短时跳过坏线（关闭则纯手动切线）</span></span></label>
+        <label class="switch-row"><input type="checkbox" id="directPlay"/>
+          <span>混合直连（视频分片不经 NAS 中转）<span class="sub">仅对验证可裸连的普通 HLS 直放线生效，播放端直连源站分片以省 NAS 带宽/负载；加密、去广告、解析线、网盘等自动回退中转。默认关闭。</span></span></label>
+        <div class="btn-row"><button class="primary small" onclick="saveLines()">保存播放设置</button></div>
+      </div>
+      <div class="card">
+        <div class="card-title">🛡 播放去广告（m3u8 流层）
+          <label style="float:right;display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400;cursor:pointer">
+            <input type="checkbox" id="adfEnable" style="width:14px;height:14px;accent-color:var(--accent)" onchange="toggleAdfilter(this.checked)"/> 启用去广告</label></div>
+        <p class="card-sub">播放时实时检测当前线路并去除广告，兼容 TVBox / OK影视 Pro：<strong>① 动态检测</strong>——按分片间断边界、切片时长模式、CDN 切换、片头/片中位置实时识别广告段（无需订阅自带规则）；<strong>② 订阅 rules</strong>——导入订阅时自动收录其去广告正则，按线路域名精准剥除；<strong>③ 选集过滤</strong>——剔除“关注公众号/加微信/下载APP”假选集。识别不确定或可能误伤时自动保留，不影响播放。</p>
+        <div style="margin:6px 0">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+            <input type="checkbox" id="adfDynamic" style="width:14px;height:14px;accent-color:var(--accent)" onchange="toggleAdfilterDynamic(this.checked)"/>
+            播放时动态检测（识别订阅未提供规则的广告段）</label>
+        </div>
+        <div id="adfStatus" class="muted sm" style="margin-top:6px">正在加载去广告规则…</div>
+      </div>
+    </section>
 
-    <!-- ============ 搜索 ============ -->
+    <!-- ============ 搜索设置 ============ -->
     <section class="page" id="page-search">
       <h2 class="page-title">搜索设置</h2>
       <div class="card">
@@ -606,21 +590,58 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div class="btn-row"><button class="primary small" onclick="saveCfg()">保存设置</button></div>
       </div>
 
-      <div class="card">
-        <div class="card-title">播放线路</div>
-        <label class="switch-row"><input type="checkbox" id="lineFastest"/>
-          <span>自动选最快线路<span class="sub">起播时并行测速、自动选首字节最快的线路；同一集短时间内固定用它</span></span></label>
-        <label class="field" style="max-width:260px"><span>参与测速的线路数</span>
-          <input type="number" id="fastestMax" min="2" max="12" style="width:100%"/></label>
-        <label class="field" style="max-width:260px"><span>测速超时（秒）</span>
-          <input type="number" id="fastestTimeout" min="1" max="10" step="0.5" style="width:100%"/></label>
-        <label class="switch-row"><input type="checkbox" id="lineAutofail"/>
-          <span>坏线自动切换<span class="sub">当前线路失效/文件不存在时自动换到可用线路，并短时跳过坏线（关闭则纯手动切线）</span></span></label>
-        <label class="switch-row"><input type="checkbox" id="directPlay"/>
-          <span>混合直连（视频分片不经 NAS 中转）<span class="sub">仅对验证可裸连的普通 HLS 直放线生效，播放端直连源站分片以省 NAS 带宽/负载；加密、去广告、解析线、网盘等自动回退中转。默认关闭。</span></span></label>
-        <div class="btn-row"><button class="primary small" onclick="saveLines()">保存播放设置</button></div>
-      </div>
+    </section>
 
+    <!-- ============ 网络与代理 ============ -->
+    <section class="page" id="page-network">
+      <h2 class="page-title">网络与代理</h2>
+      <p class="page-desc">三类代理分别服务订阅下载、资源站取源和版本更新，配置彼此独立；视频分片与播放策略不因此改变。</p>
+      <div class="card">
+        <div class="card-title">订阅抓取代理（可选）
+          <label style="float:right;display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400;cursor:pointer">
+            <input type="checkbox" id="subProxyEnable" style="width:14px;height:14px;accent-color:var(--accent)" onchange="onSubProxyToggle()"/> 启用代理</label></div>
+        <p class="card-sub">仅用于<strong>拉取订阅配置与 DRPY JavaScript 规则</strong>（GitHub 等被墙/解析失败时可走 Clash）。<strong>播放、搜索、CMS 探测一律不走此代理</strong>。形如 <code>http://用户:密码@主机:端口</code>，清空=直连。</p>
+        <div class="row">
+          <input type="text" id="subProxyUrl" placeholder="http://Clash:密码@192.168.x.x:7890" style="flex:2" disabled/>
+          <button class="small" id="subProxySaveBtn" onclick="saveSubProxy(true)" disabled>保存并测试</button>
+          <button class="small" id="subProxyClearBtn" onclick="clearSubProxy()" disabled>清空(直连)</button>
+        </div>
+        <div id="subProxyMsg" class="muted sm" style="margin-top:6px"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">🌐 资源站取源代理（可选 · 直连慢时）</div>
+        <p class="card-sub">仅用于搜索、分类深翻、测速和播放地址解析；视频分片仍直连，不占代理带宽。留空即直连，不改变现有播放策略。</p>
+        <div class="row">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+            <input type="checkbox" id="srcProxyEnable" style="width:14px;height:14px;accent-color:var(--accent)" onchange="onSrcProxyToggle()"/> 已配置代理</label>
+        </div>
+        <div class="row">
+          <input type="text" id="srcProxyUrl" placeholder="http://Clash:密码@192.168.x.x:7890" style="flex:2" disabled/>
+          <button class="small primary" id="srcProxySaveBtn" onclick="saveSrcProxy(true)" disabled>保存并测速</button>
+          <button class="small ghost danger" id="srcProxyClearBtn" onclick="clearSrcProxy()" disabled>清空</button>
+        </div>
+        <div class="seg" id="srcProxyMode" style="margin-top:10px" role="tablist">
+          <button type="button" data-mode="auto" onclick="setSrcProxyMode('auto')">🪄 智能（推荐）</button>
+          <button type="button" data-mode="on" onclick="setSrcProxyMode('on')">始终走代理</button>
+          <button type="button" data-mode="off" onclick="setSrcProxyMode('off')">全部直连</button>
+        </div>
+        <div class="hint" id="srcProxyModeHint" style="margin-top:6px"></div>
+        <div id="srcProxyMsg" class="muted sm" style="margin-top:6px"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">版本更新代理（可选）</div>
+        <p class="card-sub">仅用于检查版本与下载统一安装包；仅本机保存、不随安装包分发，保存后回「关于与更新」重新检查生效。</p>
+        <div class="row">
+          <input id="updProxy" type="text" class="input" placeholder="http://用户:密码@代理IP:端口（留空直连）" style="flex:2;min-width:240px">
+          <button class="small primary" id="updProxySave">保存代理</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 数据与维护 ============ -->
+    <section class="page" id="page-data">
+      <h2 class="page-title">数据与维护</h2>
+      <p class="page-desc">查看在线条目缓存并维护搜索、榜单、分类与健康画像数据；缓存清理不改变源站或播放配置。</p>
       <div class="card">
         <div class="card-title">已缓存在线条目 <span class="badge" id="cacheN"></span></div>
         <div class="row"><input type="text" id="kw" placeholder="按标题过滤（在飞牛搜索过的会出现在这里）" style="flex:1"/>
@@ -650,9 +671,9 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
     </section>
 
-    <!-- ============ 关于 ============ -->
+    <!-- ============ 关于与更新 ============ -->
     <section class="page" id="page-about">
-      <h2 class="page-title">关于</h2>
+      <h2 class="page-title">关于与更新</h2>
       <div class="card">
         <div class="card-title">🎬 fnmedia-ext · 飞牛影视在线扩展</div>
         <p class="card-sub">在原生搜索 / 媒体库注入在线影视并直接调用飞牛原生播放器播放。</p>
@@ -674,15 +695,6 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
             <a class="btn" id="updLink" target="_blank" rel="noopener" style="text-decoration:none">查看 Release</a>
           </div>
           <div id="updProgress" class="hint" style="display:none"></div>
-          <details style="margin-top:4px">
-            <summary class="muted sm" style="cursor:pointer">下载慢 / 直连失败？点此设置更新代理（可选）</summary>
-            <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
-              <input id="updProxy" type="text" class="input" placeholder="http://用户:密码@代理IP:端口（仅用于下载更新，留空直连）"
-                     style="flex:1;min-width:240px">
-              <button class="btn" id="updProxySave">保存代理</button>
-            </div>
-            <div class="hint">仅本机保存、不随安装包分发；保存后点“重新检查/立即更新”生效。</div>
-          </details>
         </div>
       </div>
 
@@ -717,8 +729,8 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       <div class="card">
         <div class="card-title">⚖️ 免责声明与版权声明</div>
         <div class="stack sm muted" style="line-height:1.7">
-          <div><b>1. 工具性质：</b>本扩展是<b>开源、免费</b>的技术研究与个人媒体库整理工具，仅在你自己的 NAS / 设备上本地运行。它是一个中立的“播放器 / 接口聚合”技术框架，本身<b>不提供、不存储、不上传、不分发、不转码</b>任何影视、图片、字幕、播放地址或资源站点信息，也<b>不内置任何资源数据库、订阅、站点地址、爬虫或执行 jar</b>。</div>
-          <div><b>2. 不内置源、由你自备：</b>所有在线内容均来自你<b>自行添加</b>的第三方接口、TVBox 订阅，或你本人上传的脚本 / 执行 jar；是否添加、添加什么、是否启用，完全由你决定并自行承担。请仅使用你拥有合法授权或有权访问的内容与组件。</div>
+          <div><b>1. 工具性质：</b>本扩展是<b>开源、免费</b>的技术研究与个人媒体库整理工具，仅在你自己的 NAS / 设备上本地运行。它是一个中立的“播放器 / 接口聚合”技术框架，本身<b>不提供、不存储、不上传、不分发、不转码</b>任何影视、图片、字幕、播放地址或资源站点信息，也<b>不内置任何资源数据库、订阅、站点地址或第三方执行脚本</b>。</div>
+          <div><b>2. 不内置源、由你自备：</b>所有在线内容均来自你<b>自行添加</b>的第三方接口、TVBox 订阅或 DRPY JavaScript 规则；是否添加、添加什么、是否启用，完全由你决定并自行承担。Guard/普通 csp_ 等安卓执行源不受支持。请仅使用你拥有合法授权或有权访问的内容与组件。</div>
           <div><b>3. 版权归原权利人：</b>第三方接口返回内容的版权归原权利人所有。本项目不依附、不代表任何内容提供方，不对任何第三方内容的合法性、准确性、可用性负责；如涉及版权问题，请联系内容实际提供方处理。</div>
           <div><b>4. 仅供学习交流：</b>本工具仅供学习、研究与个人合法播放自有或已获授权内容使用，<b>不得用于商业用途，不得下载、录制、再传播任何侵权内容</b>。请遵守你所在地的法律法规。</div>
           <div><b>5. 风险与责任：</b>第三方接口可能失效、变更或包含不当内容；使用过程中产生的流量、账号、费用与一切法律责任均由<b>使用者本人</b>承担，与本工具作者无关。请合法、自律使用，并妥善管理设备与访问权限，避免 18 周岁以下人员接触不适宜内容。</div>
@@ -729,12 +741,19 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
   </main>
 </div>
 
+<div class="more-menu" id="moreNav">
+  <button class="nav-item" data-page="importsub">📥 订阅与 JS 源</button>
+  <button class="nav-item" data-page="search">🔍 搜索设置</button>
+  <button class="nav-item" data-page="network">🌐 网络与代理</button>
+  <button class="nav-item" data-page="data">🗄 数据与维护</button>
+  <button class="nav-item" data-page="about">ℹ️ 关于与更新</button>
+</div>
 <nav class="bottom-nav" id="bottomNav">
   <button class="nav-item active" data-page="overview">概览</button>
   <button class="nav-item" data-page="library">媒体库</button>
-  <button class="nav-item" data-page="quality">质量</button>
-  <button class="nav-item" data-page="sources">资源站</button>
-  <button class="nav-item" data-page="search">搜索</button>
+  <button class="nav-item" data-page="sources">片源</button>
+  <button class="nav-item" data-page="playback">播放</button>
+  <button class="nav-item" id="moreNavBtn" onclick="toggleMoreNav()">更多</button>
 </nav>
 
 <div id="toast"></div>
@@ -774,6 +793,7 @@ async function switchPage(page){
   $$(".page").forEach(el=>el.classList.toggle("active",el.id==="page-"+page));
   $$("[data-page]").forEach(el=>el.classList.toggle("active",el.dataset.page===page));
   window.scrollTo(0,0);
+  if(page!=="overview")stopLivePoll();
   if(page==="overview"){renderOverview();startLivePoll();}
   if(page==="library"){
     Promise.all([loadLibs(),loadAccounts()]).then(()=>{
@@ -785,18 +805,23 @@ async function switchPage(page){
       }
     });
   }
-  if(page==="quality")renderQuality();
-  if(page==="sources"){try{loadHealth();}catch(e){}try{initSrcProxy();}catch(e){}}
-  if(page==="search"){try{loadCacheStatus();}catch(e){}}
-  if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{loadAdfilter();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}}
+  if(page==="sources"){try{await refreshSources();}catch(e){}try{loadHealth();}catch(e){}try{renderQuality();}catch(e){}}
+  if(page==="data"){try{loadCacheStatus();}catch(e){}try{loadOnline();}catch(e){}}
+  if(page==="network"){try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{initSrcProxy();}catch(e){}if($("updProxy"))$("updProxy").value=(CFG&&CFG.update_proxy)||"";}
+  if(page==="playback"){try{loadAdfilter();}catch(e){}}
+  if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}}
   if(page==="about"){loadUpdate(false);}
+  const more=$("moreNav"),moreBtn=$("moreNavBtn");
+  if(more)more.classList.remove("show");
+  if(moreBtn)moreBtn.classList.toggle("active",["importsub","pan","search","network","data","about"].includes(page));
 }
+function toggleMoreNav(){const m=$("moreNav");if(m)m.classList.toggle("show");}
 $$("[data-page]").forEach(b=>b.addEventListener("click",()=>switchPage(b.dataset.page)));
 
 /* ---------- 版本更新 ---------- */
 let UPD_TIMER=null;
 function $u(id){return document.getElementById(id);}
-function updEdLabel(ed){return ed==="full"?"全功能版":"轻量版";}
+function updEdLabel(ed){return "统一版";}
 async function loadUpdate(force){
   const rf=$u("updRefresh"),body=$u("updBody");
   if(force){
@@ -844,7 +869,7 @@ function renderUpdate(r){
     actions.style.display="flex";btn.style.display="none";prog.style.display="none";return;
   }
   if(u && u.update_available){
-    const edTip=u.edition==="full"?"（全功能版）":"（轻量版）";
+    const edTip="（统一版）";
     const size=u.asset_size?` · ${(u.asset_size/1048576).toFixed(1)}MB`:"";
     body.innerHTML='<div><span style="color:var(--ok,#16a34a);font-weight:600">发现新版本 v'+esc(u.version)+edTip+'</span>'+size+'</div>'
       +'<div class="muted sm" style="white-space:pre-wrap;margin-top:6px;max-height:180px;overflow:auto">'+esc((u.notes||"").slice(0,1200))+'</div>';
@@ -870,7 +895,7 @@ async function pollUpdate(){
 document.addEventListener("DOMContentLoaded",()=>{
   const btn=document.getElementById("updBtn"),rf=document.getElementById("updRefresh");
   if(btn)btn.addEventListener("click",async()=>{
-    if(!confirm("将从 GitHub 下载与当前版本类型一致的安装包（自动校验 sha256），并通过飞牛应用中心覆盖安装。\n\n安装期间本服务会短暂停止并自动重启（约十几秒），播放记录与已导入源会保留。\n\n确定立即更新？"))return;
+    if(!confirm("将从 GitHub 下载统一安装包（自动校验 sha256），并通过飞牛应用中心覆盖安装。\n\n安装期间本服务会短暂停止并自动重启（约十几秒），播放记录与已导入源会保留。\n\n确定立即更新？"))return;
     btn.disabled=true;btn.textContent="开始更新…";
     try{
       const rr=await fetch("/v/api/ext/update/now",{method:"POST",
@@ -888,8 +913,8 @@ document.addEventListener("DOMContentLoaded",()=>{
     if(v && !/^(https?|socks5h?):\/\//.test(v)){alert("代理地址需以 http:// 或 https:// 或 socks5:// 开头");return;}
     try{
       const r=await jpost("/v/api/ext/config",{update_proxy:v});
-      if(r&&r.ok!==false){ps.textContent="已保存 ✓";setTimeout(()=>ps.textContent="保存代理",1500);loadUpdate(true);}
-      else{alert("保存失败");}
+      if(r&&r.code===0){if(CFG)CFG.update_proxy=v;ps.textContent="已保存 ✓";setTimeout(()=>ps.textContent="保存代理",1500);loadUpdate(true);}
+      else{alert("保存失败："+((r&&r.msg)||"未知错误"));}
     }catch(e){alert("保存失败："+e.message);}
   });
   // 回填已保存的更新代理
@@ -922,7 +947,6 @@ const LIVE_STAGE={library:"媒体库",browse:"片单",search:"搜索",detail:"�
   hls:"清单",seg:"分片",direct:"直链",favorite:"收藏",history:"历史"};
 const LIVE_ORIGIN={local:["local","var(--ok)"],mixed:["mixed","#2563eb"],
   upstream:["upstream","#b45309"],redirect:["redirect","#7c3aed"]};
-function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
 function ago(a){return a<5?"刚刚":a<60?Math.floor(a)+"秒前":Math.floor(a/60)+"分前";}
 function liveOrigin(o){const [t,col]=LIVE_ORIGIN[o]||[o,"var(--muted)"];
   return `<span class="tag" style="color:${col};background:transparent;border:1px solid ${col}33">${t}</span>`;}
@@ -1041,6 +1065,7 @@ async function copyDiagnosis(){
   }catch(e){toast("复制失败："+e,"fail");}
 }
 function startLivePoll(){ if(LIVE_TIMER)return; LIVE_TIMER=setInterval(loadLive,3000); loadLive(); }
+function stopLivePoll(){if(LIVE_TIMER){clearInterval(LIVE_TIMER);LIVE_TIMER=null;}}
 
 function renderOverview(){
   if(!STATUS)return;
@@ -1054,19 +1079,7 @@ function renderOverview(){
   $("ovHotMeta").textContent=(STATUS.charts&&STATUS.charts.refreshing?"正在刷新…":"最近刷新："+fmtTs(STATUS.charts&&STATUS.charts.updated_at))
     +` · 电影${c.movie||0}/剧${c.tv||0}/动漫${c.anime||0}/综艺${c.variety||0}`
     +(STATUS.charts&&STATUS.charts.last_error?(" · "+STATUS.charts.last_error):"");
-  $("ovLibs").innerHTML=libCards(c,cats);
 }
-function libCards(chartCounts,cats){
-  const hot=[["🎬","热门电影",chartCounts.movie||0],["📺","热门剧集",chartCounts.tv||0],
-    ["🌸","动漫新番",chartCounts.anime||0],["🎤","热门综艺",chartCounts.variety||0]];
-  const catMap={movie:"海量电影",tv:"海量剧集",anime:"海量动漫",variety:"海量综艺"};
-  const cat=[["🌐",catMap.movie,(cats.movie||{}).routes||0],["🌐",catMap.tv,(cats.tv||{}).routes||0],
-    ["🌐",catMap.anime,(cats.anime||{}).routes||0],["🌐",catMap.variety,(cats.variety||{}).routes||0]];
-  const item=(arr,label)=>arr.map(([ic,t,n])=>
-    `<div class="lib"><div class="ic">${ic}</div><div><div class="t">${t}</div><div class="c">${label} ${n}</div></div></div>`).join("");
-  return item(hot,"榜单")+item(cat,"路由");
-}
-
 /* ---------- 虚拟媒体库 ---------- */
 let LIBS=[];
 let LIBMETA={placement:"front",order:[],anchor:""};
@@ -1269,7 +1282,8 @@ function renderQuality(){
   PRIO=STATUS.source_priority||{};
   const ov=CFG.source_priority||{};
   $("prioCount").textContent=Object.keys(ov).length+" 自定义";
-  const rows=CFG.sources.map(s=>{
+  const rows=CFG.sources.filter(s=>!(s.runtime_unavailable||s.guard||s.spider_src
+    ||(s.api||"").startsWith("guard://")||(s.api||"").startsWith("csprun://"))).map(s=>{
     const eff=PRIO[s.id]||0, custom=ov[s.id];
     const w=Math.max(4,Math.min(100,(eff+20)));
     return `<tr data-id="${s.id}">
@@ -1315,8 +1329,10 @@ function renderSources(){
     $("srcCollapseTxt").textContent=collapsed?`展开完整列表（${srcs.length} 个）`:"收起列表";}
   $("srcRows").innerHTML=view.map(src=>{
     let extraCell="",extraTag="";
-    return `<tr data-id="${src.id}">
-      <td><input type="checkbox" class="en" ${src.enabled?"checked":""} style="accent-color:var(--accent);width:16px;height:16px"/></td>
+    const androidDep=isAndroidSourceUi(src);
+    if(androidDep)extraTag='<span class="tag off" title="主线已移除安卓运行时，该历史源已停用">安卓源不可用</span>'+extraTag;
+    return `<tr data-id="${src.id}" class="${androidDep?"android-dep":""}">
+      <td><input type="checkbox" class="en" ${src.enabled?"checked":""} ${androidDep?"disabled":""} style="accent-color:var(--accent);width:16px;height:16px"/></td>
       <td style="white:nowrap">
         <label title="把该资源站单独生成一张媒体库卡片" style="display:inline-flex;align-items:center;gap:2px;font-size:11px;cursor:pointer">
           <input type="checkbox" class="sa" ${src.standalone?"checked":""}
@@ -1330,11 +1346,11 @@ function renderSources(){
         <summary>${esc(src.name)}${extraTag}${src.builtin?'':'<span class="tag amber">自定义</span>'}${src.standalone?'<span class="tag">媒体库</span>':''}</summary>
         <div class="src-detail-body">
           <div class="meta" title="${esc(src.api)}">${esc(src.api)}</div>
-          <div class="hint sm" style="margin:4px 0 0">源 ID：${esc(src.id)} · ${src.enabled?"已启用":"已停用"}${src.standalone?" · 独立媒体库":""}</div>
+          <div class="hint sm" style="margin:4px 0 0">源 ID：${esc(src.id)} · ${androidDep?"已停用 · 安卓运行时已移除":(src.enabled?"已启用":"已停用")}${src.standalone?" · 独立媒体库":""}</div>
         </div>
       </details></td>
-      <td class="st wait" data-st>未测</td>
-      <td><button class="small" data-test>测试</button></td>
+      <td class="st wait" data-st>${androidDep?"不可用":"未测"}</td>
+      <td><button class="small" data-test ${androidDep?"disabled":""}>测试</button></td>
       <td><button class="small ghost" data-edit title="编辑名称/订阅链接">✎</button></td>
       <td><button class="del" data-del title="删除">✕</button></td>
     </tr>`;
@@ -1349,6 +1365,7 @@ function renderSources(){
     tr.querySelector("[data-del]").addEventListener("click",()=>delSource(id,srcName(id)));
   });
 }
+async function refreshSources(){await loadStatus();renderSources();renderQuality();}
 function toggleSrcCollapse(){const bar=$("srcCollapseBar");bar.classList.toggle("collapsed");renderSources();}
 function toggleBox(id,bar){const el=$(id);if(!el)return;el.classList.toggle("collapsed");if(bar)bar.classList.toggle("collapsed");}
 function openSrcEdit(id){
@@ -1375,6 +1392,10 @@ async function saveSrcEdit(){
 }
 function srcName(id){const s=CFG.sources.find(x=>x.id===id);return s?s.name:id;}
 async function toggleEnable(id,on){
+  const target=CFG.sources.find(s=>s.id===id);
+  if(target&&(target.runtime_unavailable||target.guard||target.spider_src)){
+    toast("安卓运行时已移除，该源不能启用","fail");renderSources();return;
+  }
   const sources=CFG.sources.map(s=>({id:s.id,enabled:s.id===id?on:s.enabled}));
   const r=await jpost("/v/api/ext/config",{sources});
   if(r.code===0){CFG.sources.find(x=>x.id===id).enabled=on;
@@ -1393,23 +1414,31 @@ async function toggleLoose(id,on){
   else{toast(r.msg||"操作失败","fail");renderSources();}
 }
 function setSt(tr,html,cls){const el=tr.querySelector("[data-st]");el.className="st "+cls;el.innerHTML=html;}
+function isAndroidSourceUi(s){return !!(s&&(s.runtime_unavailable||s.guard||s.spider_src
+  ||(s.api||"").startsWith("guard://")||(s.api||"").startsWith("csprun://")));}
 async function testOne(id,tr){
+  const src=CFG.sources.find(s=>s.id===id);
+  if(isAndroidSourceUi(src)){setSt(tr,"不可用","bad");tr.querySelector("[data-test]").disabled=true;return;}
   setSt(tr,"测试中…","wait");tr.querySelector("[data-test]").disabled=true;
   try{const r=await jpost("/v/api/ext/source/test",{id});const d=r.data;
     if(d.ok)setSt(tr,`✓ ${d.elapsed_ms}ms · ${d.count}条${d.direct?(' · '+d.direct+'直链'):''}`,"ok");
     else setSt(tr,"✕ "+(d.error||"失败")+(d.elapsed_ms?(" · "+d.elapsed_ms+"ms"):""),"bad");
   }catch(e){setSt(tr,"✕ "+e,"bad");}
-  tr.querySelector("[data-test]").disabled=false;
+  tr.querySelector("[data-test]").disabled=isAndroidSourceUi(src);
 }
 async function testAll(){
   const bar=$("srcCollapseBar");if(bar&&bar.classList.contains("collapsed")){bar.classList.remove("collapsed");renderSources();}
-  toast("正在并发测速…");
-  $$("#srcRows [data-st]").forEach(el=>{el.className="st wait";el.textContent="测试中…";});
-  const r=await jpost("/v/api/ext/source/test-all",{});
-  (r.data||[]).forEach(d=>{const tr=$("srcRows").querySelector(`tr[data-id="${d.id}"]`);if(!tr)return;
-    if(d.ok)setSt(tr,`✓ ${d.elapsed_ms}ms · ${d.count}条${d.direct?(' · '+d.direct+'直链'):''}`,"ok");
-    else setSt(tr,"✕ "+(d.error||"失败"),"bad");});
-  toast("测速完成");
+  toast("正在按源类型测速…");
+  $$("#srcRows [data-st]").forEach(el=>{el.className="st wait";el.textContent="等待分派…";});
+  try{
+    const r=await jpost("/v/api/ext/source/test-all",{});
+    if(r.code!==0){toast(r.msg||"测速失败","fail");return;}
+    (r.data||[]).forEach(d=>{const tr=$("srcRows").querySelector(`tr[data-id="${d.id}"]`);if(!tr)return;
+      if(d.skipped)setSt(tr,esc(d.error||"请使用专用探活"),"wait");
+      else if(d.ok)setSt(tr,`✓ ${d.elapsed_ms}ms · ${d.count}条${d.direct?(' · '+d.direct+'直链'):''}`,"ok");
+      else setSt(tr,"✕ "+(d.error||"失败"),"bad");});
+    toast("测速完成（扩展源已标注专用入口）");
+  }catch(e){toast("测速失败："+e,"fail");}
 }
 let SRC_PROBE_TIMER=null;
 async function sourceProbeStart(){
@@ -1451,11 +1480,12 @@ async function loadHealth(){
     const GC=["ok","wait","bad","bad"];
     box.innerHTML=rows.map(s=>{
       const pct=Math.round((s.success_rate||0)*100);
-      return `<tr><td>${s.key}</td><td>${s.samples}</td>
+      return `<tr><td>${esc(s.key)}</td><td>${s.samples}</td>
         <td>${pct}%</td><td>${(s.avg_latency||0).toFixed(1)}s</td>
         <td class="st ${GC[s.grade]||''}">${G[s.grade]||""}</td>
-        <td><button class="small" onclick="resetHealth('${s.key}')">清零</button></td></tr>`;
+        <td><button class="small" data-health-key="${esc(s.key)}">清零</button></td></tr>`;
     }).join("");
+    $$("#healthRows [data-health-key]").forEach(btn=>btn.addEventListener("click",()=>resetHealth(btn.dataset.healthKey)));
   }catch(e){box.innerHTML='<tr><td colspan="6" class="muted">读取失败</td></tr>';}
 }
 async function resetHealth(key){
@@ -1466,10 +1496,10 @@ async function addSource(){
   if(!api){toast("请填写接口地址","fail");return;}
   const r=await jpost("/v/api/ext/source/add",{name,api,standalone});
   if(r.code===0){toast("已添加");$("addName").value="";$("addApi").value="";$("addStandalone").checked=false;
-    await loadStatus();const tr=$("srcRows").querySelector(`tr[data-id="${r.data.id}"]`);if(tr&&!standalone)testOne(r.data.id,tr);}
+    await refreshSources();const tr=$("srcRows").querySelector(`tr[data-id="${r.data.id}"]`);if(tr&&!standalone)testOne(r.data.id,tr);}
   else toast(r.msg||"添加失败","fail");
 }
-// ---------- 订阅抓取代理（仅拉订阅/jar/脚本，不影响播放） ----------
+// ---------- 订阅抓取代理（仅拉订阅与 DRPY 脚本，不影响播放） ----------
 function initSubProxy(){
   const p=(CFG&&CFG.subscription_proxy)||"";
   const en=$("subProxyEnable"),inp=$("subProxyUrl"),sb=$("subProxySaveBtn"),cb=$("subProxyClearBtn"),msg=$("subProxyMsg");
@@ -1493,6 +1523,7 @@ async function saveSubProxy(test){
     const r=await jpost("/v/api/ext/subscription-proxy",{proxy});
     if(r.code!==0){msg.textContent="未保存："+(r.msg||"格式错误");msg.style.color="var(--danger)";return;}
     const d=r.data||{};
+    if(CFG)CFG.subscription_proxy=d.proxy||proxy;
     if(test){
       msg.textContent=d.test_ok?("✓ 已保存，代理连通（"+(d.test_msg||"")+"），仅作用于订阅资源抓取")
                                :("已保存，但代理测试失败："+(d.test_msg||""));
@@ -1505,7 +1536,7 @@ async function saveSubProxy(test){
 async function clearSubProxy(){
   if(!confirm("清空订阅代理、改为直连？"))return;
   const r=await jpost("/v/api/ext/subscription-proxy",{proxy:""});
-  if(r.code===0){$("subProxyUrl").value="";$("subProxyEnable").checked=false;
+  if(r.code===0){if(CFG)CFG.subscription_proxy="";$("subProxyUrl").value="";$("subProxyEnable").checked=false;
     $("subProxyUrl").disabled=true;$("subProxySaveBtn").disabled=true;$("subProxyClearBtn").disabled=true;
     $("subProxyMsg").textContent="已清空，当前直连";$("subProxyMsg").style.color="";toast("已切回直连");}
   else toast(r.msg||"失败","fail");
@@ -1549,7 +1580,7 @@ async function toggleAdfilterDynamic(on){
 }
 async function importSubscription(kind){
   const standalone=$("subStandalone").checked;
-  const payload={standalone:standalone,enable_guard:"smart"};
+  const payload={standalone:standalone};
   payload.refresh_days=parseInt(($("subRefreshDays")?.value||"1"),10)||0;
   if(kind==="url"){payload.url=$("subUrl").value.trim();if(!payload.url){toast("请填写订阅 URL","fail");return;}}
   else{payload.text=$("subText").value.trim();if(!payload.text){toast("请粘贴配置 JSON","fail");return;}}
@@ -1560,54 +1591,44 @@ async function importSubscription(kind){
     renderSubResult(r.data||{});
     toast("导入完成");
     try{loadAdfilter();}catch(e){}
-    try{await loadStatus();}catch(e){}
+    try{await refreshSources();}catch(e){}
     try{await loadDrpyMgmt();}catch(e){}
   }catch(e){out.innerHTML='<div class="hint" style="color:var(--danger)">导入出错：'+esc(String(e))+'</div>';}
 }
-async function subToggleGuard(key,on){
-  try{
-    const r=await jpost("/v/api/ext/guard/toggle",{key,enabled:!!on});
-    if(r.code===0){toast(on?"已启用":"已停用");try{await loadStatus();}catch(e){}}
-    else toast(r.msg||"操作失败","fail");
-  }catch(e){toast(String(e),"fail");}
-}
-async function importFantaiying(){
-  const btn=$("btnImportFty"), out=$("subResult");
-  if(btn){btn.disabled=true;btn.style.opacity=".6";btn.style.cursor="wait";}
-  const t0=Date.now();
-  out.innerHTML='<div class="muted sm">正在拉取内置「饭太硬」官方订阅（已内置爬虫 jar，多镜像自动切换、自动解密），请稍候…<span id="ftyWait"></span></div>';
-  // 超过 8 秒给“仍在进行”反馈，避免误以为点击无反应
-  const waitTimer=setInterval(()=>{const w=$("ftyWait");if(w)w.textContent="（已等待 "+Math.round((Date.now()-t0)/1000)+" 秒，源站慢时请耐心，勿重复点击）";},8000);
-  try{
-    const r=await jpost("/v/api/ext/source/import-subscription",
-      {builtin:"fantaiying",standalone:$("subStandalone").checked,enable_guard:"smart"});
-    clearInterval(waitTimer);
-    if(r.code!==0){out.innerHTML='<div class="hint" style="color:var(--danger)">导入失败：'+esc(r.msg||"")+'</div>';return;}
-    renderSubResult(r.data||{});
-    toast("饭太硬导入完成（耗时 "+Math.round((Date.now()-t0)/1000)+" 秒）");
-    try{loadAdfilter();}catch(e){}
-    try{await loadStatus();}catch(e){}
-    try{await loadDrpyMgmt();}catch(e){}
-  }catch(e){
-    clearInterval(waitTimer);
-    out.innerHTML='<div class="hint" style="color:var(--danger)">导入出错：'+esc(String(e))+'（可稍后重试，已登记的源不会重复添加）</div>';
-  }finally{
-    if(btn){btn.disabled=false;btn.style.opacity="";btn.style.cursor="";}
-  }
+function renderAndroidSubGroup(icon,title,rep){
+  if(!rep)return "";
+  const items=rep.items||[];
+  if(!items.length&&!rep.error)return "";
+  let h='<details class="subgrp android-dep"><summary class="subgrp-t" style="cursor:pointer">'
+    +icon+' '+title+'　'+items.length+' 个 <span class="tag off">主线无安卓 · 不导入</span></summary>';
+  if(rep.error)h+='<div class="hint" style="color:var(--danger)">'+esc(rep.error)+'</div>';
+  else h+='<div class="muted sm" style="padding:4px 2px">这些源仅作识别报告，未写入源列表，不计入可用数量；CMS/T4/DRPY 仍按正常流程导入。</div>';
+  items.slice(0,60).forEach(it=>{
+    h+='<div class="subrow android-dep"><span>'+esc(it.name||it.key)+'</span><span class="tag off">未导入</span></div>';
+  });
+  if(items.length>60)h+='<div class="muted sm" style="padding:4px 2px">其余 '+(items.length-60)+' 个同类源同样未导入。</div>';
+  return h+'</details>';
 }
 function renderSubResult(d){
   const cms=d.cms||{},skips=d.skipped_detail||[];
   let h="";
-  // 汇总
-  const cmsOk=cms.added||0, dr=d.drpy||{};
+  // 汇总：新增 CMS/T4 与 DRPY 当前就绪分开计数，避免把旧更新项误称“新增”。
+  const cmsOk=cms.added||0, t4=d.t4||{}, t4Ok=t4.added||0, dr=d.drpy||{};
   const drOk=(dr.items||[]).filter(x=>x.enabled).length;
-  const totalOk=cmsOk+drOk;
+  const androidN=((d.guard&&d.guard.items)||[]).length+((d.csp&&d.csp.items)||[]).length;
   h+='<div style="margin:8px 0;font-weight:600">共扫描 '+(d.scanned||0)+' 个站点'
-    +(d.subscriptions?('（含 '+d.subscriptions+' 个子订阅）'):'')+'，新增可直接使用 <b style="color:var(--ok,#3a9)">'+totalOk+'</b> 个。</div>';
+    +(d.subscriptions?('（含 '+d.subscriptions+' 个子订阅）'):'')+'，CMS/T4 新增 <b style="color:var(--ok,#3a9)">'+(cmsOk+t4Ok)+'</b> 个，DRPY 当前就绪 <b style="color:var(--ok,#3a9)">'+drOk+'</b> 个。'
+    +(androidN?'<span class="muted" style="font-weight:400">另有 '+androidN+' 个安卓依赖源未导入。</span>':'')+'</div>';
   // 苹果CMS
   if(cms.candidates||cms.added||cms.duplicate){
     h+='<div class="subgrp"><div class="subgrp-t">🍿 苹果CMS影视站　新增 '+cmsOk+' · 已存在 '+(cms.duplicate||0)+'</div>';
     (cms.added_names||[]).forEach(n=>{h+='<div class="subrow ok"><span>＋ '+esc(n)+'</span><span class="tag">已启用</span></div>';});
+    h+='</div>';
+  }
+  // T4 选片源
+  if(t4.candidates||t4.added||t4.duplicate){
+    h+='<div class="subgrp"><div class="subgrp-t">🧩 T4 选片源　新增 '+t4Ok+' · 已存在 '+(t4.duplicate||0)+'</div>';
+    (t4.added_names||[]).forEach(n=>{h+='<div class="subrow ok"><span>＋ '+esc(n)+'</span><span class="tag">已启用</span></div>';});
     h+='</div>';
   }
   // 远程 DRPY
@@ -1623,6 +1644,8 @@ function renderSubResult(d){
     h+='<div class="muted sm" style="padding:4px 2px">脚本若 401/下载失败，可在下方「已导入的远程 JS 爬虫」处重试。</div></div>';
   }
   if(dr && dr.error){h+='<div class="hint" style="color:var(--danger)">远程JS导入失败：'+esc(dr.error)+'</div>';}
+  h+=renderAndroidSubGroup('🛡','Guard 加固源',d.guard);
+  h+=renderAndroidSubGroup('🕷','普通 csp_ 爬虫',d.csp);
   // 跳过
   if(skips.length){
     h+='<details class="subgrp" style="margin-top:8px"><summary class="subgrp-t" style="cursor:pointer">⏭️ 跳过 '+ (d.skipped||skips.length) +' 个（网盘/直播/无法识别/探测失败）</summary>';
@@ -1636,11 +1659,11 @@ function renderSubResult(d){
 async function delSource(id,name){
   if(!confirm("确定删除资源站「"+name+"」？"))return;
   const r=await jpost("/v/api/ext/source/delete",{id});
-  if(r.code===0){toast("已删除");await loadStatus();}else toast(r.msg||"删除失败","fail");
+  if(r.code===0){toast("已删除");await refreshSources();}else toast(r.msg||"删除失败","fail");
 }
 async function restoreBuiltin(){
   const r=await jpost("/v/api/ext/source/restore",{});
-  if(r.code===0){toast("已恢复内置源");await loadStatus();}else toast("失败","fail");
+  if(r.code===0){toast("已恢复内置源");await refreshSources();}else toast("失败","fail");
 }
 
 /* ---------- CMS 源导入 / 导出 ---------- */
@@ -1887,7 +1910,7 @@ async function init(){
   safe(renderSources);safe(initSrcProxy);safe(loadCacheStatus);
   try{
     const gs=$("globalState");gs.textContent="接管运行中 · 已缓存 "+STATUS.cached_titles;gs.className="dot ok";
-    const ed=$("aboutEdition");if(ed)ed.textContent=(FEAT_DDUO?"完整版（本地全功能）":"公开版")+" · 在飞牛原生搜索与媒体库中注入在线影视";
+    const ed=$("aboutEdition");if(ed)ed.textContent="统一无安卓版 · 在飞牛原生搜索与媒体库中注入在线影视";
   }catch(e){console.error("status bar",e);}
   safe(loadOnline);
   safe(renderOverview);

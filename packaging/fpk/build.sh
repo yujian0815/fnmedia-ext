@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fnmedia-ext FPK 打包：组装骨架 + 项目主体 → fnpack build → dist/*.fpk
 # 用法：packaging/fpk/build.sh [--public] [--stage-only DIR] [--fnpack /path] [--out dist]
-#   --public  公开包：只含通用公开能力（在全功能源码树上会先执行构建期裁剪）
+#   默认构建统一无安卓正式包；--public 仅用于公开源码审计，不是独立产品版本。
 set -euo pipefail
 
 FPK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -64,8 +64,8 @@ if [ -f "${STAGE}/app/repo/tools/sanitize_changelog.py" ]; then
     "${STAGE}/app/repo/CHANGELOG.md"
 fi
 
-# 公开构建：从暂存副本移除可选特性（非标准源适配 / 扩展分类）。
-# 全功能源码树里有构建剥离器时执行剥离；若工作树本身已是公开树
+# 公开源码审计：从暂存副本移除可选特性（非标准源适配 / 扩展分类）。
+# 仅 --public 显式调用；正式统一包从不执行此步骤。若工作树已是公开树
 # （剥离器已不存在），则内容本就干净，直接跳过。
 if [ "${PUBLIC}" -eq 1 ] && [ -f "${STAGE}/app/repo/tools/public_strip.py" ]; then
   PY3="${PYTHON:-python3}"

@@ -17,9 +17,38 @@ class AdminUiFeatureTests(unittest.TestCase):
         html = admin_ui.ADMIN_HTML
         ids = re.findall(r'id="([A-Za-z0-9_]+)"', html)
         self.assertEqual({k: v for k, v in Counter(ids).items() if v > 1}, {})
-        self.assertEqual(len(re.findall(r'<section class="page', html)), 9)
-        for page in ("overview", "library", "sources", "quality", "importsub", "search", "about"):
-            self.assertIn(f'id="page-{page}"', html)
+        expected = {"overview", "library", "sources", "importsub", "pan",
+                    "playback", "search", "network", "data", "about"}
+        sections = set(re.findall(r'<section class="page[^>]*id="page-([^"]+)"', html))
+        self.assertEqual(sections, expected)
+        self.assertEqual(len(sections), 10)
+        nav_pages = set(re.findall(r'data-page="([^"]+)"', html))
+        self.assertEqual(nav_pages, expected)
+        self.assertNotIn("page-quality", html)
+        self.assertNotIn("page-xiaoya", html)
+        # 移动端核心导航 + 更多面板覆盖全部页面，无不可达功能。
+        self.assertIn('id="moreNav"', html)
+        self.assertIn('id="moreNavBtn"', html)
+        self.assertIn('function toggleMoreNav()', html)
+
+    def test_cards_live_in_their_functional_sections(self):
+        html = admin_ui.ADMIN_HTML
+
+        def section(page):
+            start = html.index(f'id="page-{page}"')
+            end = html.find('<section class="page', start + 1)
+            return html[start:end if end >= 0 else len(html)]
+
+        for element, page in (("prioRows", "sources"), ("healthRows", "sources"),
+                              ("drpyMgmt", "importsub"), ("nodePill", "importsub"),
+                              ("panFrame", "pan"), ("jvmPill", "pan"),
+                              ("lineFastest", "playback"), ("adfEnable", "playback"),
+                              ("onlineFirst", "search"), ("subProxyUrl", "network"),
+                              ("srcProxyUrl", "network"), ("updProxy", "network"),
+                              ("onlineBox", "data"), ("cacheGrid", "data"),
+                              ("updCur", "about"), ("panLibEnabled", "library")):
+            with self.subTest(element=element, page=page):
+                self.assertIn(f'id="{element}"', section(page))
 
     def test_long_resource_list_collapse_and_filter(self):
         html = admin_ui.ADMIN_HTML
@@ -53,6 +82,22 @@ class AdminUiFeatureTests(unittest.TestCase):
         for token in ('flex:1 1 auto;min-height:0', 'overflow-y:auto',
                       'overscroll-behavior:contain', 'scrollbar-width:thin'):
             self.assertIn(token, html)
+
+    def test_subscription_import_and_legacy_sources_are_report_only_without_android(self):
+        html = admin_ui.ADMIN_HTML
+        for token in ('function renderAndroidSubGroup(', '主线无安卓 · 不导入',
+                      '未写入源列表', 'Guard 加固源', '普通 csp_ 爬虫',
+                      '安卓源不可用', 'runtime_unavailable', 'target.spider_src',
+                      '另有 \'+androidN+\' 个安卓依赖源未导入'):
+            self.assertIn(token, html)
+        self.assertIn('CMS/T4 新增', html)
+        self.assertIn('T4 选片源', html)
+        self.assertIn('t4=d.t4||{}', html)
+        self.assertNotIn('新增可直接使用', html)
+        # 旧安卓管理/导入 JS 不得随新展示层复活。
+        for token in ('function importFantaiying(', 'function subToggleGuard(',
+                      'enable_guard:"smart"'):
+            self.assertNotIn(token, html)
 
     def test_272_button_system_covers_real_button_elements(self):
         html = admin_ui.ADMIN_HTML

@@ -1111,6 +1111,7 @@ async def lifespan(app: FastAPI):
     import subscriptions as _subs
     app.state.subscription_task = _subs.start_scheduler(_refresh_subscription)
 
+    # 不再创建 Android resident/autostart 任务。
 
     try:
         yield
@@ -8181,7 +8182,7 @@ async def ext_set_config(request: Request):
 
 @app.post("/v/api/ext/subscription-proxy")
 async def ext_set_subscription_proxy(request: Request):
-    """设置/清空「仅拉取订阅资源」的代理（订阅配置/spider jar/DRPY脚本）。
+    """设置/清空「仅拉取订阅资源」的代理（订阅配置与 DRPY JavaScript 规则）。
 
     播放、搜索、CMS 探测不走此代理。body: {"proxy":"http://user:pass@host:port"或""}
     会即时保存并用该代理探测一次（拉一个轻量 URL），返回连通结果。
@@ -8198,7 +8199,7 @@ async def ext_set_subscription_proxy(request: Request):
         try:
             import httpx as _httpx
             with _httpx.Client(trust_env=False, verify=False, timeout=12,
-                               proxy=px) as cli:
+                               **subfetch._proxy_kwargs(px)) as cli:
                 rr = cli.get("https://www.gstatic.com/generate_204")
                 test_ok = rr.status_code in (200, 204)
                 test_msg = f"HTTP {rr.status_code}"
@@ -8377,6 +8378,15 @@ async def ext_source_test(request: Request):
             return JSONResponse({"code": 404, "msg": "源不存在"}, status_code=404)
         api = src["api"]
     keyword = (body.get("keyword") or "庆余年").strip()
+    if src and config._is_android_source(src):
+        return {"code": 0, "msg": "", "data": {
+            "ok": False, "skipped": True, "error": "安卓运行时已移除，该源不可测试"}}
+    if src and src.get("drpy"):
+        return {"code": 0, "msg": "", "data": {
+            "ok": False, "skipped": True, "error": "DRPY 请在「订阅与 JS 源」使用批量探活"}}
+    if src and src.get("catvod"):
+        return {"code": 0, "msg": "", "data": {
+            "ok": False, "skipped": True, "error": "小雅请在「网盘与小雅」使用连接测试"}}
     result = await providers.probe_source(api, keyword=keyword, source=src)
     return {"code": 0, "msg": "", "data": result}
 
@@ -8389,6 +8399,16 @@ async def ext_source_test_all(request: Request):
     async def one(s):
         async with sem:
             try:
+                r = None
+                if config._is_android_source(s):
+                    r = {"ok": False, "skipped": True, "error": "安卓源不可用"}
+                elif s.get("drpy"):
+                    r = {"ok": False, "skipped": True, "error": "请使用 DRPY 批量探活"}
+                elif s.get("catvod"):
+                    r = {"ok": False, "skipped": True, "error": "请使用小雅连接测试"}
+                if r is None:
+                    r = await providers.probe_source(
+                        s["api"], keyword="庆余年", source=s)
                 if not isinstance(r, dict):
                     r = {}
                 r.update(id=s["id"], name=s["name"],
@@ -8659,22 +8679,18 @@ async def ext_import_tvbox(request: Request):
 async def ext_import_subscription(request: Request):
     """统一导入 TVBox / 影视仓 / OK影视 订阅（一个入口，自动分类、导入即可用）。
 
-    入参：{url?} 或 {text?}，可选 standalone（CMS 源是否同时作独立媒体库）、
-    enable_guard（True/False/"smart"，默认 "smart"：安全加固源自动启用、
-    P2P/磁力/云盘/需外部配置的风险源导入但默认关）。
+    入参：{url?} 或 {text?}，可选 standalone（CMS 源是否同时作独立媒体库）
+    与订阅刷新周期。旧客户端传入的 enable_guard 仅为兼容而忽略。
 
-    一份订阅一次解析，按运行时分流：
-      - 标准苹果CMS（type 0/1）：轻量探测通过后加入自定义源，立即可搜可播；
-      - csp_*Guard 加固源：写入私有 imported.json 并同步进源底表（仅完整版）；
-      - 其余爬虫 / 网盘 / 直播：跳过并给出原因。
-    返回分类报告 + 加固运行时就绪状态（未就绪时引导一键部署，源仍已登记）。
+    一份订阅一次解析，按当前主线支持的运行时分流：
+      - 标准苹果CMS（type 0/1）与 T4：按既有流程登记/探测；
+      - 远程 DRPY JS：由本地 Node 运行时执行，不依赖安卓；
+      - csp_*Guard 与普通 csp_ jar：主线已无安卓运行时，只返回识别报告，
+        不写库、不启用、不下载 jar，也不探测或启动安卓运行时。
     """
     import tvbox as tvboxmod
     body = await request.json()
     standalone = bool(body.get("standalone"))
-    enable_guard = body.get("enable_guard", "smart")
-    if enable_guard not in (True, False, "smart"):
-        enable_guard = "smart"
 
     try:
         if body.get("builtin"):
@@ -8718,7 +8734,6 @@ async def ext_import_subscription(request: Request):
     guard_sites = groups["guard"]
     csp_items = groups.get("csp", [])
     drpy_items = groups.get("drpy", [])
-    jar_url_global = groups.get("jar_url", "")
     skipped = list(groups["skipped"])
 
     # ---------- 苹果 CMS：并发探测，通过即加入并启用 ----------
@@ -8759,17 +8774,28 @@ async def ext_import_subscription(request: Request):
                    for x in skipped):
             skipped.append({"name": nm, "reason": "探测不可达"})
 
-    # ---------- csp_*Guard 加固源（仅完整私有构建） ----------
-    guard_report = None
-    runtime = None
+    # ---------- 安卓依赖源：只报告，不接入 ----------
+    # Guard 与普通 csp_ 都必须由 Android 执行。主线已移除该运行时，不能再把
+    # 这些源登记成“已启用但无数据”的死源，也不能在导入/自动刷新时下载 jar。
+    def _unsupported_android_report(items: list[dict]) -> dict | None:
+        if not items:
+            return None
+        report_items = [{
+            "key": str(s.get("key") or s.get("api") or ""),
+            "name": str(s.get("name") or s.get("key") or "未命名"),
+            "enabled": False,
+            "reason": "主线已移除安卓运行时",
+        } for s in items]
+        return {"skipped_runtime": True, "added": 0, "updated": 0,
+                "enabled_count": 0, "items": report_items}
 
-    # ---------- 普通 csp_ 爬虫 与 远程 drpyS（仅完整私有构建） ----------
-    csp_report = None
+    guard_report = _unsupported_android_report(guard_sites)
+    csp_report = _unsupported_android_report(csp_items)
+    runtime = ({"feature": False, "ready": False, "reason": "主线已移除安卓运行时"}
+               if guard_sites or csp_items else None)
     drpy_report = None
 
-    if cms_added or t4_report["added"] or (guard_report and guard_report.get("enabled_count")) \
-            or (csp_report and csp_report.get("added")) \
-            or (drpy_report and drpy_report.get("added")):
+    if cms_added or t4_report["added"] or (drpy_report and drpy_report.get("added")):
         _search_cache.clear(); _AGG_CACHE.clear()
         _schedule_routes_refresh()
 

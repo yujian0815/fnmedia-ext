@@ -68,18 +68,10 @@ DEFAULTS = {
     "catalog_library_enabled": True,
     # T4 远程订阅源的「T4 选片」聚合库（云端插件按需浏览/播放，非 CMS 深翻）
     "t4_library_enabled": True,
-    # 是否把每个启用的 TVBox 加固源（csp_*Guard，如比特/糯米/花花）生成为一张
-    # 独立“专区媒体库”卡片。默认关闭：加固源只作为播放时可切换的线路/搜索源，
-    # 不在媒体库列表里产生空库。需要专区墙时可在管理页打开。
+    # 历史 Guard 配置仅保留用于旧配置迁移；主线无安卓，三类入口一律停用。
     "guard_zone_enabled": False,
-    # 是否在飞牛原生媒体库注入单张「🛡加固影视」聚合库（源→分类片单，后台预取
-    # 缓存、请求即时返回）。与 guard_zone_enabled（每源一张专区墙）相互独立。
-    "guard_native_enabled": True,
-    # 加固源并入整个在线播放体系：任意在线影片的普通(CMS)线路全部不可播时，
-    # 用影片片名在可搜索加固源里元搜索聚合（复用 msearch 扇出竞速），把加固源
-    # 作为“兜底播放线路”救活。仅在普通线路全失败时才打 redroid，不拖慢正常播放。
-    # 仅完整版 GUARD 特性、且加固运行时就绪时生效。
-    "guard_playback_fallback": True,
+    "guard_native_enabled": False,
+    "guard_playback_fallback": False,
     # 置顶的虚拟媒体库 guid 集合（打开=在飞牛影视媒体库列表置顶，关闭=普通顺序）。
     "pinned_libs": [],
     # —— 虚拟媒体库显示开关 / 排序 / 子账号授权（稳定“库键”，见 vlibs.py）——
@@ -122,7 +114,7 @@ DEFAULTS = {
     # 慢的源排后），让能连通、延迟低的源默认排到更前。默认开启；关掉则只看质量权重。
     "auto_best_source": True,
     "admin_token": "",
-    # 仅用于「拉取订阅资源」的可选 HTTP(S) 代理（订阅配置 / spider jar / DRPY 脚本）。
+    # 仅用于「拉取订阅资源」的可选 HTTP(S) 代理（订阅配置与 DRPY JavaScript 规则）。
     # 播放、聚合搜索、CMS 探测等一律不走此代理（产品客户端保持 trust_env=False 直连）。
     # 形如 http://user:pass@host:port ；留空表示直连。
     "subscription_proxy": "",
@@ -170,11 +162,36 @@ _DEPRECATED = {
 _BUILTIN_IDS = {s["id"] for s in DEFAULT_SOURCES}
 
 
+def _is_android_source(source: dict) -> bool:
+    """历史 Guard/普通 csp 源判定；DRPY、T4、CMS 与网盘模块不受影响。"""
+    sid = str(source.get("id") or "")
+    api = str(source.get("api") or "")
+    return bool(source.get("guard") or source.get("spider_src")
+                or sid.startswith(("guard-", "spider-"))
+                or api.startswith(("guard://", "csprun://")))
+
+
+def _normalize_no_android(cfg: dict) -> None:
+    """在读取与每次持久化时统一停用旧安卓入口，不删除历史源记录。"""
+    cfg["guard_native_enabled"] = False
+    cfg["guard_zone_enabled"] = False
+    cfg["guard_playback_fallback"] = False
+    for source in cfg.get("sources") or []:
+        if _is_android_source(source):
+            source["enabled"] = False
+            source["runtime_unavailable"] = True
+            source["runtime_reason"] = "主线已移除安卓运行时"
+
+
 class Config:
+    _is_android_source = staticmethod(_is_android_source)
+
     def __init__(self):
         self._cfg: dict = {}
+        self._drpy_live: dict = {}
         self._mtime = 0
         self.load()
+
 
 
     def load(self):
@@ -219,7 +236,10 @@ class Config:
                     if key in s:
                         m[key] = s[key]
                 merged.append(m)
+            # 历史 Guard/普通 csp 记录保留但不再进入可用源集合；加载时不主动
+            # 回写旧文件，后续正常保存配置会把统一的停用状态一并落盘。
             cfg["sources"] = merged
+            _normalize_no_android(cfg)
             cfg["removed_ids"] = sorted(removed)
             # 旧版本（单库/小数量）保存过的热门参数自动升级到深度爬取规模；
             # 仅在检测到旧小值时迁移一次，用户之后自定义的大值不会被覆盖。
@@ -278,7 +298,10 @@ class Config:
     def enabled_sources(self):
         self.maybe_reload()
         with _LOCK:
-            return [dict(s) for s in self._cfg["sources"] if s.get("enabled")]
+            # 最后一道防线：即使调用方绕过 load/_persist 直接改内存，也绝不让
+            # 已移除的安卓源重新进入搜索、 catalog 路由或播放候选。
+            return [dict(s) for s in self._cfg["sources"]
+                    if s.get("enabled") and not _is_android_source(s)]
 
     def all_sources(self):
         self.maybe_reload()
@@ -294,6 +317,7 @@ class Config:
             self._persist(cfg)
 
     def _persist(self, cfg: dict):
+        _normalize_no_android(cfg)
         _STATE.parent.mkdir(parents=True, exist_ok=True)
         tmp = _STATE.with_suffix(".tmp")
         tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
@@ -368,7 +392,7 @@ class Config:
             return True, "ok"
 
     def set_subscription_proxy(self, proxy_url: str) -> tuple[bool, str]:
-        """保存「订阅资源抓取」专用代理（空串=直连）。仅用于订阅配置/jar/DRPY脚本，
+        """保存「订阅资源抓取」专用代理（空串=直连）。仅用于订阅配置与 DRPY 脚本，
         不影响播放与搜索。仅接受 http(s)/socks5 URL 形态。"""
         from urllib.parse import urlparse
         p = (proxy_url or "").strip()

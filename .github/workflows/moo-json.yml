@@ -55,7 +55,7 @@ jobs:
           set -euo pipefail
           TAG="${{ steps.tag.outputs.tag }}"
           VER="${TAG#v}"
-          # 公开轻量包（裸名资产，即 lite 版，与自更新下载一致）
+          # 统一正式版裸名资产（Moo 与新旧客户端自更新下载一致）
           ASSET="fnmedia-ext-${VER}.fpk"
           echo "同步 $TAG -> 资产 $ASSET"
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
@@ -70,6 +70,8 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # 本地发布脚本也可能更新 moo；先 rebase 避免并发提交造成 non-fast-forward。
+          git pull --rebase origin main
           git add moo.json
           if git diff --cached --quiet; then
             echo "moo.json 无变化，跳过提交"

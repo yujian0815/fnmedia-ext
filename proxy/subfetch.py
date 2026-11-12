@@ -2,8 +2,8 @@
 """订阅资源抓取的共享低层工具（仅服务 TVBox/订阅导入）。
 
 唯一职责：
-  - 读取用户为「拉取订阅资源」单独配置的 HTTP(S) 代理（订阅配置 / spider jar /
-    DRPY 规则脚本）。播放、聚合搜索、CMS 探测等一律不用它，产品客户端始终
+  - 读取用户为「拉取订阅资源」单独配置的 HTTP(S) 代理（订阅配置与 DRPY
+    JavaScript 规则脚本）。播放、聚合搜索、CMS 探测等一律不用它，产品客户端始终
     trust_env=False 直连，避免误伤播放流量。
   - 统一构造带该代理（且仍 trust_env=False，不读系统 Clash 环境变量）的 httpx
     客户端；并提供 GitHub 原始域名的国内镜像候选，源站 NXDOMAIN/被墙时兜底。
@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-# 抓取订阅资源用的超时（jar 可能数 MB，给宽一些）
+# 抓取订阅资源用的超时（多订阅与脚本下载可能较慢，给宽一些）
 SUB_TIMEOUT = httpx.Timeout(25.0, connect=10.0)
 _UA = "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36"
 
@@ -39,7 +39,7 @@ def _proxy_kwargs(px: str) -> dict:
 
     httpx <0.26 的 Client/AsyncClient 只接受 proxies=，0.26+ 改用 proxy= 且
     proxies= 被移除。配置了代理时必须命中正确参数名，否则 TypeError 会让
-    fetch_first 等低层抓取静默全失败（DRPY 规则、spider jar 都走这里）。
+    fetch_first 等低层抓取静默全失败（DRPY 规则脚本走这里）。
     """
     if not px:
         return {}
