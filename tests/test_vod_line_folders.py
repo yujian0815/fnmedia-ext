@@ -244,6 +244,108 @@ class VodPansouCardTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(t["_pansou_manual"])
         self.assertEqual(t["online_guid"], "og")
 
+    def test_pansou_media_guid_reverse_lookup_unlocks_play_chain(self):
+        # 回归：网盘虚拟线的 media/video guid 是哈希，play/play、media/range、
+        # preset/main 都用它反查。修复前 _fixed_media_target 解析不出 → 透传官方
+        # invalid sign，网盘「搜索→转存→原画」触发链整条不启动。登记反查映射后
+        # 必须能还原网盘手动线目标。
+        from store import episode_guid, ep_media_guid, ep_video_guid
+        pl = "builtin-pansou::PanSou网盘高清"
+        eg = episode_guid("og", "", 0)
+        mg = ep_media_guid(eg, pl)
+        vg = ep_video_guid(eg, pl)
+        self.addCleanup(appmod._PANSOU_MEDIA_MAP.pop, mg, None)
+        self.addCleanup(appmod._PANSOU_MEDIA_MAP.pop, vg, None)
+        with patch.object(appmod, "_pansou_available", return_value=True), \
+                patch.object(appmod, "PANSOU_LINE", pl), \
+                patch.object(appmod.store, "get_title_by_guid", return_value=self.b), \
+                patch.object(appmod, "_pansou_manual_target",
+                             return_value={"line": pl, "url": "pansou://manual",
+                                           "_pansou_manual": True, "xsrc": True}):
+            # 未登记时解析不出（不误报其它 guid）
+            appmod._PANSOU_MEDIA_MAP.pop(mg, None)
+            self.assertIsNone(appmod._fixed_media_target(mg))
+            # 登记后 media 与 video guid 都能还原网盘手动线
+            appmod._pansou_register_media("og", 0)
+            self.assertIn(mg, appmod._PANSOU_MEDIA_MAP)
+            t = appmod._fixed_media_target(mg)
+            self.assertIsNotNone(t)
+            self.assertTrue(t["_fixed_line"])
+            self.assertTrue(t["_pansou_manual"])
+            self.assertEqual(t["online_guid"], "og")
+            tv = appmod._fixed_media_target(vg)
+            self.assertIsNotNone(tv)
+            self.assertEqual(tv["online_guid"], "og")
+
+    def test_pansou_register_noop_when_unavailable(self):
+        # lite/未启用时登记为空操作，绝不出现网盘线
+        from store import episode_guid, ep_media_guid
+        pl = "builtin-pansou::PanSou网盘高清"
+        mg = ep_media_guid(episode_guid("ogx", "", 0), pl)
+        with patch.object(appmod, "_pansou_available", return_value=False), \
+                patch.object(appmod, "PANSOU_LINE", pl):
+            appmod._pansou_register_media("ogx", 0)
+        self.assertNotIn(mg, appmod._PANSOU_MEDIA_MAP)
+
+    async def test_stream_list_pansou_carries_line_media_guid(self):
+        # 回归：Web 播放器用 stream/list 的 files[].guid 走 /stream→play/play。
+        # 网盘卡必须返回网盘专属 media_guid；若沿用标题级 guid 会落入自动竞速，
+        # 网盘被排除在竞速外永远选不中，回退 CMS（"选了网盘却在放 CMS"）。
+        from starlette.requests import Request
+        from store import episode_guid, ep_media_guid, ep_video_guid
+        pl = "builtin-pansou::PanSou网盘高清"
+        b = brief(tv=False)  # Movie
+        og = b["guid"]
+        eg = episode_guid(og, "", 0)
+        p_mg = ep_media_guid(eg, pl)
+        p_vg = ep_video_guid(eg, pl)
+        line_guid = appmod._line_item_guid(og, pl, 0)
+        req = Request({"type": "http", "method": "GET", "path": "/",
+                       "query_string": b"", "headers": []})
+        title_sl = {"files": [{"guid": "TITLE_MG"}],
+                    "video_streams": [{"guid": "TITLE_VG",
+                                       "media_guid": "TITLE_MG"}],
+                    "qualities": []}
+        with patch.object(appmod, "_load_t4_detail", return_value=None), \
+                patch.object(appmod, "_pansou_available", return_value=True), \
+                patch.object(appmod, "PANSOU_LINE", pl), \
+                patch.object(appmod.store, "get_title_by_guid", return_value=b), \
+                patch.object(appmod.inj, "is_tv", return_value=False), \
+                patch.object(appmod.inj, "stream_list", return_value=title_sl), \
+                patch.object(appmod, "_qualities", return_value=[]):
+            resp = await appmod._stream_list_impl(line_guid, req)
+        data = json.loads(resp.body)["data"]
+        self.assertEqual(data["files"][0]["guid"], p_mg)
+        self.assertEqual(data["video_streams"][0]["media_guid"], p_mg)
+        self.assertEqual(data["video_streams"][0]["guid"], p_vg)
+
+    def test_direct_route_bound_to_direct_proxy_not_placeholder(self):
+        # 回归：@app.get(.../direct) 曾误挂在恒回占位的 _direct_to_placeholder 上，
+        # 使真正的 direct_proxy 成死代码——网盘原画 MP4 及一切直链都恒回占位、播放失败。
+        from starlette.routing import Route
+        ep = None
+        for r in appmod.app.routes:
+            if isinstance(r, Route) and r.path.endswith("/{mg}/direct"):
+                ep = r.endpoint
+                break
+        self.assertIsNotNone(ep, "/direct 路由未注册")
+        self.assertEqual(ep.__name__, "direct_proxy")
+
+    async def test_await_pansou_target_returns_ready_snapshot(self):
+        # /direct 原生播放需等转存就绪后取快照；ready 时必须返回可播 target。
+        from starlette.requests import Request
+        req = Request({"type": "http", "method": "GET", "path": "/",
+                       "query_string": b"index=0", "headers": []})
+        snap = {"url": "/v/api/ext/pan/play?fid=X", "line": "builtin-pansou::PanSou网盘高清",
+                "pan": True, "m3u8": False}
+        with patch.object(appmod, "_pansou_manual_state", return_value="ready"), \
+                patch.object(appmod, "_pansou_manual_kick", return_value=None), \
+                patch.dict(appmod._PANSOU_MAN_SNAP, {"mgX": snap}, clear=False):
+            got = await appmod._await_pansou_target("mgX", req, timeout=2.0)
+        self.assertIsNotNone(got)
+        self.assertEqual(got["url"], snap["url"])
+        self.assertFalse(got["m3u8"])
+
     async def test_folder_appends_pansou_card_at_end(self):
         m3u8 = dict(target("lzi::lzm3u8"), resolve=False, m3u8=True)
         with patch.object(appmod.store, "get_title_by_guid", return_value=self.b), \

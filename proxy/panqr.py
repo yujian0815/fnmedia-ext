@@ -157,3 +157,95 @@ async def build_login_ts_async(qr_png: bytes, title: str = "",
         return await asyncio.to_thread(build_login_ts, qr_png, title, subtitle)
     except Exception:  # noqa: BLE001
         return None
+
+
+def build_message_ts(title: str, subtitle: str = "") -> bytes | None:
+    """生成纯文字提示 TS（无二维码）；带缓存 + 单飞，失败返回 None。
+
+    用于网盘分享失效等无需扫码的场景，直接把提示烧进播放画面。规格与登录二维码
+    分片一致（640x360/2s），无缝衔接直播式占位窗口。"""
+    if not ffmpeg_available():
+        return None
+    key = "msg|" + hashlib.md5(
+        (title + "|" + subtitle).encode("utf-8")).hexdigest()
+    with _LOCK:
+        hit = _CACHE.get(key)
+        if hit is not None:
+            return hit
+        waiter = _INFLIGHT.get(key)
+        if waiter is None:
+            waiter = threading.Event()
+            _INFLIGHT[key] = waiter
+            leader = True
+        else:
+            leader = False
+    if not leader:
+        waiter.wait(timeout=15)
+        with _LOCK:
+            return _CACHE.get(key)
+    try:
+        return _encode_message_ts(key, title, subtitle)
+    finally:
+        with _LOCK:
+            ev = _INFLIGHT.pop(key, None)
+        if ev is not None:
+            ev.set()
+
+
+def _encode_message_ts(key: str, title: str, subtitle: str) -> bytes | None:
+    """实际调用 ffmpeg（信号量串行），结果写入缓存。"""
+    font = _font()
+    work = tempfile.mkdtemp(prefix="fnmsg-")
+    try:
+        if not _ENCODE_SEM.acquire(timeout=20):
+            return None
+        try:
+            out_path = f"{work}/out.ts"
+            fc = []
+            if font:
+                fc.append(
+                    f"drawtext=fontfile='{font}':text='{_esc_text(title)}':"
+                    f"fontcolor=white:fontsize=26:x=(w-text_w)/2:y=(h-text_h)/2-20")
+                if subtitle:
+                    fc.append(
+                        f"drawtext=fontfile='{font}':text='{_esc_text(subtitle)}':"
+                        f"fontcolor=0x9ca3af:fontsize=18:x=(w-text_w)/2:y=(h/2)+24")
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i",
+                f"color=c=0x0f1115:s={_W}x{_H}:d={_DUR}:r={_FPS}",
+                "-f", "lavfi", "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-vf", ",".join(fc) if fc else "null",
+                "-map", "0:v", "-map", "1:a",
+                "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                "-t", str(_DUR), "-c:a", "aac", "-shortest",
+                "-f", "mpegts", out_path,
+            ]
+            proc = subprocess.run(cmd, capture_output=True, timeout=30)
+            if proc.returncode != 0:
+                return None
+            with open(out_path, "rb") as f:
+                data = f.read()
+            if not data:
+                return None
+        finally:
+            _ENCODE_SEM.release()
+        with _LOCK:
+            if len(_CACHE) >= _CACHE_MAX:
+                for old in list(_CACHE)[:_CACHE_MAX // 4]:
+                    _CACHE.pop(old, None)
+            _CACHE[key] = data
+        return data
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+async def build_message_ts_async(title: str, subtitle: str = "") -> bytes | None:
+    """在线程池跑 ffmpeg，避免阻塞事件循环。"""
+    try:
+        return await asyncio.to_thread(build_message_ts, title, subtitle)
+    except Exception:  # noqa: BLE001
+        return None

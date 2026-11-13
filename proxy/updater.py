@@ -113,7 +113,7 @@ def _vtuple(v: str) -> tuple:
 
 
 def is_newer(latest: str, current: str | None = None) -> bool:
-    return _vtuple(latest) > _vtuple(current or current_version())
+    return _version_key(latest) > _version_key(current or current_version())
 
 
 def edition_full() -> bool:
@@ -151,9 +151,31 @@ def _pick_asset(assets: list[dict], full: bool) -> dict | None:
 
 
 def _version_key(tag: str) -> tuple:
-    """Release tag → 可比较版本元组（取数字段，兼容 1.0.1-beta.1 这类预发布号）。"""
-    nums = re.findall(r"\d+", str(tag or ""))
-    return tuple(int(x) for x in (nums + [0, 0, 0])[:3])
+    """Release tag → 可比较版本元组（兼容 1.0.1-beta.1 这类预发布号）。
+
+    正式版 > 同基础版本的任何预发布（beta 切回正式通道时能检测到正式版更新）；
+    预发布之间按 alpha<beta<rc 及序号比较。元组第 4 位 1=正式/0=预发布。"""
+    t = str(tag or "").lstrip("vV")
+    m = re.match(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?", t)
+    major = int(m.group(1)) if m else 0
+    minor = int(m.group(2)) if m and m.group(2) is not None else 0
+    patch = int(m.group(3)) if m and m.group(3) is not None else 0
+    pre = re.search(r"(alpha|beta|rc)[.\-]?(\d*)", t, re.I)
+    if pre:
+        rank = {"alpha": 0, "beta": 1, "rc": 2}.get(pre.group(1).lower(), 1)
+        num = int(pre.group(2)) if pre.group(2) else 0
+        return (major, minor, patch, 0, rank, num)
+    return (major, minor, patch, 1, 0, 0)
+
+
+def _get_channel() -> str:
+    """更新通道：stable=仅正式版；beta=正式+预发布。默认 stable。"""
+    try:
+        ch = str(_config.config.get().get("update_channel", "stable")
+                 or "stable").strip().lower()
+        return ch if ch in ("stable", "beta") else "stable"
+    except Exception:
+        return "stable"
 
 
 def _fetch_release_sync() -> dict | None:
@@ -179,14 +201,17 @@ def _fetch_release_sync() -> dict | None:
                 if r.status_code != 200:
                     raise RuntimeError(f"GitHub 返回 {r.status_code}")
                 releases = r.json()
-            # 过滤草稿，按版本号取最高（含 prerelease）；同版本优先正式版
+            # 过滤草稿；按更新通道筛选：stable 仅正式版，beta 正式+预发布。
+            # Moo 商店只推正式版，beta 通道由本更新器直连 GitHub Release 提供。
+            channel = _get_channel()
             candidates = [x for x in releases
                           if isinstance(x, dict) and not x.get("draft")]
+            if channel == "stable":
+                candidates = [x for x in candidates if not x.get("prerelease")]
             if not candidates:
-                raise RuntimeError("Release 列表为空")
+                raise RuntimeError(f"当前更新通道（{channel}）无可用 Release")
             candidates.sort(
-                key=lambda x: (_version_key(x.get("tag_name", "")),
-                               0 if x.get("prerelease") else 1),
+                key=lambda x: _version_key(x.get("tag_name", "")),
                 reverse=True)
             return candidates[0]
         except Exception as exc:  # noqa: BLE001
@@ -267,6 +292,7 @@ def _snapshot() -> dict:
         "code": 0,
         "current_version": current_version(),
         "edition": "standard",
+        "channel": _get_channel(),
         "status": _STATE["status"],
         "progress": _STATE["progress"],
         "last_check": _STATE["last_check"],

@@ -688,6 +688,13 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div class="card-title">🔄 版本更新</div>
         <div class="stack sm">
           <div class="muted">当前版本：<b id="updCur">…</b><span id="updEdition" class="muted"></span></div>
+          <div class="muted" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">更新通道：
+            <select id="updChannel" style="padding:4px 8px;border-radius:6px;border:1px solid var(--border,#d0d7de);background:var(--bg,#fff);color:inherit">
+              <option value="stable">正式版（稳定）</option>
+              <option value="beta">Beta 版（尝鲜）</option>
+            </select>
+            <span class="hint" id="updChannelTip">Moo 商店只推正式版；Beta 经 GitHub 更新</span>
+          </div>
           <div id="updBody" class="muted">正在检查更新…</div>
           <div id="updActions" style="display:none;gap:8px;flex-wrap:wrap;align-items:center">
             <button class="btn primary" id="updBtn">立即更新</button>
@@ -849,6 +856,8 @@ async function loadUpdate(force){
 function renderUpdate(r){
   $u("updCur").textContent=r.current_version||"—";
   $u("updEdition").textContent=" · "+updEdLabel(r.edition);
+  const chSel=$u("updChannel");
+  if(chSel && r.channel){chSel.value=r.channel;}
   const u=r.update;
   const busy=["checking","downloading","installing"].includes(r.status);
   const body=$u("updBody"),actions=$u("updActions"),btn=$u("updBtn"),
@@ -907,6 +916,20 @@ document.addEventListener("DOMContentLoaded",()=>{
     }catch(e){alert("更新启动失败："+e.message);btn.disabled=false;}
   });
   if(rf)rf.addEventListener("click",()=>loadUpdate(true));
+  const chSel=document.getElementById("updChannel");
+  if(chSel)chSel.addEventListener("change",async()=>{
+    const ch=chSel.value;
+    if(ch==="beta" && !confirm("Beta 版为尝鲜预发布，可能不如正式版稳定。确定切换到 Beta 通道？")){
+      chSel.value="stable";return;
+    }
+    chSel.disabled=true;
+    try{
+      const r=await jpost("/v/api/ext/update/channel",{channel:ch});
+      if(r&&r.code===0){renderUpdate(r);toast("已切换到"+(ch==="beta"?"Beta 版":"正式版")+"通道");}
+      else{alert("切换通道失败："+((r&&r.msg)||"未知错误"));loadUpdate(true);}
+    }catch(e){alert("切换通道失败："+e.message);}
+    finally{chSel.disabled=false;}
+  });
   const ps=document.getElementById("updProxySave");
   if(ps)ps.addEventListener("click",async()=>{
     const v=(document.getElementById("updProxy").value||"").trim();

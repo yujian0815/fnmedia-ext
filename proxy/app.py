@@ -1005,13 +1005,13 @@ def b64d(s: str) -> str:
 
 
 async def _pan_cache_cleanup_once() -> dict:
-    """对已登录的夸克/UC 各执行一次过期转存清理（lite 无 pan 模块则跳过）。"""
+    """对已登录的夸克/UC/阿里各执行一次过期转存清理（lite 无 pan 模块则跳过）。"""
     out = {}
     try:
         ttl = int(float(config.get().get("pan_cache_ttl_hours", 6) or 6)) * 3600
     except (TypeError, ValueError):
         ttl = 6 * 3600
-    for name, modname in (("quark", "pan"), ("uc", "panuc")):
+    for name, modname in (("quark", "pan"), ("uc", "panuc"), ("ali", "panali")):
         try:
             mod = __import__(modname)
         except Exception:
@@ -1062,7 +1062,14 @@ async def lifespan(app: FastAPI):
                         await _pan_cache_cleanup_once()
                 except Exception:
                     pass
-                await asyncio.sleep(3600)
+                # 定时清理间隔（默认 6 小时，可配置）：到期转存资源按 TTL 清理，
+                # 防止持续转存撑爆网盘容量。
+                try:
+                    _iv = int(float(config.get().get(
+                        "pan_cache_cleanup_interval_hours", 6) or 6))
+                except (TypeError, ValueError):
+                    _iv = 6
+                await asyncio.sleep(max(1, _iv) * 3600)
         except asyncio.CancelledError:
             pass
     app.state.pan_cache_task = asyncio.create_task(_pan_cache_loop())
@@ -2552,6 +2559,28 @@ def _vod_pansou_card(brief: dict, index: int, parent: str) -> dict | None:
     return None
 
 
+# PanSou 虚拟手动线不在 store：其 media/video guid 是 ep_media_guid 哈希，既不带
+# line-item 前缀、也无法被 store.resolve_media_guid 反查。若不登记反查映射，
+# play/play、media/range、preset/main 拿到该 guid 会一律透传官方（invalid sign），
+# 网盘「搜索→转存→原画」触发链整条不启动（表现为点网盘卡无任何反应）。
+# 这里登记 guid→(og,index)，_fixed_media_target 据此还原网盘手动线目标。
+# lite 构建 _pansou_available() 恒 False，登记为空操作，绝不出现网盘线。
+_PANSOU_MEDIA_MAP: dict[str, tuple] = {}
+
+
+def _pansou_register_media(og: str, index: int = 0) -> None:
+    try:
+        if not og or not _pansou_available():
+            return
+        idx = int(index or 0)
+        eg = episode_guid(og, "", idx)
+        ref = (og, idx)
+        _PANSOU_MEDIA_MAP[ep_media_guid(eg, PANSOU_LINE)] = ref
+        _PANSOU_MEDIA_MAP[ep_video_guid(eg, PANSOU_LINE)] = ref
+    except Exception:  # noqa: BLE001  登记失败不得影响卡片/播放信息返回
+        pass
+
+
 def _fixed_media_target(mg: str, request: Request | None = None) -> dict | None:
     """线路卡/季卡 guid -> 固定线路播放目标；不进入任何自动选优。
 
@@ -2564,7 +2593,12 @@ def _fixed_media_target(mg: str, request: Request | None = None) -> dict | None:
             og, line, _season_no = season_parsed
             parsed = (og, line, 0)
     if not parsed:
-        return None
+        # 网盘虚拟线的 media/video guid 是哈希：用登记的反查映射还原 (og,index)。
+        ref = _PANSOU_MEDIA_MAP.get(mg)
+        if ref:
+            parsed = (ref[0], PANSOU_LINE, ref[1])
+        else:
+            return None
     og, line, index = parsed
     if request is not None:
         try:
@@ -3432,6 +3466,22 @@ async def _stream_list_impl(guid: str, request: Request):
         else:
             sl = inj.stream_list(brief)
         target = fixed
+        # PanSou 虚拟手动线：流容器必须携带网盘专属 media/video guid。Web 播放器
+        # 用 files[].guid 走 /stream→play/play；若沿用标题级 guid 会落入自动竞速，
+        # 而网盘被排除在竞速外永远选不中，最终回退 CMS（"选了网盘却在放 CMS"）。
+        # 仅网盘线做此替换，常规固定线行为保持不变。
+        if _is_pansou_line_name(fixed.get("line", "")):
+            _p_og = fixed.get("online_guid", "")
+            _p_idx = int(fixed.get("index", 0) or 0)
+            _pansou_register_media(_p_og, _p_idx)
+            _p_eg = episode_guid(_p_og, "", _p_idx)
+            _p_mg = ep_media_guid(_p_eg, PANSOU_LINE)
+            _p_vg = ep_video_guid(_p_eg, PANSOU_LINE)
+            for _f in sl.get("files") or []:
+                _f["guid"] = _p_mg
+            for _v in sl.get("video_streams") or []:
+                _v["guid"] = _p_vg
+                _v["media_guid"] = _p_mg
     else:
         ep = store.get_episode(guid)
         target = None
@@ -3847,6 +3897,9 @@ def _vod_play_info(guid: str, client) -> JSONResponse | None:
     if is_pansou:
         # PanSou 虚拟手动线不在 store，用其专用 target，不做普通集解析。
         target = _pansou_manual_target(index)
+        # 登记 media/video guid 反查，使随后 play/play、media/range、preset/main
+        # 能锁定本网盘线（否则透传官方 invalid sign，触发链不启动）。
+        _pansou_register_media(og, index)
     else:
         target = store.resolve_episode(og, line, index)
         if not target:
@@ -4465,13 +4518,29 @@ async def play_play(request: Request):
         except Exception:
             pass
         _pq = urllib.parse.urlencode({"line": PANSOU_LINE, "index": _pidx})
+        # 转存异步，这里即触发，不再依赖 HLS 占位分片 kick。
+        try:
+            _pansou_manual_kick(mg)
+        except Exception:
+            pass
+        # 封装按客户端区分：
+        # - Web：hls.js 播不了直链 MP4，wrapper=MP4 走 /direct 原生播放。
+        # - iOS/TV/Android：原生播放器可播 HLS，且 HLS 占位→就绪转正链可靠；
+        #   /direct 超时回的 HLS 占位原生 MP4 播放器不跟随（会播放失败），故走
+        #   wrapper=HLS + preset，转存慢时占位等待、就绪自动转正。
+        # 网盘原画（MP4/MKV/H.265）一律按直连视频播放：Web xgplayer 与 iOS/TV 原生
+        # 播放器均支持 HEVC/MKV 解码，wrapper=MP4 + /direct 就绪后 302 原画直链。
+        # 不能走 HLS 管道——HLS 播放器拿到 MKV 直链会报 http error。慢转存由 /direct
+        # 的 retry 重定向兜底（直连播放器不跟 HLS 占位）。
+        _pl = f"{ONLINE_PREFIX}/{mg}/direct?{_pq}"
+        _wr = "MP4"
         return JSONResponse({"code": 0, "msg": "", "data": {
             "audio_guid": "", "audio_index": -1, "hls_time": 6,
             "is_subtitle_external": 0, "media_guid": mg,
-            "play_link": f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{_pq}",
+            "play_link": _pl,
             "subtitle_guid": "", "subtitle_index": -1,
             "subtitle_link": "", "video_guid": body.get("video_guid", vg_for(mg)),
-            "video_index": 0, "wrapper": "HLS",
+            "video_index": 0, "wrapper": _wr,
             "non_fatal_errno": None, "video_encoder": "",
             "not_supported_resolution": "", "supported_highest_resolution": ""}})
     if chosen_line and chosen_line != base_target.get("line"):
@@ -4524,7 +4593,6 @@ async def play_play(request: Request):
         "not_supported_resolution": "", "supported_highest_resolution": ""}})
 
 
-@app.get(f"{ONLINE_PREFIX}/{{mg}}/direct")
 def _direct_to_placeholder(mg: str, request: Request) -> RedirectResponse:
     """直链(mp4)取流失败：302 回占位 master，播放器不弹错、线路菜单可手动切换。
     带 ph=1，preset 见此标记直接回占位（不再给同一条坏线，避免重定向环）。"""
@@ -4534,9 +4602,65 @@ def _direct_to_placeholder(mg: str, request: Request) -> RedirectResponse:
         headers={"Cache-Control": "no-store", "X-fnmedia-Placeholder": "1"})
 
 
+async def _await_pansou_target(mg: str, request: Request,
+                               timeout: float = 30.0) -> dict | None:
+    """等待 PanSou 转存就绪，返回可播 target；超时/失败/待登录返回 None。
+
+    网盘原画走 /direct 原生播放（wrapper=MP4），没有 HLS 占位分片 kick，转存
+    已在 play/play 触发；这里兜底确保启动并轮询快照就绪。lite 无网盘线不会走到。"""
+    try:
+        _pansou_manual_kick(mg)
+    except Exception:  # noqa: BLE001
+        pass
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        st = _pansou_manual_state(mg)
+        if st == "ready":
+            snap = _PANSOU_MAN_SNAP.get(mg)
+            if snap:
+                return dict(snap, index=int(
+                    request.query_params.get("index", 0) or 0))
+            return None
+        if st in ("dead", "need_login"):
+            return None
+        await asyncio.sleep(0.5)
+    return None
+
+
+@app.get(f"{ONLINE_PREFIX}/{{mg}}/direct")
 async def direct_proxy(mg: str, request: Request):
     """mp4 等非 HLS 直链代理：同源、带 Range 支持（播放器 seek）。"""
     failed_g = await _await_pending_chart(mg)
+    # PanSou 虚拟手动线不在 store：等转存就绪。原画 MP4 → 302 原画端点（原生 video
+    # 跟随 302 播放、pan/play 自带 Range）；转码 HLS → 回 preset 走 HLS 管道。
+    _fx_pan = _fixed_media_target(mg, request)
+    if _fx_pan and _fx_pan.get("_pansou_manual"):
+        _pt = await _await_pansou_target(mg, request)
+        if _pt is None:
+            # 慢转存：直连播放器(wrapper=MP4)不跟 HLS 占位，改为带 retry 参数重定向
+            # 回 /direct 继续等，就绪即 302 原画；dead/need_login 或超重试上限才回占位。
+            _retry = int(request.query_params.get("retry", 0) or 0)
+            _st = _pansou_manual_state(mg)
+            if _retry < 5 and _st not in ("dead", "need_login"):
+                _q = urllib.parse.urlencode({
+                    "line": PANSOU_LINE,
+                    "index": int(request.query_params.get("index", 0) or 0),
+                    "retry": _retry + 1})
+                return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/direct?{_q}",
+                                        status_code=302,
+                                        headers={"Cache-Control": "no-store"})
+            return _direct_to_placeholder(mg, request)
+        if _pt.get("m3u8"):
+            _q = urllib.parse.urlencode({"line": PANSOU_LINE,
+                                         "index": _pt.get("index", 0)})
+            return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{_q}",
+                                    status_code=302,
+                                    headers={"Cache-Control": "no-store"})
+        # MP4 原画：阿里/UC 的下载直链是限时签名、免 Cookie，直接 302 到该直链，
+        # 客户端直连网盘 CDN，免 NAS 中转（家宽上传带宽瓶颈）。夸克播放直链需
+        # Cookie、大文件下载受限，回退 /pan/play 由 NAS 注入 Cookie 中转。
+        return RedirectResponse(_pt["url"], status_code=302,
+                                headers={"Cache-Control": "no-store"})
     target = store.resolve_media_guid(mg)
     if not target:
         # 未绑定/无源：302 到占位 master（HLS），保持播放器存活、菜单可切，不报硬错误
@@ -5163,6 +5287,16 @@ def _pansou_mark_user_pick(mg: str) -> None:
 
 def _pansou_is_user_pick(mg: str) -> bool:
     return False
+
+
+def _pansou_dead_msg_active(mg: str) -> bool:
+    # lite 恒无网盘线：无 dead 提示窗口。
+    return False
+
+
+def _pansou_dead_cms_target(mg: str, request) -> dict | None:
+    # lite 恒无网盘线：无 dead 回退。
+    return None
 
 
 async def _pansou_login_qr_png(mg: str):
@@ -6969,6 +7103,17 @@ async def hls_main(mg: str, request: Request):
     # 占位自修复通道：preset 尚未拿到任何线路时让播放器进入占位，本端点负责等待
     # 后台绑定/找线；期间一律回占位 HLS（200），绝不返回 4xx/5xx 锁死菜单。
     if phwait:
+        # 网盘线 dead：先在播放画面烧字提示"网盘分享已失效，已切换在线线路"数秒，
+        # 窗口过后放行下方正常选线回退在线 CMS——明确告知而非静默回退。
+        if _pansou_dead_msg_active(mg):
+            return _placeholder_playlist_response(mg)
+        # 网盘 dead 提示窗口过后：按底层影片 og 回退在线 CMS（绕过死的网盘 target），
+        # 实现"已切换在线线路"。picked 置为 CMS 目标后，下方 _pick_episode 不再覆盖。
+        _cms_fb = _pansou_dead_cms_target(mg, request)
+        if _cms_fb is not None:
+            picked = _cms_fb
+            request.state._failover_picked = picked
+            request.state._play_mg = mg
         og = chart_guid_by_media(mg)
         # mg 本身是 chart guid（媒体库直进）时，绑定记录挂在其 media guid 上
         mg_eff = media_guid(og) if (og and og == mg) else mg
@@ -7058,7 +7203,12 @@ async def hls_main(mg: str, request: Request):
                     explicit_line = picked.get("line")
                     auto_play = True
 
-    if explicit_line == PANSOU_LINE:
+    if explicit_line == PANSOU_LINE or (
+            phwait and _pansou_is_user_pick(mg)
+            and _pansou_manual_state(mg) != "dead"):
+        # phwait 转正通道：/direct 等转存超时回占位后，播放器重拉 main 不带 line
+        # 参数，也要能接住就绪的网盘转存（就绪即播，不浪费已成功的转存）。dead 由
+        # 上方 phwait 的提示/CMS 回退处理，这里不重复接管。
         base = store.resolve_media_guid(mg)
         title = (base or {}).get("title") or (base or {}).get("ep_title") or ""
         pidx = int(request.query_params.get("index", (base or {}).get("index", 0)) or 0)
@@ -7090,7 +7240,11 @@ async def hls_main(mg: str, request: Request):
             return _placeholder_playlist_response(mg)
         if body and (body is _NOT_HLS or _playlist_has_segment(body)):
             if body is _NOT_HLS:
-                return RedirectResponse(picked["url"], status_code=302,
+                # 网盘直链 MP4：走 /direct 取新鲜签名直链 302（阿里/UC 免 NAS 中转），
+                # 而非 picked 的中转端点；此时转存已就绪，/direct 即 302，不会循环。
+                _dqp = urllib.parse.urlencode({"line": PANSOU_LINE, "index": pidx})
+                return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/direct?{_dqp}",
+                                        status_code=302,
                                         headers={"Cache-Control": "no-store"})
             return Response(body, media_type="application/vnd.apple.mpegurl",
                             headers={"Cache-Control": "no-cache",
@@ -7318,7 +7472,18 @@ async def placeholder_ts(mg: str, request: Request):
                                     headers={"Cache-Control": "no-store",
                                              "Access-Control-Allow-Origin": "*",
                                              "X-fnmedia-PanLogin": "1"})
-        elif _st in ("armed", "pending", "ready", "dead"):
+        elif _st == "dead":
+            # 网盘分享失效：直接在播放画面烧字提示，明确告知而非静默回退。
+            # phwait 侧 _pansou_dead_msg_active 控制提示窗口，窗口过后自动切在线线。
+            _pansou_manual_kick(mg)
+            ts_bytes = await panqr.build_message_ts_async(
+                "网盘分享已失效", "已切换在线线路")
+            if ts_bytes:
+                return Response(content=ts_bytes, media_type="video/mp2t",
+                                headers={"Cache-Control": "no-store",
+                                         "Access-Control-Allow-Origin": "*",
+                                         "X-fnmedia-PanDead": "1"})
+        elif _st in ("armed", "pending", "ready"):
             _pansou_manual_kick(mg)
     except Exception:
         pass
@@ -7862,6 +8027,23 @@ async def ext_update_status(request: Request):
     return updater.status()
 
 
+@app.post("/v/api/ext/update/channel")
+async def ext_update_channel(request: Request):
+    """切换更新通道（stable=正式版 / beta=含预发布）并立即按新通道重新检查。
+    Moo 商店始终只推正式版；beta 通道由本更新器直连 GitHub Release 提供。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    ch = str(body.get("channel", "")).strip().lower()
+    if ch not in ("stable", "beta"):
+        return JSONResponse({"code": 400, "msg": "channel 须为 stable 或 beta"},
+                            status_code=400)
+    if config.get().get("update_channel") != ch:
+        config.save({"update_channel": ch})
+    return await updater.check(force=True)
+
+
 @app.post("/v/api/ext/update/now")
 async def ext_update_now(request: Request):
     # 仅管理台显式触发；下载校验后交给 fnOS 应用中心正规升级（会短暂重启服务）。
@@ -8099,7 +8281,8 @@ async def ext_set_config(request: Request):
         "prewarm_mode",
         "direct_play_enabled", "direct_play_probe",
         "pan_cache_cleanup_enabled", "pan_cache_ttl_hours",
-        "update_proxy",
+        "pan_cache_cleanup_interval_hours",
+        "update_proxy", "update_channel",
     }
     patch = {k: v for k, v in body.items() if k in allowed}
     if "prewarm_mode" in patch:
@@ -8144,6 +8327,13 @@ async def ext_set_config(request: Request):
     if "pan_cache_cleanup_enabled" in patch:
         patch["pan_cache_cleanup_enabled"] = bool(
             patch["pan_cache_cleanup_enabled"])
+    if "pan_cache_cleanup_interval_hours" in patch:
+        try:
+            # 定时清理间隔：1 小时 ~ 7 天
+            patch["pan_cache_cleanup_interval_hours"] = max(
+                1, min(168, int(float(patch["pan_cache_cleanup_interval_hours"]))))
+        except (TypeError, ValueError):
+            patch.pop("pan_cache_cleanup_interval_hours", None)
     for _bk in ("direct_play_enabled", "direct_play_probe",
                 "browse_fill_lines_enabled"):
         if _bk in patch:

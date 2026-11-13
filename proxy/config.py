@@ -59,9 +59,11 @@ DEFAULTS = {
     # persist=热门片绑定结果落盘，重启直接恢复线路、少重新搜源（方案B）
     "prewarm_mode": "realtime",
     # 网盘转存缓存自动清理：开启后按“最后一次播放时间”清理插件转存目录中超时的
-    # 视频，防止网盘容量被不断转存占满。默认保留 6 小时；后台每小时检查一次。
+    # 视频，防止网盘容量被不断转存占满。默认保留 6 小时；后台每 6 小时定时清理，
+    # 覆盖夸克/UC/阿里每个网盘（只清插件转存并登记过的文件，不碰用户其它文件）。
     "pan_cache_cleanup_enabled": True,
     "pan_cache_ttl_hours": 6,
+    "pan_cache_cleanup_interval_hours": 6,
     # 虚拟“热门榜单”四库媒体库（豆瓣真实周榜/标签榜）
     "hot_library_enabled": True,
     # 虚拟“海量分类”四库媒体库（苹果 CMS 分类深翻）。与热门榜单相互独立开关。
@@ -130,6 +132,9 @@ DEFAULTS = {
     # 检查/下载插件更新安装包时可选的 HTTP(S) 代理（仅更新用途）。
     # 留空则回退 subscription_proxy，再不行直连。仅存于本机 state，不随包分发。
     "update_proxy": "",
+    # 插件更新通道：stable=仅正式版（与 Moo 商店一致）；beta=正式+预发布（尝鲜）。
+    # 仅影响本插件内置更新器（直连 GitHub Release）；Moo 商店始终只推正式版。
+    "update_channel": "stable",
     # m3u8 流层去广告总开关（TVBox/OK影视 Pro rules 引擎 + 通用启发式）。
     "ad_filter_enabled": True,
     # 播放时动态检测（无订阅 rules 时，按 DISCONTINUITY 分段+时长/CDN/位置识别广告段）。
