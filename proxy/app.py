@@ -2664,6 +2664,24 @@ def _vod_folder_detail(guid: str, client) -> JSONResponse | None:
     row = _vod_folder_detail_data(guid)
     if row is None:
         return None
+    # TV 端详情页「播放」按钮以目录卡本身作为播放身份。目录卡默认
+    # can_play=0 且 play_item_guid 为空，strict 客户端取不到可播身份，会在
+    # play/info + stream/list 均成功之后回查本详情，判定不可播并提示
+    # 「视频文件不存在/已被移动」，全程不发起 play/play。
+    # 这里只对 TV 端把播放身份指向该片续播集；手机端与网页端仍拿到原来的
+    # 目录卡，浏览与选线行为不变。
+    if getattr(client, "is_tv", False):
+        og = _parse_line_folder_guid(guid)
+        brief = store.get_title_by_guid(og) if og else None
+        if brief and inj.is_tv(brief):
+            try:
+                ep_guid = episode_guid(og, "", _vod_resume_index(brief))
+            except Exception:
+                ep_guid = ""
+            if ep_guid:
+                row = dict(row)
+                row["play_item_guid"] = ep_guid
+                row["can_play"] = 1
     return JSONResponse({"code": 0, "msg": "", "data":
                          clientmod.normalize_detail(row, client)})
 
@@ -2678,6 +2696,27 @@ def _vod_folder_play_info(guid: str, client) -> JSONResponse | None:
     row = _vod_folder_detail_data(guid)
     if not og or row is None:
         return None
+    # TV 端兜底：部分严格客户端在目录卡上仍用目录 guid 请求 play/info，
+    # 拿到 type=Directory 会判定不可播。这类客户端统一折算成该片续播集的
+    # 原生 play/info，后续 stream/list、play/play 全部走集 guid 的既有链路；
+    # 手机端与网页端保持原有 Directory 返回不变。
+    if getattr(client, "is_tv", False):
+        brief = store.get_title_by_guid(og) or {}
+        if inj.is_tv(brief):
+            ep_guid = ""
+            try:
+                ep_guid = episode_guid(og, "", _vod_resume_index(brief))
+            except Exception:
+                ep_guid = ""
+            ep = store.get_episode(ep_guid) if ep_guid else None
+            if ep is not None:
+                ep_info = inj.episode_play_info(ep)
+                rec = history.get(ep_guid)
+                if rec:
+                    ep_info["ts"] = rec.get("ts", 0)
+                _ensure_resume_duration(ep_info)
+                return JSONResponse({"code": 0, "msg": "", "data":
+                                     clientmod.normalize_detail(ep_info, client)})
     info = {
         "grand_guid": "",
         "guid": guid,
