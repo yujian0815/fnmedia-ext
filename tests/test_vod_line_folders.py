@@ -905,7 +905,8 @@ class VodLineFolderTests(unittest.IsolatedAsyncioTestCase):
         data = json.loads(response.body)["data"]
         self.assertEqual(response.status_code, 200)
         self.assertEqual(data["files"][0]["can_play"], 1)
-        self.assertEqual(data["video_streams"][0]["media_guid"], "media1")
+        self.assertEqual(data["video_streams"][0]["media_guid"],
+                         ep_media_guid("ep1", "lzi::lzm3u8"))
 
     async def test_stream_list_supports_fixed_line_card(self):
         b = brief(tv=True)
@@ -928,7 +929,8 @@ class VodLineFolderTests(unittest.IsolatedAsyncioTestCase):
                  "query_string": b"", "headers": [], "app": appmod.app}))
         data = json.loads(response.body)["data"]
         self.assertEqual(data["files"][0]["can_play"], 1)
-        self.assertEqual(data["video_streams"][0]["media_guid"], "media1")
+        self.assertEqual(data["video_streams"][0]["media_guid"],
+                         ep_media_guid("ep1", "lzi::lzm3u8"))
 
     async def test_play_play_fixed_line_has_no_auto_and_ignores_other_bitrate(self):
         b = brief()

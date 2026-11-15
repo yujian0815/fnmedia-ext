@@ -99,6 +99,14 @@ class AdminUiFeatureTests(unittest.TestCase):
                       'enable_guard:"smart"'):
             self.assertNotIn(token, html)
 
+    def test_drpy_local_file_import_entry(self):
+        html = admin_ui.ADMIN_HTML
+        for token in ('id="drpyImportFile"', 'id="drpyImportName"',
+                      'onchange="importDrpyFile(this)"',
+                      'async function importDrpyFile(input)',
+                      '/v/api/ext/drpy/import-file', '≤2MB', 'rule.title'):
+            self.assertIn(token, html)
+
     def test_responsive_design_and_live_playback_chain(self):
         html = admin_ui.ADMIN_HTML
         for token in ('class="card source-list-card"', 'id="liveSummary"',

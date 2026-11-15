@@ -3576,22 +3576,23 @@ async def _stream_list_impl(guid: str, request: Request):
         else:
             sl = inj.stream_list(brief)
         target = fixed
-        # PanSou 虚拟手动线：流容器必须携带网盘专属 media/video guid。Web 播放器
-        # 用 files[].guid 走 /stream→play/play；若沿用标题级 guid 会落入自动竞速，
-        # 而网盘被排除在竞速外永远选不中，最终回退 CMS（"选了网盘却在放 CMS"）。
-        # 仅网盘线做此替换，常规固定线行为保持不变。
-        if _is_pansou_line_name(fixed.get("line", "")):
-            _p_og = fixed.get("online_guid", "")
-            _p_idx = int(fixed.get("index", 0) or 0)
+        # 所有固定线路的流容器都必须与 _vod_play_info 使用同一组带线路
+        # media/video guid。旧实现仅 PanSou 特判，普通 CMS 仍回基础影片 guid，
+        # 播放器匹配不到当前流时可能把其它质量项（含网盘）误标为当前线路。
+        _p_og = fixed.get("online_guid", "")
+        _p_idx = int(fixed.get("index", 0) or 0)
+        _p_line = fixed.get("line", "")
+        if _is_pansou_line_name(_p_line):
+            # PanSou 是虚拟手动线，需登记哈希 guid 反查以触发搜索/转存。
             _pansou_register_media(_p_og, _p_idx)
-            _p_eg = episode_guid(_p_og, "", _p_idx)
-            _p_mg = ep_media_guid(_p_eg, PANSOU_LINE)
-            _p_vg = ep_video_guid(_p_eg, PANSOU_LINE)
-            for _f in sl.get("files") or []:
-                _f["guid"] = _p_mg
-            for _v in sl.get("video_streams") or []:
-                _v["guid"] = _p_vg
-                _v["media_guid"] = _p_mg
+        _p_eg = fixed.get("ep_guid") or episode_guid(_p_og, "", _p_idx)
+        _p_mg = ep_media_guid(_p_eg, _p_line)
+        _p_vg = ep_video_guid(_p_eg, _p_line)
+        for _f in sl.get("files") or []:
+            _f["guid"] = _p_mg
+        for _v in sl.get("video_streams") or []:
+            _v["guid"] = _p_vg
+            _v["media_guid"] = _p_mg
     else:
         ep = store.get_episode(guid)
         target = None
