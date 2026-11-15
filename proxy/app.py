@@ -4551,6 +4551,14 @@ async def media_range(mg: str, request: Request):
                 _warm_playlist(mg, target, request)
         except Exception:
             pass
+        # 新版 iOS 的 media/range 需要像官方一样直接拿到播放内容：
+        # 302 到 main 虽能下载清单，原生播放器却不继续请求分片；这里在同一
+        # 请求内构造单线路 main 并直接返回 200，其它端仍走原 preset 跳转。
+        if _client_of(request).kind == clientmod.IOS:
+            main_scope = dict(request.scope)
+            main_scope["path"] = f"{ONLINE_PREFIX}/{mg}/main.m3u8"
+            main_scope["query_string"] = q.encode()
+            return await hls_main(mg, Request(main_scope))
         return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{q}",
                                 status_code=302)
     return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/direct?{q}", status_code=302)

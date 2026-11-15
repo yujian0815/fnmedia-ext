@@ -8,6 +8,7 @@ provider 只负责"搜索→条目→播放 URL 列表"，不做转码。
 """
 from __future__ import annotations
 
+import os as _os
 import re
 import time
 import urllib.parse
