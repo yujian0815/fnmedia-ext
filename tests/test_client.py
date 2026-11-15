@@ -71,6 +71,23 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(card["play_error"], "")
         self.assertIn("can_play", card)
 
+    def test_tvos_fn_tv_is_strict_tv_not_ios(self):
+        profile = client.parse_user_agent(
+            "FnTV/1.5.5 (com.fn.tv; build:155017; tvOS 27.2.0) Alamofire/5.11.2")
+        self.assertEqual(profile.kind, client.TV)
+        self.assertTrue(profile.is_tv)
+        self.assertTrue(profile.strict_card)
+        card = client.normalize_card({"guid": "g", "status": "豆瓣热榜",
+                                      "release_date": "2026"}, profile)
+        self.assertEqual(card["status"], "1")
+        self.assertEqual(card["release_date"], "2026-01-01")
+        self.assertNotIn("genres", card)
+
+    def test_ios_bundle_remains_non_strict(self):
+        profile = client.parse_user_agent("com.trim.media.ios Alamofire/5.11.2")
+        self.assertEqual(profile.kind, client.IOS)
+        self.assertFalse(profile.strict_card)
+
     def test_nonstrict_responses_are_not_rewritten(self):
         row = {"release_date": "2024", "status": "在线", "can_play": 1}
         for ua in ("trimemedia-web", "Dalvik/2.1.0 Android",

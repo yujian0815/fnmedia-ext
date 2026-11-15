@@ -59,6 +59,7 @@ _STATE: dict = {
 
 _ROOT = Path(__file__).resolve().parent.parent
 _STATE_FILE = Path("/tmp/fnmedia-update/state.json")
+_APPLY_RESULT_FILE = Path("/tmp/fnmedia-update/apply-result")
 
 
 def _persist() -> None:
@@ -75,15 +76,38 @@ def _persist() -> None:
         pass
 
 
+def _apply_result_text() -> str:
+    try:
+        return _APPLY_RESULT_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
 def _restore() -> None:
     try:
         if _STATE_FILE.exists():
             snap = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
-            # 重启后若停在“下载/安装中”，说明安装已接管，归一成完成态
-            if snap.get("status") in ("downloading", "installing"):
-                snap["status"] = "done"
-                snap["progress"] = "安装完成，服务已重启"
-                snap["finished_at"] = time.time()
+            status = snap.get("status")
+            result = _apply_result_text()
+            # 下载阶段尚未启动独立升级脚本，服务重启只能重试，不能伪装完成。
+            if status == "downloading":
+                snap.update(status="error",
+                            progress="下载阶段被重启中断，请重新发起更新",
+                            last_error="更新在下载阶段被重启中断",
+                            finished_at=time.time())
+            elif status in ("installing", "done"):
+                # 只有独立升级脚本的明确结果才能进入终态；脚本尚无结果时保持安装中。
+                if result.startswith("OK "):
+                    snap.update(status="done", progress="安装完成，服务已重启并确认",
+                                updated_version=result[3:].strip()
+                                or snap.get("updated_version", ""),
+                                finished_at=time.time(), last_error="")
+                elif result.startswith("FAIL"):
+                    err = result[4:].strip() or "独立升级脚本执行失败"
+                    snap.update(status="error", progress=f"更新失败：{err}",
+                                last_error=err, finished_at=time.time())
+                else:
+                    snap["progress"] = "正在应用更新，等待脚本结果确认…"
             _STATE.update(snap)
     except Exception:  # noqa: BLE001
         pass
@@ -305,6 +329,28 @@ def _snapshot() -> dict:
 
 def _view() -> dict:
     with _LOCK:
+        # 安装由独立脚本执行；每次读状态时核对其真实结果，绝不提前报成功。
+        result = _apply_result_text()
+        changed = False
+        if _STATE["status"] in ("installing", "done"):
+            if result.startswith("OK "):
+                ver = result[3:].strip()
+                if _STATE["status"] != "done" or (
+                        ver and _STATE.get("updated_version") != ver):
+                    _STATE.update(status="done",
+                                  progress="安装完成，服务已重启并确认",
+                                  updated_version=ver
+                                  or _STATE.get("updated_version", ""),
+                                  finished_at=time.time(), last_error="")
+                    changed = True
+            elif result.startswith("FAIL"):
+                err = result[4:].strip() or "独立升级脚本执行失败"
+                if _STATE["status"] != "error" or _STATE.get("last_error") != err:
+                    _STATE.update(status="error", progress=f"更新失败：{err}",
+                                  last_error=err, finished_at=time.time())
+                    changed = True
+        if changed:
+            _persist()
         return _snapshot()
 
 
@@ -577,10 +623,10 @@ def _blocking_install(info: dict, binp: str) -> None:
         _launch_transient_updater(pkg_path, info["version"])
 
         with _LOCK:
-            _STATE.update(status="done",
-                          progress="安装完成，服务正在重启…",
-                          updated_version=info["version"],
-                          finished_at=time.time())
+            # 脚本刚启动不代表成功；status() 必须等 apply-result=OK 才能进入 done。
+            _STATE.update(status="installing",
+                          progress="升级脚本已启动，等待执行结果确认…",
+                          updated_version=info["version"])
         _persist()
     except Exception as exc:  # noqa: BLE001
         with _LOCK:

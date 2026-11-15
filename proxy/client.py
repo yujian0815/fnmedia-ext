@@ -55,8 +55,10 @@ def parse_user_agent(ua: str | None) -> Client:
     s = (ua or "").strip()
     low = s.lower()
 
-    # 1) TV/盒子：com.trim.tv 是最可靠标识；历史代码也匹配裸 "trim.tv"。
-    if "com.trim.tv" in low or "trim.tv" in low:
+    # 1) TV/盒子：com.trim.tv 是 Android TV 可靠标识；FnTV/com.fn.tv 与 tvOS
+    # 是 Apple TV 标识，必须先于 Alamofire/iOS 判定，否则整库 JSON 模型不匹配。
+    if ("com.trim.tv" in low or "trim.tv" in low or "com.fn.tv" in low
+            or "tvos" in low or low.startswith("fntv/")):
         return Client(TV, s, is_tv=True, strict_card=True)
 
     # 2) iOS：bundle 标识最可靠；再退到系统/网络栈线索。

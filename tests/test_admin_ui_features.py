@@ -99,6 +99,19 @@ class AdminUiFeatureTests(unittest.TestCase):
                       'enable_guard:"smart"'):
             self.assertNotIn(token, html)
 
+    def test_responsive_design_and_live_playback_chain(self):
+        html = admin_ui.ADMIN_HTML
+        for token in ('class="card source-list-card"', 'id="liveSummary"',
+                      'class="playback-chain"', 'function icon(name)',
+                      '@media(max-width:760px)', '.bottom-nav{display:flex',
+                      'env(safe-area-inset-bottom',
+                      '.source-list-card table tbody tr[data-id]{display:grid',
+                      'const navItem=$$("#nav [data-page]")'):
+            self.assertIn(token, html)
+        # 视觉回归：不使用装饰 emoji、色相渐变或无条件全属性动画。
+        for token in ('🎬', '📊', '🧩', 'linear-gradient', 'transition-all'):
+            self.assertNotIn(token, html)
+
     def test_272_button_system_covers_real_button_elements(self):
         html = admin_ui.ADMIN_HTML
         self.assertIn('.btn,main button,.main button', html)

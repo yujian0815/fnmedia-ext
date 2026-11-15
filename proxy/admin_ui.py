@@ -13,330 +13,385 @@ ADMIN_HTML = r"""<!doctype html>
 <title>fnmedia-ext 管理台</title>
 <style>
 :root{
-  --bg:#f3f5f9;--card:#fff;--line:#e6eaf0;--text:#1c2733;--muted:#68788a;
-  --accent:#2f6fed;--accent-soft:#e8f0fe;--ok:#1a9e5c;--warn:#d97706;
-  --err:#d64545;--radius:14px;--shadow:0 1px 2px rgba(16,30,54,.04),0 4px 14px rgba(16,30,54,.06);
-  --shadow-hover:0 10px 30px rgba(16,30,54,.12);--ease:cubic-bezier(.4,0,.2,1);
+  --bg:#f5f3ee;--sidebar:#efede7;--card:#fcfbf8;--raised:#f0ede6;
+  --text:#211f1b;--secondary:#5c584f;--muted:#6b655c;--line:rgba(33,31,27,.09);
+  --border:rgba(33,31,27,.14);--accent:#8b4b16;--accent-soft:#f1e5d7;
+  --ok:#26734d;--warn:#9a5b12;--err:#b64040;--radius:16px;
+  --shadow:0 1px 2px rgba(33,31,27,.025);--shadow-hover:0 1px 2px rgba(33,31,27,.025);
+  --ease:cubic-bezier(.22,1,.36,1);
 }
 *{box-sizing:border-box}
-html,body{margin:0;padding:0}
-body{font:15px/1.6 -apple-system,"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
-  background:var(--bg);color:var(--text);
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text)}
+body{font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei","Noto Sans CJK SC","WenQuanYi Zen Hei",sans-serif;
   -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+button,input,textarea,select{font:inherit}
+button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,summary:focus-visible{
+  outline:2px solid var(--accent);outline-offset:3px}
+a{color:var(--accent)}
+svg.icon{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none;vertical-align:middle}
 .layout{display:flex;min-height:100vh;min-height:100dvh}
 
-/* ---------- 侧栏 ---------- */
-.sidebar{width:232px;flex:none;padding:22px 14px;background:var(--card);
-  border-right:1px solid var(--line);display:flex;flex-direction:column;gap:16px;
-  position:sticky;top:0;height:100vh;height:100dvh}
-.brand{display:flex;align-items:center;gap:11px;padding:0 8px;flex:none}
-.brand-mark{width:42px;height:42px;border-radius:12px;flex:none;display:flex;
-  align-items:center;justify-content:center;font-size:22px;background:var(--accent-soft);
-  box-shadow:0 2px 8px rgba(47,111,237,.16)}
-.brand-name{font-weight:700;font-size:16px}
-.brand-sub{font-size:12px;color:var(--muted)}
+/* 侧栏与桌面导航 */
+.sidebar{width:248px;flex:none;padding:24px 16px 20px;background:var(--sidebar);border-right:1px solid var(--line);
+  display:flex;flex-direction:column;gap:0;position:sticky;top:0;height:100vh;height:100dvh}
+.brand{display:flex;align-items:center;gap:12px;padding:0 8px 24px;flex:none}
+.brand-mark{width:36px;height:36px;border:1px solid rgba(139,75,22,.22);border-radius:10px;flex:none;
+  display:grid;place-items:center;background:var(--accent-soft);color:var(--accent)}
+.brand-mark svg.icon{width:20px;height:20px}
+.brand-name{font-weight:600;font-size:17px;line-height:1.2}
+.brand-sub{font-size:12px;color:var(--muted);margin-top:4px}
 .nav{display:flex;flex-direction:column;gap:4px;flex:1 1 auto;min-height:0;
-  overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;
-  padding-right:4px;margin-right:-4px}
-.nav-group-label{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
-  color:var(--muted);padding:14px 12px 5px;opacity:.75}
-.nav-group-label:first-child{padding-top:2px}
-.nav-item{position:relative;text-align:left;padding:10px 12px;border:0;border-radius:8px;
-  background:transparent;color:var(--text);font-size:14.5px;cursor:pointer;
-  transition:background .16s cubic-bezier(.4,0,.2,1),color .16s cubic-bezier(.4,0,.2,1)}
-.nav-item:hover{background:var(--accent-soft)}
-.nav-item.active{background:var(--accent);color:#fff;
-  box-shadow:0 4px 12px rgba(47,111,237,.28);font-weight:600}
-.sidebar-foot{margin-top:auto;font-size:12px;color:var(--muted);padding:0 8px;flex:none}
+  overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;padding-right:4px;margin-right:-4px}
+.nav-group-label{font-size:12px;font-weight:400;letter-spacing:0;color:var(--muted);padding:20px 12px 8px}
+.nav-group-label:first-child{padding-top:4px}
+.nav-item{position:relative;text-align:left;padding:8px 12px;min-height:36px;border:1px solid transparent;border-radius:9px;
+  background:transparent;color:var(--secondary);font-size:14px;cursor:pointer;display:flex;align-items:center;gap:10px;
+  transition:background-color 160ms var(--ease),color 160ms var(--ease),border-color 160ms var(--ease)}
+.nav-item svg.icon{color:var(--muted)}
+.nav-item:hover{background:rgba(255,255,255,.52);color:var(--text)}
+.nav-item.active{background:var(--accent-soft);border-color:rgba(139,75,22,.12);color:var(--accent);font-weight:500}
+.nav-item.active svg.icon{color:var(--accent)}
+.sidebar-foot{margin-top:auto;font-size:12px;color:var(--muted);padding:20px 10px 0;border-top:1px solid var(--line);flex:none}
+.version{margin-top:6px;font-variant-numeric:tabular-nums}
 
-/* ---------- 主区 ---------- */
-.main{flex:1;min-width:0;width:100%;padding:28px 32px 96px;max-width:960px}
-.page{display:none}.page.active{display:block;animation:fadeIn .22s var(--ease)}
-@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-h2.page-title{margin:4px 0 4px;font-size:22px;letter-spacing:-.01em}
-.page-desc{color:var(--muted);font-size:13px;margin:0 0 18px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
-  padding:18px 20px;margin-bottom:14px;box-shadow:var(--shadow);
-  transition:box-shadow .2s var(--ease),border-color .2s var(--ease)}
-.card:hover{box-shadow:var(--shadow-hover)}
-.card-title{font-weight:600;margin-bottom:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:15px}
-.card-sub{color:var(--muted);font-size:13px;margin:0 0 12px}
-.hint{color:var(--muted);font-size:13px;margin:6px 0}
-.muted{color:var(--muted)}.sm{font-size:12px}
-.stack{display:flex;flex-direction:column;gap:8px}
-.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
-.mt{margin-top:10px}
+/* 主区与页面层级 */
+.main{flex:1;min-width:0;width:100%}
+.topbar{height:64px;padding:0 32px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;
+  color:var(--muted);font-size:13px;position:sticky;top:0;z-index:30;background:var(--bg)}
+.breadcrumb{display:flex;align-items:center;gap:8px}.breadcrumb strong{color:var(--secondary);font-weight:500}
+.local-label{display:flex;align-items:center;gap:8px}.local-label svg.icon{width:16px;height:16px}
+.mobile-brand{display:none;align-items:center;gap:10px;font-size:15px;font-weight:600;color:var(--text)}
+.mobile-brand .brand-mark{width:32px;height:32px;border-radius:8px}
+.content{width:100%;max-width:1440px;margin:0 auto;padding:32px 32px 48px}
+.page{display:none}.page.active{display:block;animation:fadeIn 300ms var(--ease)}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+h2.page-title{margin:0;font-size:32px;line-height:1.2;font-weight:500;letter-spacing:-.01em}
+.page-desc{color:var(--secondary);font-size:14px;margin:8px 0 28px}
+.page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:28px}
+.page-head .page-desc{margin-bottom:0}.page-meta{color:var(--muted);font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:24px;margin-bottom:24px;box-shadow:var(--shadow)}
+.card-title{font-weight:500;margin-bottom:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:17px;line-height:1.4}
+.card-sub{color:var(--muted);font-size:13px;margin:6px 0 16px}
+.hint{color:var(--muted);font-size:13px;margin:8px 0}.muted{color:var(--muted)}.sm{font-size:12px}
+.stack{display:flex;flex-direction:column;gap:8px}.row{display:flex;flex-wrap:wrap;gap:12px;align-items:center}.mt{margin-top:12px}
 
-/* ---------- 控件 ---------- */
+/* 表单与按钮 */
 input[type=text],input[type=number],input[type=password],textarea,select{
-  background:#fff;border:1px solid var(--line);border-radius:9px;color:var(--text);
-  padding:9px 11px;width:100%;font:inherit;
-  transition:border-color .16s var(--ease),box-shadow .16s var(--ease)}
-input[type=number]{width:auto}
-textarea{resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
-input:hover,textarea:hover,select:hover{border-color:#b9c7dc}
-input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);
-  box-shadow:0 0 0 3px rgba(47,111,237,.12)}
-input:disabled,textarea:disabled,select:disabled{background:#f3f5f8;color:var(--muted);cursor:not-allowed}
-label.field{display:block;margin:10px 0}
-label.field>span{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}
-.switch-row{display:flex;align-items:flex-start;gap:10px;padding:10px 0;cursor:pointer}
+  background:var(--card);border:1px solid var(--border);border-radius:9px;color:var(--text);
+  padding:8px 12px;min-height:40px;width:100%;font:inherit;min-width:0;
+  transition:border-color 160ms var(--ease),box-shadow 160ms var(--ease),background-color 160ms var(--ease)}
+input[type=number]{width:auto}textarea{resize:vertical;font-family:ui-monospace,"SFMono-Regular",Consolas,monospace;font-size:12px}
+input:hover,textarea:hover,select:hover{border-color:rgba(33,31,27,.28)}
+input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(139,75,22,.12)}
+input:disabled,textarea:disabled,select:disabled{background:var(--raised);color:var(--muted);cursor:not-allowed}
+input[type=checkbox]{accent-color:var(--accent)}
+label.field{display:block;margin:12px 0}label.field>span{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}
+.switch-row{display:flex;align-items:flex-start;gap:12px;padding:12px 0;cursor:pointer}
 .switch-row input{width:17px;height:17px;margin-top:2px;accent-color:var(--accent);flex:none}
-.switch-row .sub{display:block;font-size:13px;color:var(--muted)}
-/* ---------- 统一按钮体系（对齐272）：实际HTML多使用button.primary.small，
-   不能只给.btn写样式，否则按钮会退回浏览器默认外观。 ---------- */
-.btn,main button,.main button{
-  display:inline-flex;align-items:center;justify-content:center;gap:6px;
-  border:1px solid var(--accent);background:#fff;color:var(--accent);
-  border-radius:9px;padding:8px 15px;min-height:36px;cursor:pointer;
-  font-family:inherit;font-size:13.5px;font-weight:500;line-height:1.2;
-  white-space:nowrap;user-select:none;
-  transition:background .16s var(--ease),border-color .16s var(--ease),
-    color .16s var(--ease),box-shadow .16s var(--ease),transform .08s var(--ease)}
-.btn:hover,main button:hover,.main button:hover{background:var(--accent-soft)}
-.btn:active,main button:active,.main button:active{transform:translateY(1px)}
-.btn:focus-visible,main button:focus-visible,.main button:focus-visible{
-  outline:2px solid rgba(47,111,237,.28);outline-offset:2px}
-.btn.primary,button.primary{background:var(--accent);border-color:var(--accent);color:#fff;
-  box-shadow:0 2px 6px rgba(47,111,237,.16)}
-.btn.primary:hover,button.primary:hover{background:var(--accent);color:#fff;opacity:.94;
-  box-shadow:0 4px 12px rgba(47,111,237,.24)}
+.switch-row .sub{display:block;font-size:13px;color:var(--muted);margin-top:2px}
+.btn,main button,.main button,.modal button{
+  display:inline-flex;align-items:center;justify-content:center;gap:8px;border:1px solid var(--border);
+  background:var(--card);color:var(--secondary);border-radius:9px;padding:8px 16px;min-height:36px;cursor:pointer;
+  font-family:inherit;font-size:13px;font-weight:500;line-height:1.2;white-space:nowrap;user-select:none;
+  transition:background-color 160ms var(--ease),border-color 160ms var(--ease),color 160ms var(--ease),transform 120ms var(--ease)}
+.btn:hover,main button:hover,.main button:hover,.modal button:hover{background:var(--raised);color:var(--text)}
+.btn:active,main button:active,.main button:active,.modal button:active{transform:scale(.98)}
+.btn:focus-visible,main button:focus-visible,.main button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.btn.primary,button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover,button.primary:hover{background:#763d11;border-color:#763d11;color:#fff}
 .btn.success,button.success{background:var(--ok);border-color:var(--ok);color:#fff}
-.btn.success:hover,button.success:hover{background:var(--ok);color:#fff;opacity:.92}
-.btn.danger,button.danger{background:#fff;border-color:var(--err);color:var(--err)}
-.btn.danger:hover,button.danger:hover{background:var(--err);border-color:var(--err);color:#fff}
-.btn.warn,button.warn{background:#fff;border-color:var(--warn);color:var(--warn)}
-.btn.warn:hover,button.warn:hover{background:var(--warn);border-color:var(--warn);color:#fff}
-.btn.ghost,button.ghost{border-color:var(--line);color:var(--muted);background:#fff}
-.btn.ghost:hover,button.ghost:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
-.small,.btn.small{padding:5px 12px;font-size:12.5px;min-height:30px;border-radius:7px}
-.btn:disabled,button:disabled{opacity:.45;cursor:not-allowed;background:#fff;color:var(--muted);
-  border-color:var(--line);box-shadow:none;transform:none}
+.btn.success:hover,button.success:hover{background:#1f603f;border-color:#1f603f;color:#fff}
+.btn.danger,button.danger{background:var(--card);border-color:rgba(182,64,64,.35);color:var(--err)}
+.btn.danger:hover,button.danger:hover{background:#f8e9e6;border-color:rgba(182,64,64,.5);color:var(--err)}
+.btn.warn,button.warn{background:var(--card);border-color:rgba(154,91,18,.35);color:var(--warn)}
+.btn.warn:hover,button.warn:hover{background:#f6ead9;border-color:rgba(154,91,18,.5);color:var(--warn)}
+.btn.ghost,button.ghost{border-color:transparent;color:var(--muted);background:transparent}
+.btn.ghost:hover,button.ghost:hover{border-color:var(--line);color:var(--text);background:var(--raised)}
+.small,.btn.small{padding:6px 12px;font-size:12px;min-height:32px;border-radius:8px}
+.btn:disabled,button:disabled{opacity:.45;cursor:not-allowed;background:var(--raised);color:var(--muted);border-color:var(--line);transform:none}
 button.primary:disabled{background:var(--accent);color:#fff;opacity:.45}
-.btn-row{display:flex;gap:10px;align-items:center;margin:10px 0;flex-wrap:wrap}
-label.btn,label.btn-sm{display:inline-flex;align-items:center;justify-content:center;gap:6px;
-  border:1px solid var(--accent);background:#fff;color:var(--accent);border-radius:9px;
-  padding:8px 15px;font-size:13.5px;cursor:pointer;white-space:nowrap;font-family:inherit}
-label.btn-sm{padding:5px 12px;font-size:12.5px;border-radius:7px}
-label.btn:hover,label.btn-sm:hover{background:var(--accent-soft)}
+.btn-row{display:flex;gap:12px;align-items:center;margin:12px 0;flex-wrap:wrap}
+label.btn,label.btn-sm{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:1px solid var(--border);
+  background:var(--card);color:var(--secondary);border-radius:9px;padding:8px 16px;min-height:36px;font-size:13px;cursor:pointer;white-space:nowrap;font-family:inherit}
+label.btn-sm{padding:6px 12px;min-height:32px;font-size:12px;border-radius:8px}
+label.btn:hover,label.btn-sm:hover{background:var(--raised);color:var(--text)}
 
-/* ---------- 徽标/状态点 ---------- */
-.badge{font-size:11px;padding:1px 8px;border-radius:99px;background:var(--accent-soft);color:var(--accent);font-weight:500}
-.dot{display:inline-flex;align-items:center;gap:6px;font-size:13px}
-.dot::before{content:"";width:9px;height:9px;border-radius:50%;background:var(--muted)}
+/* 状态、徽标与诊断 */
+.badge{font-size:12px;padding:2px 8px;border-radius:6px;background:var(--raised);color:var(--secondary);font-weight:400;font-variant-numeric:tabular-nums}
+.dot{display:inline-flex;align-items:center;gap:8px;font-size:13px}
+.dot::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--muted);flex:none}
 .dot.ok::before{background:var(--ok)}.dot.bad::before{background:var(--err)}.dot.wait::before{background:var(--warn)}
-.pill{font-size:11px;padding:2px 9px;border-radius:99px;white-space:nowrap;border:1px solid transparent}
-.pill.on{color:var(--ok);background:#e7f6ee;border-color:#bfe6d0}
-.pill.off{color:var(--muted);background:#eef1f5;border-color:var(--line)}
-.pill.warn{color:#b45309;background:#fef3e2;border-color:#f3d9b0}
-.chip{display:inline-flex;align-items:center;gap:5px;background:#eef1f5;border:1px solid var(--line);
-  color:var(--text);border-radius:99px;padding:2px 6px 2px 11px;font-size:12px;margin:2px}
-.chip b{cursor:pointer;font-weight:700;color:var(--muted);padding:0 3px;border-radius:99px}
-.chip b:hover{color:var(--err)}
-.tag{display:inline-block;font-size:10px;color:var(--accent);background:var(--accent-soft);
-  border-radius:5px;padding:0 5px;margin-left:6px}
-.tag.amber{color:#b45309;background:#fef3e2}
-.tag.warn{color:#b45309;background:#fef3e2}
-/* 统一订阅导入结果 */
-.subgrp{border:1px solid var(--line);border-radius:9px;padding:8px 10px;margin:10px 0;background:#fbfcfe}
-.subgrp-t{font-size:13px;font-weight:600;margin-bottom:6px}
-.subrow{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;padding:3px 0}
-.subrow.ok span:first-child{color:var(--ok,#1a8d3a)}
-.subrow.muted{color:var(--muted)}
-.subgrp.android-dep{border-style:dashed;background:#f6f7f9}
-.subgrp.android-dep .subgrp-t,.subrow.android-dep{color:var(--muted)}
-.subrow.android-dep{opacity:.72}
-tr.android-dep{background:#f6f7f9;opacity:.62}
-.tag.off{color:var(--muted);background:#e9edf2}
+.pill{font-size:12px;padding:2px 8px;border-radius:6px;white-space:nowrap;border:1px solid var(--line);font-variant-numeric:tabular-nums}
+.pill.on{color:var(--ok);background:#e9f2eb;border-color:rgba(38,115,77,.18)}
+.pill.off{color:var(--muted);background:var(--raised);border-color:var(--line)}
+.pill.warn{color:var(--warn);background:#f6ead9;border-color:rgba(154,91,18,.18)}
+.chip{display:inline-flex;align-items:center;gap:4px;background:var(--raised);border:1px solid var(--line);color:var(--secondary);
+  border-radius:6px;padding:2px 6px 2px 8px;font-size:12px;margin:2px}
+.chip b{cursor:pointer;font-weight:500;color:var(--muted);padding:0 4px}.chip b:hover{color:var(--err)}
+.tag{display:inline-block;font-size:11px;color:var(--secondary);background:var(--raised);border:1px solid var(--line);border-radius:5px;padding:0 5px;margin-left:6px}
+.tag.amber,.tag.warn{color:var(--warn);background:#f6ead9}.tag.off{color:var(--muted);background:var(--raised)}
+.subgrp{border:1px solid var(--line);border-radius:10px;padding:12px;margin:12px 0;background:var(--raised)}
+.subgrp-t{font-size:13px;font-weight:500;margin-bottom:8px}.subrow{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:13px;padding:4px 0}.subrow>span{min-width:0;overflow-wrap:anywhere}
+.subrow.ok span:first-child{color:var(--ok)}.subrow.muted{color:var(--muted)}
+.subgrp.android-dep{border-style:dashed;background:var(--raised)}.subgrp.android-dep .subgrp-t,.subrow.android-dep{color:var(--muted)}
+.subrow.android-dep{opacity:.72}tr.android-dep{background:var(--raised);opacity:.68}
 
-/* ---------- 实时播放诊断 ---------- */
-.live-dev{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:8px 0;background:#fbfcfe}
-.live-rows{margin-top:6px;display:flex;flex-direction:column;gap:3px}
-.live-row{display:flex;align-items:center;gap:6px;font-size:12px;flex-wrap:wrap}
-.live-row .muted{font-size:11px}
-.live-dev details{margin-top:6px}
-.diag{background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:6px 0;font-size:13px}
+/* 概览 */
+.capability{display:grid;grid-template-columns:minmax(260px,1.2fr) minmax(460px,1.8fr);gap:24px;align-items:center}
+.eyebrow{margin:0 0 8px;color:var(--muted);font-size:12px}.capability h2{margin:0;font-size:20px;line-height:1.3;font-weight:500}
+.capability p{margin:8px 0 0;color:var(--secondary);font-size:13px;max-width:540px}
+.capability-list{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-left:1px solid var(--line)}
+.capability-item{padding:4px 20px;border-right:1px solid var(--line)}.capability-item:last-child{border-right:0}
+.capability-item strong{display:block;font-size:14px;font-weight:500}.capability-item span{display:block;margin-top:4px;color:var(--muted);font-size:12px;white-space:nowrap}
+.overview-grid{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:24px;align-items:stretch;margin-bottom:24px}
+.diagnostic{padding:24px;min-width:0;margin-bottom:0}.card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.live-label{display:inline-flex;align-items:center;gap:8px;margin-left:12px;color:var(--ok);font-size:12px;font-weight:400;vertical-align:2px}
+.card-actions{display:flex;align-items:center;gap:8px}
+.icon-action{display:inline-flex;align-items:center;gap:8px;min-height:36px;padding:8px;color:var(--muted);font-size:13px;text-decoration:none;border-radius:8px;
+  transition:background-color 160ms var(--ease),color 160ms var(--ease)}
+.icon-action:hover{background:var(--raised);color:var(--text)}.icon-action svg.icon{width:16px;height:16px}
+.now-playing{margin-top:20px;padding:20px;border:1px solid rgba(139,75,22,.12);border-radius:12px;background:var(--accent-soft)}
+.now-top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.now-label{color:var(--accent);font-size:12px}
+.now-title{margin:4px 0 0;font-size:24px;line-height:1.25;font-weight:500}.now-meta{margin-top:6px;color:var(--secondary);font-size:13px}
+.response{text-align:right;font-variant-numeric:tabular-nums}.response strong{display:block;color:var(--accent);font:500 28px/1.1 ui-monospace,"SFMono-Regular",Consolas,monospace}
+.response span{display:block;margin-top:4px;color:var(--muted);font-size:12px}
+.playback-chain{display:grid;grid-template-columns:repeat(5,1fr);margin-top:20px}.chain-step{position:relative;text-align:center;color:var(--muted);font-size:12px}
+.chain-step::before{content:"";position:absolute;left:0;right:0;top:5px;height:1px;background:rgba(33,31,27,.15)}
+.chain-step:first-child::before{left:50%}.chain-step:last-child::before{right:50%}
+.chain-dot{position:relative;z-index:1;display:block;width:11px;height:11px;margin:0 auto 8px;border:2px solid var(--accent-soft);border-radius:50%;background:#aaa196;box-shadow:0 0 0 1px rgba(33,31,27,.12)}
+.chain-step.done .chain-dot{background:var(--secondary)}.chain-step.current{color:var(--accent);font-weight:500}.chain-step.current .chain-dot{background:var(--accent);box-shadow:0 0 0 1px rgba(139,75,22,.2)}
+.activity-table{width:100%;margin-top:20px;border-collapse:collapse;font-size:13px}
+.activity-table th{padding:0 8px 12px;color:var(--muted);font-size:12px;font-weight:400;text-align:left;border-bottom:1px solid var(--line)}
+.activity-table td{padding:12px 8px;border-bottom:1px solid var(--line);color:var(--secondary);white-space:nowrap}
+.activity-table th:first-child,.activity-table td:first-child{padding-left:0}.activity-table th:last-child,.activity-table td:last-child{padding-right:0;text-align:right}
+.activity-table .status-code{font:500 12px/1.4 ui-monospace,"SFMono-Regular",Consolas,monospace}.status-code.ok{color:var(--ok)}.status-code.bad{color:var(--err)}
+.activity-table .content-cell{color:var(--text);max-width:180px;overflow:hidden;text-overflow:ellipsis}.event-device{display:block;color:var(--muted);font-size:11px}
+.diagnostic-foot{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:20px;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
+.diagnostic-foot strong{color:var(--secondary);font-weight:500;font-variant-numeric:tabular-nums}
+.device-details{margin-top:16px;color:var(--muted);font-size:12px}.device-details summary{cursor:pointer;color:var(--secondary);padding:8px 0}
+.device-detail{padding:12px 0;border-top:1px solid var(--line);word-break:break-word}.device-detail strong{color:var(--secondary);font-weight:500}
+.side-stack{display:grid;grid-template-rows:auto 1fr;gap:24px}.side-stack .card{margin-bottom:0}
+.device-hero{display:flex;align-items:center;gap:12px;margin-top:20px;padding-bottom:20px;border-bottom:1px solid var(--line)}
+.device-icon{width:40px;height:40px;border-radius:10px;background:var(--raised);color:var(--secondary);display:grid;place-items:center;flex:none}
+.device-icon svg.icon{width:20px;height:20px}.device-name{font-size:15px;font-weight:500}.device-type{margin-top:4px;color:var(--muted);font-size:12px}
+.detail-list{margin:16px 0 0}.detail-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:8px 0;font-size:13px}
+.detail-row dt{color:var(--muted)}.detail-row dd{margin:0;color:var(--secondary);text-align:right;font-variant-numeric:tabular-nums}
+.ua-detail{margin-top:12px;color:var(--muted);font-size:11px;line-height:1.5;word-break:break-all}
+.legend-card{display:flex;flex-direction:column}.origin-list{display:grid;gap:16px;margin-top:20px}
+.origin-row{display:grid;grid-template-columns:12px minmax(0,1fr);gap:10px;align-items:start}.origin-mark{width:8px;height:8px;margin-top:6px;border-radius:50%;background:var(--accent)}
+.origin-mark.hollow{background:transparent;border:1px solid var(--muted)}.origin-mark.neutral{background:#aaa398}
+.origin-name{font-size:13px;color:var(--secondary)}.origin-desc{margin-top:2px;color:var(--muted);font-size:12px}.legend-note{margin:auto 0 0;padding-top:20px;color:var(--muted);font-size:12px}
+.stat-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}.stat{padding:20px 24px;min-height:128px;margin-bottom:0}
+.stat-label{color:var(--muted);font-size:13px}.stat .n{margin-top:12px;font-size:32px;line-height:1;font-weight:500;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.stat-meta{margin-top:12px;color:var(--muted);font-size:12px;line-height:1.5;min-height:18px}.stats-note{grid-column:1/-1;margin:0}
 
-/* ---------- 表格 ---------- */
-table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
-th{color:var(--muted);font-weight:600;font-size:12px;letter-spacing:.02em;background:#fafbfc}
-tbody tr{transition:background .14s var(--ease)}
-tbody tr:hover{background:var(--accent-soft)}
-tr:last-child td{border-bottom:0}
-.meta{color:var(--muted);font-size:12px;word-break:break-all}
-.src-detail>summary{cursor:pointer;list-style:none;font-weight:500;outline:none;border-radius:6px}
-.src-detail>summary:focus-visible{outline:2px solid rgba(47,111,237,.28);outline-offset:3px}
-.src-detail>summary::-webkit-details-marker{display:none}
-.src-detail>summary::before{content:"▸";display:inline-block;margin-right:5px;color:var(--muted);transition:transform .15s var(--ease)}
-.src-detail[open]>summary::before{transform:rotate(90deg)}
-.src-detail>summary:hover{color:var(--accent)}
-.src-detail .src-detail-body{margin:7px 0 2px 18px;padding:7px 9px;background:#fafbfc;border:1px solid var(--line);border-radius:7px}
-/* 长资源列表折叠、缓存卡片与源编辑弹窗（对齐272） */
-.collapse-bar{display:flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;user-select:none;
-  font-size:12.5px;color:var(--muted);padding:9px 4px 4px;border-top:1px dashed var(--line);margin-top:10px}
-.collapse-bar:hover{color:var(--accent)}
-.collapse-bar .chev{transition:transform .18s;display:inline-block}
-.collapse-bar.collapsed .chev{transform:rotate(-90deg)}
-.longbox{max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:10px}
-.longbox.collapsed{max-height:170px}
-.cache-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px;margin:10px 0}
-.cache-item{border:1px solid var(--line);border-radius:10px;padding:11px 12px;background:#fafbfc}
-.cache-item .cn{font-size:13px;font-weight:600}
-.cache-item .cv{font-size:12px;color:var(--muted);margin:3px 0 9px;word-break:break-all}
-.modal-mask{position:fixed;inset:0;background:rgba(15,23,42,.45);display:none;align-items:center;
-  justify-content:center;z-index:999;padding:18px}
-.modal-mask.show{display:flex}
-.modal{background:var(--card);border-radius:14px;width:min(520px,94vw);max-height:88vh;overflow:auto;
-  box-shadow:0 18px 50px rgba(0,0,0,.25);padding:18px 20px}
-.modal h3{margin:0 0 14px;font-size:16px}
-.modal label.fld{display:block;font-size:12.5px;color:var(--muted);margin:10px 0 4px}
-.modal .modal-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
-.seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#f1f3f6;flex-wrap:wrap}
-.seg button{border:none!important;background:transparent!important;padding:7px 14px;font-size:13px;color:var(--muted)!important;border-radius:0!important;box-shadow:none!important}
-.seg button.active{background:var(--accent)!important;color:#fff!important;font-weight:600}
-.del{color:var(--err);background:transparent;border:0;cursor:pointer;font-size:13px;padding:4px 6px}
-.del:hover{background:#fee2e2!important;color:var(--err)!important}
+/* 原有实时诊断与表格 */
+.live-dev{border:1px solid var(--line);border-radius:10px;padding:12px;margin:12px 0;background:var(--raised)}
+.live-rows{margin-top:8px;display:flex;flex-direction:column;gap:4px}.live-row{display:flex;align-items:center;gap:8px;font-size:12px;flex-wrap:wrap}
+.live-row .muted{font-size:11px}.live-dev details{margin-top:8px}.diag{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;margin:12px 0;font-size:13px}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:12px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
+th{color:var(--muted);font-weight:400;font-size:12px;letter-spacing:0;background:transparent}tbody tr{transition:background-color 140ms var(--ease)}
+tbody tr:hover{background:var(--raised)}tr:last-child td{border-bottom:0}.meta{color:var(--muted);font-size:12px;word-break:break-all}
+.src-detail>summary{cursor:pointer;list-style:none;font-weight:500;outline:none;border-radius:6px}.src-detail>summary::-webkit-details-marker{display:none}
+.src-detail>summary::before{content:"";display:inline-block;width:6px;height:6px;margin-right:8px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:rotate(-45deg);transition:transform 160ms var(--ease)}
+.src-detail[open]>summary::before{transform:rotate(45deg)}.src-detail>summary:hover{color:var(--accent)}
+.src-detail .src-detail-body{margin:8px 0 2px 16px;padding:12px;background:var(--raised);border:1px solid var(--line);border-radius:8px}
+.collapse-bar{display:flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;user-select:none;font-size:12px;color:var(--muted);padding:12px 4px 4px;border-top:1px dashed var(--line);margin-top:12px}
+.collapse-bar:hover{color:var(--accent)}.collapse-bar .chev{width:6px;height:6px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(45deg);transition:transform 160ms var(--ease)}
+.collapse-bar.collapsed .chev{transform:rotate(225deg)}
+.longbox{max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:10px}.longbox.collapsed{max-height:172px}
+.cache-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;margin:12px 0}.cache-item{border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--raised)}
+.cache-item .cn{font-size:13px;font-weight:500}.cache-item .cv{font-size:12px;color:var(--muted);margin:4px 0 12px;word-break:break-all}
+.modal-mask{position:fixed;inset:0;background:rgba(33,31,27,.45);display:none;align-items:center;justify-content:center;z-index:999;padding:20px}
+.modal-mask.show{display:flex}.modal{background:var(--card);border-radius:16px;width:min(520px,94vw);max-height:88vh;overflow:auto;box-shadow:0 20px 48px rgba(33,31,27,.2);padding:24px}
+.modal h3{margin:0 0 16px;font-size:17px;font-weight:500}.modal label.fld{display:block;font-size:12px;color:var(--muted);margin:12px 0 4px}.modal .modal-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--raised);flex-wrap:wrap;max-width:100%}
+.seg button{border:0!important;background:transparent!important;padding:8px 16px;font-size:13px;color:var(--muted)!important;border-radius:0!important;box-shadow:none!important}
+.seg button.active{background:var(--card)!important;color:var(--accent)!important;font-weight:500;box-shadow:0 0 0 1px var(--line)!important}
+.del{color:var(--err);background:transparent;border:0;cursor:pointer;font-size:13px;padding:4px 6px}.del:hover{background:#f8e9e6!important;color:var(--err)!important}
 .st{font-size:12px;white-space:nowrap}.st.ok{color:var(--ok)}.st.bad{color:var(--err)}.st.wait{color:var(--muted)}
 
-/* ---------- 概览统计 ---------- */
-.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
-.stat{background:#fafbfc;border:1px solid var(--line);border-radius:12px;padding:14px 16px;
-  transition:transform .16s var(--ease),box-shadow .16s var(--ease)}
-.stat:hover{transform:translateY(-2px);box-shadow:var(--shadow-hover)}
-.stat .n{font-size:22px;font-weight:700}
-.stat .l{font-size:12px;color:var(--muted)}
-.lib-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
-.lib{display:flex;align-items:center;gap:10px;background:#fafbfc;border:1px solid var(--line);
-  border-radius:10px;padding:10px 12px}
-.lib .ic{font-size:20px}
-.lib .t{font-weight:600;font-size:14px}
-.lib .c{font-size:12px;color:var(--muted)}
-.lib .pin{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--muted);
-  cursor:pointer;white-space:nowrap;padding:2px 8px;border-radius:99px;border:1px solid var(--line);background:#fff}
-.lib .pin input{margin:0;accent-color:var(--accent)}
-.lib:has(.pin input:checked){border-color:var(--accent);background:var(--accent-soft)}
+/* 媒体库、优先级、日志与提示 */
+.lib-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}.lib{display:flex;align-items:center;gap:12px;background:var(--raised);border:1px solid var(--line);border-radius:10px;padding:12px}
+.lib .ic{color:var(--muted);display:grid;place-items:center}.lib .t{font-weight:500;font-size:14px}.lib .c{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.lib .pin{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--muted);cursor:pointer;white-space:nowrap;padding:4px 8px;border-radius:6px;border:1px solid var(--line);background:var(--card)}
+.lib .pin input{margin:0;accent-color:var(--accent)}.lib:has(.pin input:checked){border-color:rgba(139,75,22,.3);background:var(--accent-soft)}
+.prio-input{width:76px}.prio-track{height:4px;background:var(--raised);border-radius:2px;overflow:hidden;margin-top:4px}.prio-bar{height:4px;border-radius:2px;background:var(--accent);margin:0}
+pre.log{max-height:240px;overflow:auto;background:#211f1b;color:#e9e4dc;border-radius:8px;padding:12px;font-size:11px;line-height:1.5;margin:8px 0 0;white-space:pre-wrap}
+#toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(8px);background:var(--text);color:var(--card);padding:12px 20px;border-radius:9px;font-size:13px;opacity:0;
+  box-shadow:0 8px 24px rgba(33,31,27,.16);transition:opacity 200ms var(--ease),transform 200ms var(--ease);pointer-events:none;z-index:1000;max-width:90vw}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}#toast.ok{background:var(--ok)}#toast.fail{background:var(--err)}
+.bottom-nav,.more-menu,.mobile-brand{display:none}
 
-/* ---------- 优先级 ---------- */
-.prio-input{width:74px}
-.prio-bar{height:5px;border-radius:3px;background:linear-gradient(90deg,#cfe0fb,#2f6fed);margin-top:3px}
-
-/* ---------- 弹窗/日志/toast ---------- */
-pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-radius:8px;
-  padding:10px;font-size:11px;line-height:1.5;margin:6px 0 0;white-space:pre-wrap}
-#toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(8px);
-  background:#222;color:#fff;padding:9px 18px;border-radius:99px;font-size:13px;opacity:0;
-  box-shadow:0 8px 24px rgba(16,30,54,.18);transition:.22s;pointer-events:none;z-index:80;max-width:90vw}
-#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
-#toast.ok{background:var(--ok)}#toast.fail{background:var(--err)}
-
-/* ---------- 移动端 ---------- */
-.bottom-nav,.more-menu{display:none}
-@media(max-width:760px){
-  .sidebar{display:none}
-  .main{padding:max(16px,env(safe-area-inset-top,0px)) 14px
-    calc(64px + env(safe-area-inset-bottom,8px));max-width:100%}
-  h2.page-title{font-size:18px}
-  input[type=text],input[type=password],textarea,select{font-size:16px}
-  main button:not(.small){min-height:42px}
-  main button.small{min-height:36px}
-  .bottom-nav{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:45;
-    height:calc(58px + env(safe-area-inset-bottom,0px));box-sizing:border-box;align-items:center;
-    background:rgba(255,255,255,.97);border-top:1px solid var(--line);backdrop-filter:blur(6px);
-    padding-bottom:env(safe-area-inset-bottom,0px)}
-  .bottom-nav .nav-item{flex:1;display:flex;align-items:center;justify-content:center;
-    height:58px;text-align:center;padding:0 2px;font-size:12px;border-radius:0;white-space:nowrap}
-  .bottom-nav .nav-item.active{background:transparent;color:var(--accent);font-weight:700}
-  .more-menu{position:fixed;left:10px;right:10px;bottom:calc(62px + env(safe-area-inset-bottom,0px));
-    z-index:46;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;padding:10px;
-    background:var(--card);border:1px solid var(--line);border-radius:14px;
-    box-shadow:0 12px 36px rgba(16,30,54,.18);max-height:62vh;overflow-y:auto}
-  .more-menu.show{display:grid}
-  .more-menu .nav-item{min-height:42px;font-size:13px;border:1px solid var(--line);background:#fafbfc}
+/* 平板 */
+@media(max-width:1180px){
+  .capability{grid-template-columns:1fr}.capability-list{border-left:0;border-top:1px solid var(--line);padding-top:16px}
+  .overview-grid{grid-template-columns:1fr}.side-stack{grid-template-columns:1fr 1fr;grid-template-rows:auto}.stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .diagnostic{margin-bottom:0}.overview-grid{margin-bottom:24px}
 }
+@media(max-width:900px){.content{padding:28px 24px 40px}.topbar{padding:0 24px}.capability-list{grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.capability-item{border-right:0}.card-head{display:block}.card-actions{margin-top:12px;flex-wrap:wrap}.icon-action{white-space:nowrap}}
+
+/* 手机：独立顶部栏、底部五入口与更多面板 */
+@media(max-width:760px){
+  .layout{display:block;min-height:100dvh}.sidebar{display:none}.main{width:100%;min-height:100dvh}
+  .topbar{height:56px;padding:0 16px}.breadcrumb{display:none}.mobile-brand{display:flex}.local-label{font-size:12px}
+  .content{max-width:100%;padding:20px 16px calc(88px + env(safe-area-inset-bottom,0px))}
+  h2.page-title{font-size:28px}.page-head{margin-bottom:20px}.page-meta{display:none}.page-desc{margin-bottom:20px}
+  .card{padding:20px;margin-bottom:20px;border-radius:14px}.card-title{font-size:16px}.card-head{display:block}.card-actions{margin-top:8px}
+  .capability{gap:20px}.capability-list{grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 8px}.capability-item{padding:4px 12px}.capability-item span{white-space:normal}
+  .overview-grid{gap:20px;margin-bottom:20px}.side-stack{grid-template-columns:1fr;gap:20px}.diagnostic{padding:20px}
+  .now-playing{padding:16px}.now-title{font-size:22px}.chain-step{font-size:11px}.live-label{display:flex;margin:4px 0 0}
+  .activity-table th:nth-child(2),.activity-table td:nth-child(2){display:none}.activity-table .content-cell{max-width:128px}
+  .diagnostic-foot{display:block}.diagnostic-foot span{display:block;margin-top:4px}
+  .stat-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.stat{padding:16px;min-height:116px}.stat .n{font-size:28px}.stat-meta{font-size:11px}
+  .lib-grid{grid-template-columns:1fr}.cache-grid{grid-template-columns:1fr}
+  input[type=text],input[type=number],input[type=password],textarea,select{font-size:16px}input[type=text],input[type=password],textarea,select{min-height:44px}input[type=number]{min-height:40px}
+  main button:not(.small){min-height:42px}main button.small{min-height:36px}.btn-row{gap:8px}
+  .row>input[type=text],.row>input[type=password]{flex:1 1 100%!important;max-width:none!important;min-width:0!important}
+  #addGrid{grid-template-columns:1fr!important;gap:12px!important}#srcFilter{margin-left:0!important;max-width:100%!important;width:100%!important;order:10;font-size:16px!important}
+  #tmdbKey{min-width:0!important;flex:1 1 100%!important}#libManage{max-height:420px!important}#libManage>div{flex-wrap:wrap}
+  .card>table,.card>.stack table{display:block;overflow-x:auto;max-width:100%;white-space:nowrap}
+  .activity-table{display:table!important;white-space:nowrap}.activity-table th,.activity-table td{white-space:nowrap}
+  .source-list-card table thead{display:none}.source-list-card table tbody{display:grid;gap:12px}
+  .source-list-card table tbody tr[data-id]{display:grid;grid-template-columns:28px minmax(0,1fr) auto auto;gap:8px;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+  .source-list-card table tbody tr[data-id] td{display:block;padding:0;border:0;white-space:normal!important}
+  .source-list-card table tbody tr[data-id] td:nth-child(1){grid-column:1;grid-row:1;padding-top:4px}
+  .source-list-card table tbody tr[data-id] td:nth-child(2){grid-column:1/5;grid-row:2;display:flex;flex-wrap:wrap;gap:8px}
+  .source-list-card table tbody tr[data-id] td:nth-child(3){grid-column:2;grid-row:1;min-width:0}
+  .source-list-card table tbody tr[data-id] td:nth-child(4){grid-column:1/3;grid-row:3;align-self:center}
+  .source-list-card table tbody tr[data-id] td:nth-child(5){grid-column:3/5;grid-row:1;justify-self:end}
+  .source-list-card table tbody tr[data-id] td:nth-child(6){grid-column:3;grid-row:3;justify-self:end}
+  .source-list-card table tbody tr[data-id] td:nth-child(7){grid-column:4;grid-row:3;justify-self:end}
+  .source-list-card table tbody tr:not([data-id]){display:block;text-align:center;padding:12px}.source-list-card table tbody tr:not([data-id]) td{display:block;border:0}
+  .source-list-card td:nth-child(2) label{margin-left:0!important;font-size:12px!important}.source-list-card td[data-st]::before{content:"状态：";color:var(--muted);margin-right:4px}
+  .source-list-card .src-detail>summary{overflow-wrap:anywhere}.source-list-card .src-detail .src-detail-body{min-width:0;margin-left:0}
+  .longbox{max-height:56vh}.longbox.collapsed{max-height:240px}.modal{padding:20px;max-height:86dvh}
+  #panFrame{height:70dvh!important}.seg{display:flex}.seg button{flex:1;padding:8px 12px}
+  #toast{bottom:calc(84px + env(safe-area-inset-bottom,0px));font-size:12px}
+  .bottom-nav{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:45;height:calc(64px + env(safe-area-inset-bottom,0px));box-sizing:border-box;align-items:stretch;
+    background:var(--card);border-top:1px solid var(--line);padding:0 4px env(safe-area-inset-bottom,0px)}
+  .bottom-nav .nav-item{flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;height:64px;text-align:center;padding:8px 2px;font-size:11px;border:0;border-radius:0;background:transparent;white-space:nowrap}
+  .bottom-nav .nav-item svg.icon{width:19px;height:19px}.bottom-nav .nav-item.active{background:transparent;color:var(--accent);font-weight:500}
+  .bottom-nav .nav-item.active::before{content:"";position:absolute;top:0;width:28px;height:2px;background:var(--accent);border-radius:0 0 2px 2px}
+  .more-menu{position:fixed;left:12px;right:12px;bottom:calc(76px + env(safe-area-inset-bottom,0px));z-index:46;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:12px;
+    background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:0 16px 40px rgba(33,31,27,.16);max-height:64dvh;overflow-y:auto}
+  .more-menu.show{display:grid}.more-menu .nav-item{min-height:44px;font-size:13px;border:1px solid var(--line);background:var(--raised);padding:12px}
+}
+@media(max-width:380px){.content{padding-left:12px;padding-right:12px}.card{padding:16px}.diagnostic{padding:16px}.stat-grid{grid-template-columns:1fr}.capability-list{grid-template-columns:1fr}.activity-table th:nth-child(5),.activity-table td:nth-child(5){display:none}.local-label{display:none}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 </style>
 </head>
 <body>
 <div class="layout">
   <aside class="sidebar">
     <div class="brand">
-      <div class="brand-mark">🎬</div>
-      <div><div class="brand-name">fnmedia-ext</div><div class="brand-sub">管理台</div></div>
+      <div class="brand-mark" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4M10 10l5 2-5 2z"/></svg></div>
+      <div><div class="brand-name">fnmedia-ext</div><div class="brand-sub">本地影视管理</div></div>
     </div>
-    <nav class="nav" id="nav">
+    <nav class="nav" id="nav" aria-label="管理导航">
       <div class="nav-group-label">总览</div>
-      <button class="nav-item active" data-page="overview">📊 概览</button>
-
+      <button class="nav-item active" data-page="overview"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>概览</button>
       <div class="nav-group-label">内容</div>
-      <button class="nav-item" data-page="library">🎞 媒体库</button>
-
+      <button class="nav-item" data-page="library"><svg class="icon" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="1"/><path d="M8 5v14M16 5v14M4 9h4M4 15h4M16 9h4M16 15h4"/></svg>媒体库</button>
       <div class="nav-group-label">片源</div>
-      <button class="nav-item" data-page="sources">📡 资源站</button>
-      <button class="nav-item" data-page="importsub">📥 订阅与 JS 源</button>
-
+      <button class="nav-item" data-page="sources"><svg class="icon" viewBox="0 0 24 24"><path d="M4 18a8 8 0 0 1 16 0M7 18a5 5 0 0 1 10 0M10 18a2 2 0 0 1 4 0M12 18v3"/></svg>资源站</button>
+      <button class="nav-item" data-page="importsub"><svg class="icon" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>订阅与 JS 源</button>
       <div class="nav-group-label">播放与搜索</div>
-      <button class="nav-item" data-page="playback">▶️ 播放设置</button>
-      <button class="nav-item" data-page="search">🔍 搜索设置</button>
-
+      <button class="nav-item" data-page="playback"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="m10 9 5 3-5 3zM8 22h8"/></svg>播放设置</button>
+      <button class="nav-item" data-page="search"><svg class="icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>搜索设置</button>
       <div class="nav-group-label">系统</div>
-      <button class="nav-item" data-page="network">🌐 网络与代理</button>
-      <button class="nav-item" data-page="data">🗄 数据与维护</button>
-      <button class="nav-item" data-page="about">ℹ️ 关于与更新</button>
+      <button class="nav-item" data-page="network"><svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>网络与代理</button>
+      <button class="nav-item" data-page="data"><svg class="icon" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7"/></svg>数据与维护</button>
+      <button class="nav-item" data-page="about"><svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></svg>关于与更新</button>
     </nav>
     <div class="sidebar-foot">
       <span id="globalState" class="dot wait">检测中…</span>
+      <div class="version" id="globalCache">统一无安卓版</div>
     </div>
   </aside>
 
   <main class="main">
+    <header class="topbar">
+      <div class="mobile-brand"><span class="brand-mark" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4M10 10l5 2-5 2z"/></svg></span>fnmedia-ext</div>
+      <div class="breadcrumb"><span>管理台</span><span>/</span><strong id="currentPageName">概览</strong></div>
+      <div class="local-label"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 22h8M12 18v4"/></svg>本机 NAS</div>
+    </header>
+    <div class="content">
 
     <!-- ============ 概览 ============ -->
     <section class="page active" id="page-overview">
-      <h2 class="page-title">概览</h2>
-      <p class="page-desc">在飞牛原生搜索与媒体库中注入在线影视，点击直接调用飞牛原生播放器。</p>
-
-      <div class="card">
-        <div class="card-title">当前能力</div>
-        <p class="card-sub">统一无安卓版：苹果 CMS / T4 / DRPY JS 源、虚拟媒体库、网盘转存与小雅聚合。
-          Guard 与普通 csp_ 不再导入；播放、续播、去广告与多线路策略保持原有基线。</p>
+      <div class="page-head">
+        <div><h2 class="page-title">运行概览</h2><p class="page-desc">管理在线片源、虚拟媒体库与各端播放状态</p></div>
+        <div class="page-meta">本地数据 · 最近 30 分钟</div>
       </div>
 
-      <div class="card">
-        <div class="card-title">本设备识别 <span class="badge" id="ovClientKind">-</span></div>
-        <div class="hint" id="ovClient">读取中…</div>
-        <div class="muted sm" id="ovClientUa" style="word-break:break-all"></div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">实时播放诊断
-          <span class="muted sm" style="font-weight:400">
-            <span class="dot ok" id="livePulse" style="margin-left:8px"><span id="liveState">实时</span></span>
-            <a href="#" id="liveClear" style="margin-left:10px">清空</a>
-            <a href="#" id="liveCopy" style="margin-left:10px">📋 复制诊断信息</a>
-          </span>
+      <div class="card capability">
+        <div>
+          <div class="eyebrow">当前能力</div>
+          <h2>统一无安卓运行</h2>
+          <p>在线内容注入飞牛原生搜索与媒体库，保留既有播放与多线路策略；Guard 与普通 csp_ 不再导入</p>
         </div>
-        <div class="hint">显示各端（电视/手机/iOS/网页）最近 30 分钟的播放请求：走本地构造还是透传官方、当前在播、是否报错。每 3 秒刷新。</div>
-        <div id="liveDiagnosis" style="margin:6px 0"></div>
-        <div style="display:flex;gap:12px;flex-wrap:wrap;margin:6px 0 10px" class="sm muted">
-          <span>来源：<b style="color:var(--ok)">local</b> 插件构造</span>
-          <span><b style="color:#2563eb">mixed</b> 合并官方</span>
-          <span><b style="color:#b45309">upstream</b> 透传官方</span>
-          <span><b style="color:var(--err)">4xx/5xx</b> 出错</span>
+        <div class="capability-list">
+          <div class="capability-item"><strong>苹果 CMS / T4</strong><span>标准接口片源</span></div>
+          <div class="capability-item"><strong>DRPY JS</strong><span>Node 规则运行</span></div>
+          <div class="capability-item"><strong>虚拟媒体库</strong><span>榜单与海量片库</span></div>
+          <div class="capability-item"><strong>网盘聚合</strong><span>转存与小雅片源</span></div>
         </div>
-        <div id="liveDevices"><div class="muted sm">暂无播放活动（在电视或手机上播一部片即可看到）</div></div>
       </div>
 
-      <div class="card">
-        <div class="card-title">统计</div>
-        <div class="stat-grid">
-          <div class="stat"><div class="n" id="ovSrcN">-</div><div class="l">启用资源站</div></div>
-          <div class="stat"><div class="n" id="ovCacheN">-</div><div class="l">已缓存在线条目</div></div>
-          <div class="stat"><div class="n" id="ovHotN">-</div><div class="l">热门榜单条目</div></div>
-          <div class="stat"><div class="n" id="ovCatN">-</div><div class="l">海量库可用类目</div></div>
+      <div class="overview-grid">
+        <div class="card diagnostic">
+          <div class="card-head">
+            <div>
+              <div class="card-title">实时播放诊断<span class="live-label"><span class="dot ok" id="livePulse"><span id="liveState">实时</span></span></span></div>
+              <p class="card-sub">各端播放请求、当前在播与异常归因 · 每 3 秒刷新</p>
+            </div>
+            <div class="card-actions">
+              <a href="#" id="liveCopy" class="icon-action"><svg class="icon" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>复制诊断</a>
+              <a href="#" id="liveClear" class="icon-action"><svg class="icon" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6"/></svg>清空</a>
+            </div>
+          </div>
+          <div id="liveDiagnosis"></div>
+          <div id="liveDevices"><div class="muted sm">正在读取最近播放活动…</div></div>
+          <div class="diagnostic-foot" id="liveSummary"><span>最近 30 分钟</span><span>等待实时数据</span></div>
         </div>
-        <div class="hint" id="ovHotMeta"></div>
+
+        <div class="side-stack">
+          <div class="card">
+            <div class="card-title">本设备识别 <span class="badge" id="ovClientKind">-</span></div>
+            <p class="card-sub">用于确认当前管理端的兼容模型</p>
+            <div class="device-hero">
+              <div class="device-icon"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 22h8M12 18v4"/></svg></div>
+              <div><div class="device-name" id="ovClient">读取中…</div><div class="device-type" id="ovClientModel">正在识别设备</div></div>
+            </div>
+            <dl class="detail-list">
+              <div class="detail-row"><dt>字段模型</dt><dd id="ovClientStrict">—</dd></div>
+              <div class="detail-row"><dt>播放路径</dt><dd>插件构造</dd></div>
+              <div class="detail-row"><dt>访问位置</dt><dd>本机 NAS</dd></div>
+            </dl>
+            <div class="ua-detail" id="ovClientUa"></div>
+          </div>
+
+          <div class="card legend-card">
+            <div class="card-title">请求来源</div>
+            <p class="card-sub">快速区分插件与官方后端流量</p>
+            <div class="origin-list">
+              <div class="origin-row"><span class="origin-mark"></span><div><div class="origin-name">插件构造 <span class="muted sm">local</span></div><div class="origin-desc">由本地扩展生成响应</div></div></div>
+              <div class="origin-row"><span class="origin-mark hollow"></span><div><div class="origin-name">合并官方 <span class="muted sm">mixed</span></div><div class="origin-desc">本地内容与官方数据合并</div></div></div>
+              <div class="origin-row"><span class="origin-mark neutral"></span><div><div class="origin-name">透传官方 <span class="muted sm">upstream</span></div><div class="origin-desc">请求直接交由官方后端</div></div></div>
+            </div>
+            <p class="legend-note">4xx / 5xx 异常会显示原因与处理建议</p>
+          </div>
+        </div>
       </div>
 
+      <div class="stat-grid">
+        <div class="card stat"><div class="stat-label">启用资源站</div><div class="n" id="ovSrcN">-</div><div class="stat-meta" id="ovSrcMeta">正在读取配置</div></div>
+        <div class="card stat"><div class="stat-label">已缓存在线条目</div><div class="n" id="ovCacheN">-</div><div class="stat-meta">本地在线内容索引</div></div>
+        <div class="card stat"><div class="stat-label">热门榜单条目</div><div class="n" id="ovHotN">-</div><div class="stat-meta" id="ovHotBreakdown">电影 · 剧集 · 动漫 · 综艺</div></div>
+        <div class="card stat"><div class="stat-label">海量库可用类目</div><div class="n" id="ovCatN">-</div><div class="stat-meta">电影 · 剧集 · 动漫 · 综艺</div></div>
+        <div class="hint stats-note" id="ovHotMeta"></div>
+      </div>
     </section>
 
     <!-- ============ 虚拟媒体库 ============ -->
@@ -345,14 +400,14 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       <p class="page-desc">插件在飞牛影视媒体库中虚拟出的内容。热门榜单与海量片库各自独立开关；每张库卡可单独「置顶」。</p>
 
       <div class="card">
-        <div class="card-title">① 热门资源（各类目真实榜单）</div>
+        <div class="card-title">热门资源</div>
         <p class="card-sub">海报 / 评分 / 排名来自豆瓣榜单，后台定时刷新、打开秒读缓存；
           点进某部片时才用片名实时搜索资源站解析播放。点击播放时<strong>优先高质量源</strong>。</p>
         <div class="lib-grid" id="hotLibs"></div>
         <label class="switch-row">
           <input type="checkbox" id="hotEnabled"/>
           <span>在飞牛影视媒体库显示热门四库
-            <span class="sub">🎬热门电影 · 📺热门剧集 · 🌸动漫新番 · 🎤热门综艺（独立开关，不影响海量四库）</span></span>
+            <span class="sub">热门电影 · 热门剧集 · 动漫新番 · 热门综艺（独立开关，不影响海量四库）</span></span>
         </label>
         <label class="field" style="max-width:240px">
           <span>榜单自动刷新间隔（小时，1–24）</span>
@@ -366,13 +421,13 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
 
       <div class="card">
-        <div class="card-title">② 海量片库（资源站分类深翻）</div>
-        <p class="card-sub">直接按苹果 CMS 分类深翻资源站，跨源聚合成「🌐海量片库」四库（电影 / 剧集 / 动漫 / 综艺），规则不变。</p>
+        <div class="card-title">海量片库</div>
+        <p class="card-sub">直接按苹果 CMS 分类深翻资源站，跨源聚合成「海量片库」四库（电影 / 剧集 / 动漫 / 综艺），规则不变。</p>
         <div class="lib-grid" id="catLibs"></div>
         <label class="switch-row">
           <input type="checkbox" id="catEnabled"/>
           <span>在飞牛影视媒体库显示海量四库
-            <span class="sub">🎞海量电影 · 📺海量剧集 · 🌸海量动漫 · 🎤海量综艺（独立开关，不影响热门四库）</span></span>
+            <span class="sub">海量电影 · 海量剧集 · 海量动漫 · 海量综艺（独立开关，不影响热门四库）</span></span>
         </label>
         <div class="btn-row">
           <button class="primary small" onclick="saveCatCfg()">保存海量设置</button>
@@ -381,7 +436,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
 
       <div class="card">
-        <div class="card-title">③ T4 选片</div>
+        <div class="card-title">T4 选片</div>
         <div class="lib-grid" id="t4Libs"></div>
         <label class="switch-row">
           <input type="checkbox" id="t4Enabled" onchange="saveT4Cfg()"/>
@@ -391,7 +446,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
 
 
       <div class="card">
-        <div class="card-title">⑤ 媒体库显示开关与排序</div>
+        <div class="card-title">媒体库显示与排序</div>
         <p class="card-sub">勾选=在飞牛影视里显示；取消=隐藏（对所有账号不显示，可随时恢复）。
           ↑/↓ 调整虚拟媒体库之间的先后顺序；下方选择整体放在本地媒体库之前还是之后。</p>
         <div class="btn-row" style="margin-bottom:8px">
@@ -408,7 +463,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
 
       <div class="card">
-        <div class="card-title">⑥ 子账号观看权限（家庭多用户）</div>
+        <div class="card-title">子账号观看权限</div>
         <p class="card-sub">飞牛影视支持多账号登录。可为孩子/家人账号单独勾选可见媒体库；未单独配置的账号按下方默认策略。
           被限制的账号搜索时只出本地结果，不会误点播在线片源；<b>各账号的在线播放记录与续播进度彼此隔离</b>。</p>
         <label class="switch-row">
@@ -433,7 +488,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
     <section class="page" id="page-sources">
       <h2 class="page-title">资源站</h2>
       <p class="page-desc">标准苹果 CMS 源与扩展源；启用后进入聚合搜索与海量片库。</p>
-      <div class="card">
+      <div class="card source-list-card">
         <div class="card-title">资源站列表 <span class="badge" id="srcCount"></span>
           <input type="text" id="srcFilter" placeholder="筛选名称/地址…" oninput="renderSources()"
                  style="margin-left:auto;max-width:168px;font-size:12px;padding:5px 9px"/>
@@ -441,9 +496,9 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <button class="small" id="srcProbeBtn" onclick="sourceProbeStart()">批量探活</button>
           <button class="small ghost" id="srcProbeCancelBtn" style="display:none" onclick="sourceProbeCancel()">中止</button>
           <button class="small ghost" onclick="restoreBuiltin()">恢复内置源</button>
-          <button class="small" onclick="exportCmsSources()" title="导出当前纯 CMS 源为 JSON 备份">⬇ 导出</button>
-          <label class="btn-sm" style="border-color:var(--ok);background:var(--ok);color:#fff" title="从 JSON 文件导入 CMS 源，自动去重">
-            ⬆ 导入<input type="file" id="cmsImportFile" accept=".json,application/json" style="display:none" onchange="importCmsFile(this)"/>
+          <button class="small" onclick="exportCmsSources()" title="导出当前纯 CMS 源为 JSON 备份">导出</button>
+          <label class="btn-sm" style="border-color:var(--accent);background:var(--accent);color:#fff" title="从 JSON 文件导入 CMS 源，自动去重">
+            导入<input type="file" id="cmsImportFile" accept=".json,application/json" style="display:none" onchange="importCmsFile(this)"/>
           </label>
         </div>
         <div style="overflow-x:auto">
@@ -455,7 +510,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         </div>
         <div id="srcProbeProgress" class="hint" style="display:none"></div>
         <div class="collapse-bar collapsed" id="srcCollapseBar" onclick="toggleSrcCollapse()">
-          <span class="chev">▾</span><span id="srcCollapseTxt">展开完整列表</span></div>
+          <span class="chev" aria-hidden="true"></span><span id="srcCollapseTxt">展开完整列表</span></div>
         <div class="row mt" style="display:grid;grid-template-columns:150px 1fr 90px auto;gap:10px" id="addGrid">
           <input type="text" id="addName" placeholder="名称（可选）"/>
           <input type="text" id="addApi" placeholder="苹果CMS JSON 接口，如 https://xxx.com/api.php/provide/vod/at/json"/>
@@ -551,7 +606,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div class="btn-row"><button class="primary small" onclick="saveLines()">保存播放设置</button></div>
       </div>
       <div class="card">
-        <div class="card-title">🛡 播放去广告（m3u8 流层）
+        <div class="card-title">播放去广告（m3u8 流层）
           <label style="float:right;display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400;cursor:pointer">
             <input type="checkbox" id="adfEnable" style="width:14px;height:14px;accent-color:var(--accent)" onchange="toggleAdfilter(this.checked)"/> 启用去广告</label></div>
         <p class="card-sub">播放时实时检测当前线路并去除广告，兼容 TVBox / OK影视 Pro：<strong>① 动态检测</strong>——按分片间断边界、切片时长模式、CDN 切换、片头/片中位置实时识别广告段（无需订阅自带规则）；<strong>② 订阅 rules</strong>——导入订阅时自动收录其去广告正则，按线路域名精准剥除；<strong>③ 选集过滤</strong>——剔除“关注公众号/加微信/下载APP”假选集。识别不确定或可能误伤时自动保留，不影响播放。</p>
@@ -609,7 +664,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div id="subProxyMsg" class="muted sm" style="margin-top:6px"></div>
       </div>
       <div class="card">
-        <div class="card-title">🌐 资源站取源代理（可选 · 直连慢时）</div>
+        <div class="card-title">资源站取源代理（可选 · 直连慢时）</div>
         <p class="card-sub">仅用于搜索、分类深翻、测速和播放地址解析；视频分片仍直连，不占代理带宽。留空即直连，不改变现有播放策略。</p>
         <div class="row">
           <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
@@ -621,7 +676,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <button class="small ghost danger" id="srcProxyClearBtn" onclick="clearSrcProxy()" disabled>清空</button>
         </div>
         <div class="seg" id="srcProxyMode" style="margin-top:10px" role="tablist">
-          <button type="button" data-mode="auto" onclick="setSrcProxyMode('auto')">🪄 智能（推荐）</button>
+          <button type="button" data-mode="auto" onclick="setSrcProxyMode('auto')">智能（推荐）</button>
           <button type="button" data-mode="on" onclick="setSrcProxyMode('on')">始终走代理</button>
           <button type="button" data-mode="off" onclick="setSrcProxyMode('off')">全部直连</button>
         </div>
@@ -652,11 +707,11 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
             <tbody id="rows"><tr><td colspan="3" class="muted">加载中…</td></tr></tbody>
           </table>
         </div>
-        <div class="collapse-bar collapsed" onclick="toggleBox('onlineBox',this)"><span class="chev">▾</span><span>展开/收起</span></div>
+        <div class="collapse-bar collapsed" onclick="toggleBox('onlineBox',this)"><span class="chev" aria-hidden="true"></span><span>展开/收起</span></div>
       </div>
 
       <div class="card">
-        <div class="card-title">🗑 运行缓存管理
+        <div class="card-title">运行缓存管理
           <span class="hint" style="font-weight:400">缓存异常或占用过大时清除，后续访问自动重建</span>
           <button class="small" style="margin-left:auto" onclick="loadCacheStatus()">刷新</button>
         </div>
@@ -675,7 +730,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
     <section class="page" id="page-about">
       <h2 class="page-title">关于与更新</h2>
       <div class="card">
-        <div class="card-title">🎬 fnmedia-ext · 飞牛影视在线扩展</div>
+        <div class="card-title">fnmedia-ext · 飞牛影视在线扩展</div>
         <p class="card-sub">在原生搜索 / 媒体库注入在线影视并直接调用飞牛原生播放器播放。</p>
         <div class="stack sm muted">
           <div>· 热门资源：豆瓣真实榜单四库，点击搜源、优先高质量源播放。</div>
@@ -685,7 +740,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
 
       <div class="card" id="updCard">
-        <div class="card-title">🔄 版本更新</div>
+        <div class="card-title">版本更新</div>
         <div class="stack sm">
           <div class="muted">当前版本：<b id="updCur">…</b><span id="updEdition" class="muted"></span></div>
           <div class="muted" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">更新通道：
@@ -706,7 +761,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
 
       <div class="card" id="tmdbCard">
-        <div class="card-title">🎬 影视元数据（豆瓣 + TMDB）</div>
+        <div class="card-title">影视元数据（豆瓣 + TMDB）</div>
         <div class="stack sm">
           <p class="card-sub">豆瓣移动公开接口提供简介 / 类型 / 评分 / 演员头像与角色（免 Key、通常更快）；TMDB 补充横幅剧照与兜底。仅识别「热门四库」与「海量四库」，单源独立/自定义等其它媒体库暂不识别。后台异步缓存，不阻塞播放。</p>
           <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
@@ -724,11 +779,11 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
 
       <div class="card" id="donateCard" style="text-align:center">
-        <div class="card-title" style="justify-content:center">☕ 为爱发电 · 欢迎打赏</div>
+        <div class="card-title" style="justify-content:center">支持项目</div>
         <p class="card-sub" style="max-width:560px;margin:0 auto 12px">
           本扩展<b>开源、免费、无广告</b>，所有功能都利用业余时间开发维护。
           如果它让你的飞牛影视更好用，你的一份打赏就是对作者最大的鼓励，
-          也会让后续适配新设备、维护资源解析更有动力 🙏
+          也会让后续适配新设备、维护资源解析更有动力
         </p>
         <div style="display:flex;flex-wrap:wrap;gap:20px;justify-content:center;align-items:flex-start">
           <div style="display:inline-flex;flex-direction:column;align-items:center;gap:8px">
@@ -748,11 +803,11 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
             <div class="muted sm" style="font-weight:600">微信扫码赞赏</div>
           </div>
         </div>
-        <div class="muted sm" style="margin-top:8px">金额随意，感谢支持 ❤️</div>
+        <div class="muted sm" style="margin-top:8px">金额随意，感谢支持</div>
       </div>
 
       <div class="card">
-        <div class="card-title">⚖️ 免责声明与版权声明</div>
+        <div class="card-title">免责声明与版权声明</div>
         <div class="stack sm muted" style="line-height:1.7">
           <div><b>1. 工具性质：</b>本扩展是<b>开源、免费</b>的技术研究与个人媒体库整理工具，仅在你自己的 NAS / 设备上本地运行。它是一个中立的“播放器 / 接口聚合”技术框架，本身<b>不提供、不存储、不上传、不分发、不转码</b>任何影视、图片、字幕、播放地址或资源站点信息，也<b>不内置任何资源数据库、订阅、站点地址或第三方执行脚本</b>。</div>
           <div><b>2. 不内置源、由你自备：</b>所有在线内容均来自你<b>自行添加</b>的第三方接口、TVBox 订阅或 DRPY JavaScript 规则；是否添加、添加什么、是否启用，完全由你决定并自行承担。Guard/普通 csp_ 等安卓执行源不受支持。请仅使用你拥有合法授权或有权访问的内容与组件。</div>
@@ -763,22 +818,23 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         </div>
       </div>
     </section>
+    </div>
   </main>
 </div>
 
 <div class="more-menu" id="moreNav">
-  <button class="nav-item" data-page="importsub">📥 订阅与 JS 源</button>
-  <button class="nav-item" data-page="search">🔍 搜索设置</button>
-  <button class="nav-item" data-page="network">🌐 网络与代理</button>
-  <button class="nav-item" data-page="data">🗄 数据与维护</button>
-  <button class="nav-item" data-page="about">ℹ️ 关于与更新</button>
+  <button class="nav-item" data-page="importsub"><svg class="icon" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>订阅与 JS 源</button>
+  <button class="nav-item" data-page="search"><svg class="icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>搜索设置</button>
+  <button class="nav-item" data-page="network"><svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>网络与代理</button>
+  <button class="nav-item" data-page="data"><svg class="icon" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7"/></svg>数据与维护</button>
+  <button class="nav-item" data-page="about"><svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></svg>关于与更新</button>
 </div>
-<nav class="bottom-nav" id="bottomNav">
-  <button class="nav-item active" data-page="overview">概览</button>
-  <button class="nav-item" data-page="library">媒体库</button>
-  <button class="nav-item" data-page="sources">片源</button>
-  <button class="nav-item" data-page="playback">播放</button>
-  <button class="nav-item" id="moreNavBtn" onclick="toggleMoreNav()">更多</button>
+<nav class="bottom-nav" id="bottomNav" aria-label="移动端管理导航">
+  <button class="nav-item active" data-page="overview"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>概览</button>
+  <button class="nav-item" data-page="library"><svg class="icon" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="1"/><path d="M8 5v14M16 5v14M4 9h4M4 15h4M16 9h4M16 15h4"/></svg>媒体库</button>
+  <button class="nav-item" data-page="sources"><svg class="icon" viewBox="0 0 24 24"><path d="M4 18a8 8 0 0 1 16 0M7 18a5 5 0 0 1 10 0M10 18a2 2 0 0 1 4 0M12 18v3"/></svg>片源</button>
+  <button class="nav-item" data-page="playback"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="m10 9 5 3-5 3zM8 22h8"/></svg>播放</button>
+  <button class="nav-item" id="moreNavBtn" onclick="toggleMoreNav()"><svg class="icon" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>更多</button>
 </nav>
 
 <div id="toast"></div>
@@ -786,7 +842,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
 <!-- 资源站编辑弹窗 -->
 <div class="modal-mask" id="srcEditMask" onclick="if(event.target===this)closeSrcEdit()">
   <div class="modal">
-    <h3>✎ 编辑资源站</h3>
+    <h3>编辑资源站</h3>
     <input type="hidden" id="seId"/>
     <label class="fld">显示名称</label>
     <input type="text" id="seName" maxlength="40" placeholder="给这个资源站起个名字"/>
@@ -803,6 +859,21 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
 <script>
 const $=(id)=>document.getElementById(id);
 const $$=(sel)=>Array.from(document.querySelectorAll(sel));
+const ICON_PATHS={
+  movie:'<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4M10 10l5 2-5 2z"/>',
+  tv:'<rect x="3" y="5" width="18" height="13" rx="2"/><path d="m9 2 3 3 3-3M8 22h8"/>',
+  anime:'<rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8 10h.01M16 10h.01M8 15c2 2 6 2 8 0"/>',
+  variety:'<rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8"/>',
+  globe:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/>',
+  source:'<path d="M4 18a8 8 0 0 1 16 0M7 18a5 5 0 0 1 10 0M10 18a2 2 0 0 1 4 0M12 18v3"/>',
+  puzzle:'<path d="M8 3h3v3a2 2 0 1 0 4 0V3h3a2 2 0 0 1 2 2v4h-3a2 2 0 1 0 0 4h3v4a2 2 0 0 1-2 2h-4v-3a2 2 0 1 0-4 0v3H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h2z"/>',
+  cloud:'<path d="M7 18a4 4 0 1 1 1-7.9A6 6 0 0 1 19 8a5 5 0 0 1 0 10H7z"/>',
+  chart:'<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
+  folder:'<path d="M3 6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  edit:'<path d="M12 20h9M16.5 3.5a2 2 0 0 1 3 3L8 18l-4 1 1-4z"/>',
+  trash:'<path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6"/>'
+};
+function icon(name){return `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${ICON_PATHS[name]||ICON_PATHS.folder}</svg>`;}
 let CFG=null,KWS=[],STATUS=null,PRIO={};
 const FEAT_DDUO=false,FEAT_ADULT=false;
 
@@ -817,6 +888,8 @@ async function jpost(p,b){const r=await fetch(p,{method:"POST",headers:{"Content
 async function switchPage(page){
   $$(".page").forEach(el=>el.classList.toggle("active",el.id==="page-"+page));
   $$("[data-page]").forEach(el=>el.classList.toggle("active",el.dataset.page===page));
+  const navItem=$$("#nav [data-page]").find(el=>el.dataset.page===page);
+  if(navItem&&$("currentPageName"))$("currentPageName").textContent=navItem.textContent.trim();
   window.scrollTo(0,0);
   if(page!=="overview")stopLivePoll();
   if(page==="overview"){renderOverview();startLivePoll();}
@@ -838,9 +911,9 @@ async function switchPage(page){
   if(page==="about"){loadUpdate(false);}
   const more=$("moreNav"),moreBtn=$("moreNavBtn");
   if(more)more.classList.remove("show");
-  if(moreBtn)moreBtn.classList.toggle("active",["importsub","pan","search","network","data","about"].includes(page));
+  if(moreBtn){moreBtn.classList.toggle("active",["importsub","pan","search","network","data","about"].includes(page));moreBtn.setAttribute("aria-expanded","false");}
 }
-function toggleMoreNav(){const m=$("moreNav");if(m)m.classList.toggle("show");}
+function toggleMoreNav(){const m=$("moreNav");if(!m)return;const show=m.classList.toggle("show");const b=$("moreNavBtn");if(b)b.setAttribute("aria-expanded",show?"true":"false");}
 $$("[data-page]").forEach(b=>b.addEventListener("click",()=>switchPage(b.dataset.page)));
 
 /* ---------- 版本更新 ---------- */
@@ -888,7 +961,7 @@ function renderUpdate(r){
     return;
   }
   if(r.status==="done"){
-    body.innerHTML='<span style="color:var(--ok,#16a34a)">✅ 已更新到 v'+esc(r.updated_version||"")+'，服务正在重启…请稍后刷新页面。</span>';
+    body.innerHTML='<span style="color:var(--ok,#16a34a)">已更新到 v'+esc(r.updated_version||"")+'，服务正在重启…请稍后刷新页面。</span>';
     actions.style.display="flex";btn.style.display="none";prog.style.display="none";return;
   }
   if(r.status==="error" && (!u || !u.update_available)){
@@ -992,8 +1065,8 @@ document.addEventListener("DOMContentLoaded",()=>{
     if(st)st.textContent="正在测试 TMDB 连接…";
     try{
       const r=await jget("/v/api/ext/tmdb/test");
-      if(st)st.textContent=(r&&r.code===0)?"✅ "+(r.msg||"TMDB 连接正常"):"❌ "+((r&&r.msg)||"连接失败");
-    }catch(e){if(st)st.textContent="❌ 测试失败："+e.message;}
+      if(st)st.textContent=(r&&r.code===0)?""+(r.msg||"TMDB 连接正常"):""+((r&&r.msg)||"连接失败");
+    }catch(e){if(st)st.textContent="测试失败："+e.message;}
   });
   const doubanTest=document.getElementById("doubanTest");
   if(doubanTest)doubanTest.addEventListener("click",async()=>{
@@ -1001,8 +1074,8 @@ document.addEventListener("DOMContentLoaded",()=>{
     if(st)st.textContent="正在测试豆瓣连接…";
     try{
       const r=await jget("/v/api/ext/douban/test");
-      if(st)st.textContent=(r&&r.code===0)?"✅ "+(r.msg||"豆瓣连接正常"):"❌ "+((r&&r.msg)||"连接失败");
-    }catch(e){if(st)st.textContent="❌ 测试失败："+e.message;}
+      if(st)st.textContent=(r&&r.code===0)?""+(r.msg||"豆瓣连接正常"):""+((r&&r.msg)||"连接失败");
+    }catch(e){if(st)st.textContent="测试失败："+e.message;}
   });
 });
 
@@ -1011,14 +1084,13 @@ document.addEventListener("DOMContentLoaded",()=>{
 async function loadWhoami(){
   try{
     const r=await jget("/v/api/ext/whoami");const d=r.data||{};
-    const kindMap={tv:"TV / 电视盒子（严格模型）",android:"Android 手机/平板",
-      ios:"iPhone / iPad",web:"网页版",unknown:"未识别（按宽松处理）"};
+    const kindMap={tv:"TV / 电视盒子",android:"Android 手机 / 平板",ios:"iPhone / iPad",web:"Web 浏览器",unknown:"未识别设备"};
     $("ovClientKind").textContent=d.label||"-";
-    $("ovClient").textContent=(kindMap[d.kind]||d.kind)
-      +(d.strict_card?" · 已启用严格字段规整":" · 宽松字段")
-      +(d.is_mobile?" · 移动端":"");
+    $("ovClient").textContent=kindMap[d.kind]||d.kind||"未知设备";
+    $("ovClientModel").textContent=(d.is_mobile?"移动端":"桌面端")+(d.kind==="web"?" · 网页版":"");
+    $("ovClientStrict").textContent=d.strict_card?"严格字段规整":"宽松字段";
     $("ovClientUa").textContent=d.ua||"";
-  }catch(e){$("ovClient").textContent="识别失败："+e;}
+  }catch(e){$("ovClient").textContent="识别失败";$("ovClientModel").textContent=String(e);}
 }
 
 /* ---------- 实时播放诊断 ---------- */
@@ -1026,50 +1098,45 @@ let LIVE_TIMER=null;
 const LIVE_STAGE={library:"媒体库",browse:"片单",search:"搜索",detail:"详情",
   season:"季",episode:"选集",streams:"线路",play:"起播",media:"播放",
   hls:"清单",seg:"分片",direct:"直链",favorite:"收藏",history:"历史"};
-const LIVE_ORIGIN={local:["local","var(--ok)"],mixed:["mixed","#2563eb"],
-  upstream:["upstream","#b45309"],redirect:["redirect","#7c3aed"]};
+const LIVE_ORIGIN={local:"插件构造",mixed:"合并官方",upstream:"透传官方",redirect:"重定向"};
 function ago(a){return a<5?"刚刚":a<60?Math.floor(a)+"秒前":Math.floor(a/60)+"分前";}
-function liveOrigin(o){const [t,col]=LIVE_ORIGIN[o]||[o,"var(--muted)"];
-  return `<span class="tag" style="color:${col};background:transparent;border:1px solid ${col}33">${t}</span>`;}
+function liveOrigin(o){return esc(LIVE_ORIGIN[o]||o||"未知");}
 async function loadLive(){
   if(!document.getElementById("liveDevices"))return;
   let d;
-  try{ d=(await jget("/v/api/ext/live")).data||{devices:[]}; }
-  catch(e){ $("liveState").textContent="连接失败"; $("livePulse").className="dot bad"; return; }
-  $("liveState").textContent="实时"; $("livePulse").className="dot ok";
+  try{d=(await jget("/v/api/ext/live")).data||{devices:[]};}
+  catch(e){$("liveState").textContent="连接失败";$("livePulse").className="dot bad";return;}
+  $("liveState").textContent="实时";$("livePulse").className="dot ok";
   LIVE_NOW=d.now||Date.now()/1000;
-  const devs=d.devices||[];
-  if(!devs.length){$("liveDevices").innerHTML='<div class="muted sm">暂无播放活动（在电视或手机上播一部片即可看到）</div>';return;}
-  $("liveDevices").innerHTML=devs.map(dv=>{
-    const kindColor={tv:"#b45309",android:"var(--ok)",ios:"#2563eb",web:"#7c3aed"}[dv.kind]||"var(--muted)";
-    const sess=dv.session;
-    const sessHtml=sess?`<div class="sm" style="margin-top:4px">
-        ${sess.error?'<span class="tag amber">播放异常</span>':'<span class="tag">在播</span>'}
-        <b>${esc(sess.title||"（未知名）")}</b>
-        <span class="muted">· ${LIVE_STAGE[sess.stage]||sess.stage} · ${ago((d.now||dv.seen)-sess.at)}前</span>
-        ${sess.error?`<div class="sm" style="color:var(--err);margin-top:2px">⚠ ${esc(sess.error)}</div>`:""}
-      </div>`:"";
-    const errBadge=dv.errors?` <span style="color:var(--err);font-weight:700">· ${dv.errors} 次错误</span>`:"";
-    const rows=(dv.events||[]).slice(0,8).map(e=>{
-      const st=e.status;const col=st>=400?"var(--err)":(st>=300?"#7c3aed":"var(--ok)");
-      return `<div class="live-row">
-        <span style="color:${col};font-weight:600;min-width:34px;display:inline-block">${st}</span>
-        ${liveOrigin(e.origin)}
-        <span class="tag" style="background:#eef1f5;color:var(--muted)">${LIVE_STAGE[e.stage]||e.stage}</span>
-        ${e.title?`<span class="sm">${esc(e.title)}</span>`:""}
-        <span class="muted sm" style="margin-left:auto;white-space:nowrap">${e.note?esc(e.note):""} ${ago((d.now||dv.seen)-e.t)}</span>
-      </div>`;
-    }).join("");
-    return `<div class="live-dev">
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span class="badge" style="background:${kindColor}18;color:${kindColor}">${esc(dv.label)}</span>
-        <span class="muted sm">${esc(dv.ip)} · ${dv.reqs} 请求${errBadge} · 最近 ${ago(dv.ago)}</span>
-      </div>
-      ${sessHtml}
-      <div class="live-rows">${rows}</div>
-      <details class="muted sm"><summary style="cursor:pointer">UA</summary><span style="word-break:break-all">${esc(dv.ua)}</span></details>
-    </div>`;
+  const devs=d.devices||[],summary=$("liveSummary");
+  const reqN=devs.reduce((n,dv)=>n+(dv.reqs||0),0),errN=devs.reduce((n,dv)=>n+(dv.errors||0),0);
+  if(summary)summary.innerHTML=`<span><strong>${devs.length} 台设备</strong> · <strong>${reqN} 次请求</strong></span><span>最近 30 分钟 · <strong>${errN} 次错误</strong></span>`;
+  if(!devs.length){
+    $("liveDevices").innerHTML='<div class="now-playing"><div class="now-label">最近 30 分钟</div><h3 class="now-title">暂无播放活动</h3><div class="now-meta">在电视、手机或网页播放一部影片后，这里会显示实时链路</div></div>';
+    renderDiagnosis(devs);return;
+  }
+  const focus=devs.find(dv=>dv.session)||devs[0],sess=focus.session||null;
+  const latest=(focus.events||[])[0]||{},stage=(sess&&sess.stage)||latest.stage||"play";
+  const title=(sess&&sess.title)||latest.title||"在线播放",latestStatus=latest.status||"—";
+  const stages=[["library","媒体库"],["detail","详情"],["streams","线路"],["play","起播"],["seg","分片"]];
+  const stageIndex=st=>["seg","media","hls","direct"].includes(st)?4:(st==="play"?3:(st==="streams"?2:(["detail","season","episode","favorite","history"].includes(st)?1:0)));
+  const current=stageIndex(stage);
+  const chain=stages.map(([key,label],i)=>`<div class="chain-step ${i<current?"done":(i===current?"current":"")}"><span class="chain-dot"></span>${label}</div>`).join("");
+  const statusClass=Number(latestStatus)>=400?"bad":"ok";
+  const nowHtml=`<div class="now-playing"><div class="now-top"><div><div class="now-label">${sess?"当前播放":"最近活动"}</div><h3 class="now-title">${esc(title)}</h3>
+    <div class="now-meta">${esc(focus.label||focus.kind||"设备")} · ${liveOrigin(latest.origin||"local")} · ${LIVE_STAGE[stage]||stage}${sess&&sess.error?" · 播放异常":""}</div></div>
+    <div class="response"><strong class="status-code ${statusClass}">${esc(latestStatus)}</strong><span>最近响应</span></div></div>
+    <div class="playback-chain" aria-label="当前播放链路">${chain}</div></div>`;
+  const events=devs.flatMap(dv=>(dv.events||[]).map(e=>({...e,device:dv.label||dv.kind||"设备"})))
+    .sort((a,b)=>(b.t||0)-(a.t||0)).slice(0,6);
+  const rows=events.map(e=>{
+    const bad=Number(e.status)>=400;
+    return `<tr><td class="status-code ${bad?"bad":"ok"}">${esc(e.status||"—")}</td><td>${liveOrigin(e.origin)}</td><td>${LIVE_STAGE[e.stage]||esc(e.stage||"—")}</td>
+      <td class="content-cell">${esc(e.title||"在线播放")}<span class="event-device">${esc(e.device)}</span></td><td>${ago(LIVE_NOW-(e.t||LIVE_NOW))}</td></tr>`;
   }).join("");
+  const table=`<table class="activity-table" aria-label="最近播放请求"><thead><tr><th>状态</th><th>来源</th><th>环节</th><th>内容</th><th>时间</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">暂无请求记录</td></tr>'}</tbody></table>`;
+  const details=devs.map(dv=>`<div class="device-detail"><strong>${esc(dv.label||dv.kind||"设备")}</strong> · ${esc(dv.ip||"未知地址")} · ${dv.reqs||0} 次请求 · ${dv.errors||0} 次错误<div class="ua-detail">${esc(dv.ua||"未知 UA")}</div></div>`).join("");
+  $("liveDevices").innerHTML=nowHtml+table+`<details class="device-details"><summary>设备与 UA 详情</summary>${details}</details>`;
   renderDiagnosis(devs);
 }
 
@@ -1110,14 +1177,13 @@ function renderDiagnosis(devs){
   const box=$("liveDiagnosis");if(!box)return;
   const findings=devs.map(diagnoseDevice).filter(Boolean);
   if(!findings.length){box.innerHTML="";return;}
-  const cls={warn:"amber",src:"",err:""};
   box.innerHTML=findings.slice(0,3).map(f=>{
-    const color=f.severity==="err"?"var(--err)":(f.severity==="src"?"#2563eb":"#b45309");
-    return `<div class="diag" style="border-left:3px solid ${color}">
+    const color=f.severity==="err"?"var(--err)":(f.severity==="src"?"var(--accent)":"var(--warn)");
+    return `<div class="diag" style="border-left:2px solid ${color}">
       <div><b style="color:${color}">${esc(f.dv.label)}</b> · ${esc(f.stage)} · ${f.count} 次错误
         ${f.dv.session&&f.dv.session.title?(" · "+esc(f.dv.session.title)):""}</div>
-      <div class="sm" style="margin-top:2px"><b>归因：</b>${esc(f.cause)}</div>
-      <div class="sm muted" style="margin-top:2px"><b>建议：</b>${esc(f.fix)}</div>
+      <div class="sm" style="margin-top:4px"><b>归因：</b>${esc(f.cause)}</div>
+      <div class="sm muted" style="margin-top:4px"><b>建议：</b>${esc(f.fix)}</div>
     </div>`;
   }).join("");
 }
@@ -1153,14 +1219,17 @@ function renderOverview(){
   const c=STATUS.charts&&STATUS.charts.counts||{};
   const hotN=(c.movie||0)+(c.tv||0)+(c.anime||0)+(c.variety||0);
   $("ovSrcN").textContent=CFG.sources.filter(s=>s.enabled).length;
+  $("ovSrcMeta").textContent=`共 ${CFG.sources.length} 个已配置`;
   $("ovCacheN").textContent=STATUS.cached_titles||0;
   $("ovHotN").textContent=hotN;
+  $("ovHotBreakdown").textContent=`电影 ${c.movie||0} · 剧集 ${c.tv||0} · 动漫 ${c.anime||0} · 综艺 ${c.variety||0}`;
   const cats=(STATUS.catalog&&STATUS.catalog.categories)||{};
   $("ovCatN").textContent=Object.values(cats).filter(x=>x.routes>0).length+"/4";
-  $("ovHotMeta").textContent=(STATUS.charts&&STATUS.charts.refreshing?"正在刷新…":"最近刷新："+fmtTs(STATUS.charts&&STATUS.charts.updated_at))
-    +` · 电影${c.movie||0}/剧${c.tv||0}/动漫${c.anime||0}/综艺${c.variety||0}`
+  $("ovHotMeta").textContent=(STATUS.charts&&STATUS.charts.refreshing?"正在刷新榜单":"榜单最近刷新："+fmtTs(STATUS.charts&&STATUS.charts.updated_at))
+    +` · 数据源 ${(STATUS.charts&&STATUS.charts.provider_ok)||0}/${(STATUS.charts&&STATUS.charts.provider_total)||0}`
     +(STATUS.charts&&STATUS.charts.last_error?(" · "+STATUS.charts.last_error):"");
 }
+
 /* ---------- 虚拟媒体库 ---------- */
 let LIBS=[];
 let LIBMETA={placement:"front",order:[],anchor:""};
@@ -1177,7 +1246,7 @@ function catKeyOf(title){
   if(/动漫|番/.test(title))return "anime"; if(/综艺/.test(title))return "variety"; return "";
 }
 function libCardHtml(L,ic){
-  return `<div class="lib" data-g="${L.guid}"><div class="ic">${ic}</div>
+  return `<div class="lib" data-g="${L.guid}"><div class="ic">${icon(ic)}</div>
     <div style="flex:1;min-width:0"><div class="t">${esc(L.title)}</div>
       <div class="c">${L.group==="hot"?(L.count+" 条"):(L.count?("路由 "+L.count):"建库中…")}</div></div>
     <label class="pin" title="在飞牛影视媒体库列表中置顶">
@@ -1199,13 +1268,13 @@ function orderedManageLibs(){
 function renderLibManage(){
   const box=$("libManage"); if(!box)return;
   const arr=orderedManageLibs();
-  const icon=L=>({chart:"🏆",catalog:"🌐",standalone:"📡","guard-native":"🛡",guard:"🛡",xlib:"☁️",t4:"🧩"}[L.kind]||"📁");
+  const kindIcon=L=>({chart:"chart",catalog:"globe",standalone:"source","guard-native":"folder",guard:"folder",xlib:"cloud",t4:"puzzle"}[L.kind]||"folder");
   box.innerHTML=arr.map((L,i)=>`
     <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--line);border-radius:8px">
-      <span style="width:20px;text-align:center">${icon(L)}</span>
+      <span class="ic">${icon(kindIcon(L))}</span>
       <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(L.title)}</span>
-      <button class="small" style="padding:2px 8px" ${i===0?"disabled":""} onclick="moveLib('${L.key}',-1)">↑</button>
-      <button class="small" style="padding:2px 8px" ${i===arr.length-1?"disabled":""} onclick="moveLib('${L.key}',1)">↓</button>
+      <button class="small" style="padding:2px 8px" ${i===0?"disabled":""} onclick="moveLib('${L.key}',-1)">上移</button>
+      <button class="small" style="padding:2px 8px" ${i===arr.length-1?"disabled":""} onclick="moveLib('${L.key}',1)">下移</button>
       <label style="margin:0;font-size:12px;display:inline-flex;align-items:center;gap:4px" title="在飞牛影视中显示">
         <input type="checkbox" ${!L.hidden?"checked":""} onchange="toggleLibVisible('${L.key}',this)"/>显示</label>
     </div>`).join("");
@@ -1276,7 +1345,7 @@ function renderAcl(){
       </div>
       <div data-acl-libs="${u.guid}" ${configured?"":"style='opacity:.5'"}>
         <label style="display:inline-flex;align-items:center;gap:4px;margin:2px 10px 2px 0;font-size:12px">
-          <input type="checkbox" data-k="__online__" ${onlineOn?"checked":""} ${configured?"":"disabled"}/>🔍 在线搜索/片源</label>
+          <input type="checkbox" data-k="__online__" ${onlineOn?"checked":""} ${configured?"":"disabled"}/>在线搜索/片源</label>
         ${checks}
       </div>
       <div class="btn-row" style="margin-top:6px">
@@ -1310,20 +1379,20 @@ function renderLibrary(){
   if($("catEnabled"))$("catEnabled").checked=CFG.catalog_library_enabled!==false;
   if($("t4Enabled"))$("t4Enabled").checked=CFG.t4_library_enabled!==false;
   const t4=LIBS.find(x=>x.kind==="t4");
-  if($("t4Libs"))$("t4Libs").innerHTML=t4?`<div class="lib"><div class="ic">🧩</div><div><div class="t">${esc(t4.title)}</div><div class="c">${t4.count||0} 个插件</div></div></div>`:'<div class="hint">未配置 T4 源</div>';
+  if($("t4Libs"))$("t4Libs").innerHTML=t4?`<div class="lib"><div class="ic">${icon("puzzle")}</div><div><div class="t">${esc(t4.title)}</div><div class="c">${t4.count||0} 个插件</div></div></div>`:'<div class="hint">未配置 T4 源</div>';
   $("hotInterval").value=Math.round((CFG.hot_refresh_interval||21600)/3600);
   const c=STATUS.charts&&STATUS.charts.counts||{};
   const cats=(STATUS.catalog&&STATUS.catalog.categories)||{};
-  const hotIc={movie:"🎬",tv:"📺",anime:"🌸",variety:"🎤"};
+  const hotIc={movie:"movie",tv:"tv",anime:"anime",variety:"variety"};
   if(LIBS.length){
-    $("hotLibs").innerHTML=LIBS.filter(x=>x.group==="hot").map(L=>libCardHtml(L,hotIc[catKeyOf(L.title)]||"🔥")).join("");
-    $("catLibs").innerHTML=LIBS.filter(x=>x.group==="catalog").map(L=>libCardHtml(L,"🌐")).join("");
+    $("hotLibs").innerHTML=LIBS.filter(x=>x.group==="hot").map(L=>libCardHtml(L,hotIc[catKeyOf(L.title)]||"chart")).join("");
+    $("catLibs").innerHTML=LIBS.filter(x=>x.group==="catalog").map(L=>libCardHtml(L,"globe")).join("");
   }else{
-    $("hotLibs").innerHTML=[["movie","🎬","热门电影",c.movie||0],["tv","📺","热门剧集",c.tv||0],["anime","🌸","动漫新番",c.anime||0],["variety","🎤","热门综艺",c.variety||0]]
-        .map(([k,ic,t,n])=>`<div class="lib"><div class="ic">${ic}</div><div><div class="t">${t}</div><div class="c">${n} 条</div></div></div>`).join("");
-    $("catLibs").innerHTML=[["movie","🌐海量电影"],["tv","🌐海量剧集"],["anime","🌐海量动漫"],["variety","🌐海量综艺"]]
+    $("hotLibs").innerHTML=[["movie","movie","热门电影",c.movie||0],["tv","tv","热门剧集",c.tv||0],["anime","anime","动漫新番",c.anime||0],["variety","variety","热门综艺",c.variety||0]]
+        .map(([k,ic,t,n])=>`<div class="lib"><div class="ic">${icon(ic)}</div><div><div class="t">${t}</div><div class="c">${n} 条</div></div></div>`).join("");
+    $("catLibs").innerHTML=[["movie","海量电影"],["tv","海量剧集"],["anime","海量动漫"],["variety","海量综艺"]]
       .map(([k,t])=>{const n=(cats[k]||{}).routes||0;
-        return `<div class="lib"><div class="ic">🌐</div><div><div class="t">${t}</div><div class="c">${n?("路由 "+n):"建库中…"}</div></div></div>`;}).join("");
+        return `<div class="lib"><div class="ic">${icon("globe")}</div><div><div class="t">${t}</div><div class="c">${n?("路由 "+n):"建库中…"}</div></div></div>`;}).join("");
   }
   $("hotStatus").textContent=(STATUS.charts&&STATUS.charts.refreshing?"正在后台刷新榜单…":"最近刷新："+fmtTs(STATUS.charts&&STATUS.charts.updated_at))
     +` · 数据源 ${(STATUS.charts&&STATUS.charts.provider_ok)||0}/${(STATUS.charts&&STATUS.charts.provider_total)||0}`
@@ -1372,7 +1441,7 @@ function renderQuality(){
         <div class="meta">${esc(s.api)}</div></td>
       <td><input type="number" class="prio-input" min="-100" max="100" data-prio
         value="${custom!=null?custom:''}" placeholder="${eff}"/></td>
-      <td style="min-width:120px"><div class="prio-bar" style="width:${w}%"></div>
+      <td style="min-width:120px"><div class="prio-track"><div class="prio-bar" style="width:${w}%"></div></div>
         <span class="muted sm">${custom!=null?('自定义 '+custom):'默认 '+eff}</span></td></tr>`;
   }).join("");
   $("prioRows").innerHTML=rows||'<tr><td colspan="3" class="muted">暂无源</td></tr>';
@@ -1432,8 +1501,8 @@ function renderSources(){
       </details></td>
       <td class="st wait" data-st>${androidDep?"不可用":"未测"}</td>
       <td><button class="small" data-test ${androidDep?"disabled":""}>测试</button></td>
-      <td><button class="small ghost" data-edit title="编辑名称/订阅链接">✎</button></td>
-      <td><button class="del" data-del title="删除">✕</button></td>
+      <td><button class="small ghost" data-edit title="编辑名称/订阅链接">${icon("edit")}</button></td>
+      <td><button class="del" data-del title="删除">${icon("trash")}</button></td>
     </tr>`;
   }).join("")+hiddenNote;
   $$("#srcRows tr[data-id]").forEach(tr=>{
@@ -1702,13 +1771,13 @@ function renderSubResult(d){
     +(androidN?'<span class="muted" style="font-weight:400">另有 '+androidN+' 个安卓依赖源未导入。</span>':'')+'</div>';
   // 苹果CMS
   if(cms.candidates||cms.added||cms.duplicate){
-    h+='<div class="subgrp"><div class="subgrp-t">🍿 苹果CMS影视站　新增 '+cmsOk+' · 已存在 '+(cms.duplicate||0)+'</div>';
+    h+='<div class="subgrp"><div class="subgrp-t">苹果CMS影视站　新增 '+cmsOk+' · 已存在 '+(cms.duplicate||0)+'</div>';
     (cms.added_names||[]).forEach(n=>{h+='<div class="subrow ok"><span>＋ '+esc(n)+'</span><span class="tag">已启用</span></div>';});
     h+='</div>';
   }
   // T4 选片源
   if(t4.candidates||t4.added||t4.duplicate){
-    h+='<div class="subgrp"><div class="subgrp-t">🧩 T4 选片源　新增 '+t4Ok+' · 已存在 '+(t4.duplicate||0)+'</div>';
+    h+='<div class="subgrp"><div class="subgrp-t">T4 选片源　新增 '+t4Ok+' · 已存在 '+(t4.duplicate||0)+'</div>';
     (t4.added_names||[]).forEach(n=>{h+='<div class="subrow ok"><span>＋ '+esc(n)+'</span><span class="tag">已启用</span></div>';});
     h+='</div>';
   }
@@ -1716,7 +1785,7 @@ function renderSubResult(d){
   if(dr && dr.skipped_build){
     h+='<div class="hint" style="margin:10px 0">订阅中含远程 JS 爬虫，但当前为公开构建（无 Node 运行时），已跳过。</div>';
   } else if(dr && (dr.items||[]).length){
-    h+='<div class="subgrp"><div class="subgrp-t">🧩 远程 JS 爬虫（DRPY）　就绪并启用 '+drOk+' / '+dr.items.length+'</div>';
+    h+='<div class="subgrp"><div class="subgrp-t">远程 JS 爬虫（DRPY）　就绪并启用 '+drOk+' / '+dr.items.length+'</div>';
     dr.items.forEach(it=>{
       const state=it.enabled?'<span class="tag">已启用</span>'
         :'<span class="tag warn">脚本未就绪</span>';
@@ -1725,11 +1794,11 @@ function renderSubResult(d){
     h+='<div class="muted sm" style="padding:4px 2px">脚本若 401/下载失败，可在下方「已导入的远程 JS 爬虫」处重试。</div></div>';
   }
   if(dr && dr.error){h+='<div class="hint" style="color:var(--danger)">远程JS导入失败：'+esc(dr.error)+'</div>';}
-  h+=renderAndroidSubGroup('🛡','Guard 加固源',d.guard);
-  h+=renderAndroidSubGroup('🕷','普通 csp_ 爬虫',d.csp);
+  h+=renderAndroidSubGroup('','Guard 加固源',d.guard);
+  h+=renderAndroidSubGroup('','普通 csp_ 爬虫',d.csp);
   // 跳过
   if(skips.length){
-    h+='<details class="subgrp" style="margin-top:8px"><summary class="subgrp-t" style="cursor:pointer">⏭️ 跳过 '+ (d.skipped||skips.length) +' 个（网盘/直播/无法识别/探测失败）</summary>';
+    h+='<details class="subgrp" style="margin-top:8px"><summary class="subgrp-t" style="cursor:pointer">跳过 '+ (d.skipped||skips.length) +' 个（网盘/直播/无法识别/探测失败）</summary>';
     const by={};skips.forEach(s=>{const r=s.reason||"其他";(by[r]=by[r]||[]).push(s.name);});
     Object.keys(by).forEach(r=>{h+='<div class="subrow muted"><span>'+esc(by[r].slice(0,10).join("、"))+(by[r].length>10?" 等":"")+'</span><span class="tag">'+esc(r)+'</span></div>';});
     h+='</details>';
@@ -1912,7 +1981,7 @@ function initSrcProxy(){
   msg.style.color="";renderSrcProxyMode();
 }
 const SRC_MODE_HINT={
-  auto:"🪄 智能：默认直连；只有直连失败的资源站自动切代理，其它站保持直连。",
+  auto:"智能：默认直连；只有直连失败的资源站自动切代理，其它站保持直连。",
   on:"始终走代理：所有资源站搜索/分类/测速/解析都经代理，视频流仍直连。",
   off:"全部直连：忽略已配置的代理地址。"
 };
@@ -1990,7 +2059,7 @@ async function init(){
   }catch(e){console.error("search form",e);}
   safe(renderSources);safe(initSrcProxy);safe(loadCacheStatus);
   try{
-    const gs=$("globalState");gs.textContent="接管运行中 · 已缓存 "+STATUS.cached_titles;gs.className="dot ok";
+    const gs=$("globalState");gs.textContent="服务运行正常";gs.className="dot ok";if($("globalCache"))$("globalCache").textContent="统一无安卓版 · 已缓存 "+STATUS.cached_titles+" 条";
     const ed=$("aboutEdition");if(ed)ed.textContent="统一无安卓版 · 在飞牛原生搜索与媒体库中注入在线影视";
   }catch(e){console.error("status bar",e);}
   safe(loadOnline);
