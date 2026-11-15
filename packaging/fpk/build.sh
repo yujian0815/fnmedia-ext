@@ -43,6 +43,8 @@ rsync -a --delete \
   --exclude='/proxy/assets/spiders/jars.json' \
   --exclude='/proxy/assets/spiders/spider_sites.json' \
   --exclude='/proxy/assets/spiders/vendor/' \
+  --exclude='/proxy/assets/guard-engine/' \
+  --exclude='/jar/' \
   --exclude='/FORUM_POST.md' \
   --exclude='/FORUM_POST_CHANGELOG.md' \
   --exclude='/FORUM_RELEASE_*.md' \
