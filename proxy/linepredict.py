@@ -117,6 +117,8 @@ def ep_key(og: str, index: int) -> str:
 # 切到同片更快的线。只统计实际播放（seg 端点）产生的样本，TTL 很短（播放会话级）。
 # key = "og|index|line" -> (最近时间戳, 最近若干分片耗时秒的列表)
 _SEG: "OrderedDict[str, tuple[float, list[float]]]" = OrderedDict()
+# 同一 ep+line 的实际播放吞吐样本（B/s），仅用于诊断，不参与自动选线。
+_SEG_RATE: "OrderedDict[str, tuple[float, list[float]]]" = OrderedDict()
 _SEG_LOCK = threading.Lock()
 _SEG_WIN = 6                # 每条线只看最近 6 个分片
 _SEG_TTL = 180.0            # 3 分钟没新样本即丢弃
@@ -136,8 +138,9 @@ def _seg_key(og: str, index: int, line: str) -> str:
     return f"{og}|{int(index or 0)}|{line}"
 
 
-def record_seg(og: str, index: int, line: str, seconds: float) -> None:
-    """记录一次实际播放分片的完整下载耗时（秒）。"""
+def record_seg(og: str, index: int, line: str, seconds: float,
+               nbytes: int = 0) -> None:
+    """记录实际播放分片耗时与字节数；吞吐仅供诊断，不改变选线。"""
     if not og or not line or seconds is None or seconds < 0:
         return
     key = _seg_key(og, index, line)
@@ -150,6 +153,14 @@ def record_seg(og: str, index: int, line: str, seconds: float) -> None:
         _SEG.move_to_end(key)
         while len(_SEG) > _SEG_MAX:
             _SEG.popitem(last=False)
+        if nbytes > 0 and seconds > 0:
+            rate = float(nbytes) / float(seconds)
+            old_rate = _SEG_RATE.get(key)
+            rates = (old_rate[1] if old_rate else []) + [rate]
+            _SEG_RATE[key] = (now, rates[-_SEG_WIN:])
+            _SEG_RATE.move_to_end(key)
+            while len(_SEG_RATE) > _SEG_MAX:
+                _SEG_RATE.popitem(last=False)
 
 
 def _median(v: list[float]) -> float:
@@ -159,6 +170,20 @@ def _median(v: list[float]) -> float:
         return 0.0
     mid = n // 2
     return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2
+
+
+def throughput(og: str, index: int, line: str) -> float | None:
+    """返回该集该线路最近实际播放吞吐中位数（B/s）；无新鲜样本返回 None。"""
+    if not og or not line:
+        return None
+    key = _seg_key(og, index, line)
+    now = time.time()
+    with _SEG_LOCK:
+        rec = _SEG_RATE.get(key)
+        if not rec or now - rec[0] > _SEG_TTL or not rec[1]:
+            _SEG_RATE.pop(key, None)
+            return None
+        return _median(rec[1])
 
 
 def pick_faster_line(og: str, index: int, cur_line: str) -> str | None:
@@ -205,6 +230,7 @@ def pick_faster_line(og: str, index: int, cur_line: str) -> str | None:
 def reset_seg_timing() -> None:
     with _SEG_LOCK:
         _SEG.clear()
+        _SEG_RATE.clear()
         _LAST_SWITCH.clear()
 
 

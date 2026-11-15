@@ -7,6 +7,8 @@ After=trim-media.service
 Type=simple
 User=root
 WorkingDirectory=@ROOT@/proxy
+# 开机时数据卷/venv 可能尚未挂载：最多等 120s，避免 203/EXEC。
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do [ -x @ROOT@/.venv/bin/python ] && exit 0; sleep 2; done; exit 1'
 ExecStart=@ROOT@/.venv/bin/python supervise.py
 KillMode=mixed
 TimeoutStopSec=25

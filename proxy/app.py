@@ -1461,6 +1461,39 @@ def _safe_response_headers(src, drop: "set[str] | None" = None) -> "dict[str, st
     return out
 
 
+async def ext_get_stream_retry(req: Request, url: str, headers: dict | None = None,
+                               *, tries: int = 3, timeout: float | None = 20.0):
+    """与 ext_get_retry 相同的退避/状态语义，但不预读响应体。
+
+    仅供普通 HLS 分片做真实边下边传；调用方必须负责关闭响应。需要 AES 解密、
+    PNG 剥壳、网盘 Cookie 或非 identity 编码时，仍可 await aread() 后走整段路径。
+    """
+    client = ext_client(req)
+    last_exc: Exception | None = None
+    r = None
+    for attempt in range(tries):
+        try:
+            request = client.build_request("GET", url, headers=headers or {},
+                                           timeout=timeout)
+            r = await client.send(request, stream=True)
+            if r.status_code not in _RETRY_STATUS or attempt == tries - 1:
+                return r
+            await r.aclose()
+        except _RETRIABLE_EXC as exc:
+            last_exc = exc
+            if r is not None:
+                try:
+                    await r.aclose()
+                except Exception:
+                    pass
+                r = None
+        if attempt < tries - 1:
+            await asyncio.sleep(0.25 * (2 ** attempt))
+    if last_exc is not None:
+        raise last_exc
+    return r  # type: ignore[return-value]
+
+
 async def forward_upstream(request: Request) -> Response:
     """原样透传官方后端（走 unix socket）。"""
     # 实时诊断：标记本请求接触过官方后端
@@ -7635,23 +7668,35 @@ async def hls_seg(mg: str, request: Request):
         fwd.pop("Range", None)
     if "range" in request.headers and request.query_params.get("dec") != "1":
         fwd["Range"] = request.headers["range"]
+    is_decrypt = request.query_params.get("dec") == "1"
+    _need_pan_cookie = _host.endswith("drive.quark.cn") or _host.endswith(".quark.cn") \
+        or _host.endswith(".uc.cn")
+    _stream_transport = not is_decrypt and not _need_pan_cookie
     try:
-        # 分片在播放中途持续拉取，对瞬时抖动必须重试，否则单次失败播放器直接报错
-        r = await ext_get_retry(request, src_url, fwd, tries=4, timeout=30.0)
+        # 普通分片从 TCP 响应开始就是流式，不能再经 client.get() 预读整段。
+        # AES/网盘 Cookie 路径维持原整段重试语义。
+        if _stream_transport:
+            r = await ext_get_stream_retry(request, src_url, fwd, tries=4, timeout=30.0)
+        else:
+            r = await ext_get_retry(request, src_url, fwd, tries=4, timeout=30.0)
     except Exception as exc:
         _log.warning("seg fetch fail %s %s", type(exc).__name__,
                      urllib.parse.urlsplit(src_url).netloc)
         return Response(f"seg fail {type(exc).__name__}", status_code=502)
 
-    # 流式快路径：普通、无需服务端处理的分片【边收边发】，首字节不再等整段下完，
-    # 对慢 CDN（分片 1~10s）能显著降低播放器缓冲等待、减少“放一会卡住”。
-    # 仍需整段处理的情形不走这里：AES 解密(dec=1)、夸克/UC 网盘分片（保证 Cookie
-    # 注入语义统一）。PNG 伪装分片在生成器里读首块嗅探，发现 PNG 头则转缓冲剥壳。
-    is_decrypt = request.query_params.get("dec") == "1"
-    _need_pan_cookie = _host.endswith("drive.quark.cn") or _host.endswith(".quark.cn") \
-        or _host.endswith(".uc.cn")
-    if (not is_decrypt and not _need_pan_cookie
-            and r.status_code in (200, 206) and hasattr(r, "aiter_bytes")):
+    # 流式快路径：普通、无需服务端处理的分片【边收边发】，首字节不再等整段下完。
+    # PNG 伪装分片在生成器里读首块嗅探，发现 PNG 头则转缓冲剥壳；非 identity
+    # 编码先由 httpx 读完整并解码，避免 raw 流与响应头编码语义冲突。
+    _content_encoding = (r.headers.get("content-encoding") or "identity").lower()
+    _can_stream = (_stream_transport and r.status_code in (200, 206)
+                   and _content_encoding in ("", "identity")
+                   and hasattr(r, "aiter_raw"))
+    if not _can_stream and _stream_transport:
+        try:
+            await r.aread()
+        finally:
+            await r.aclose()
+    if _can_stream:
         # 播放中实时分片测速上下文（用于持续慢源静默换线）
         _tog = (picked.get("online_guid", "") if picked else "") or \
             store.online_guid_by_media(mg)
@@ -7663,14 +7708,18 @@ async def hls_seg(mg: str, request: Request):
         async def _stream_seg():
             buf = b""
             sniffed = False
+            nbytes = 0
+            ait = r.aiter_raw(64 * 1024)
             try:
-                async for chunk in r.aiter_bytes(64 * 1024):
+                async for chunk in ait:
+                    nbytes += len(chunk)
                     if not sniffed:
                         sniffed = True
                         buf += chunk
                         if buf[:8] == b"\x89PNG\r\n\x1a\n":
                             # PNG 伪装分片：收齐后剥壳再发，退出流式改缓冲路径
-                            async for rest in r.aiter_bytes(64 * 1024):
+                            async for rest in ait:
+                                nbytes += len(rest)
                                 buf += rest
                             try:
                                 import quality as _q
@@ -7690,11 +7739,12 @@ async def hls_seg(mg: str, request: Request):
                     await r.aclose()
                 except Exception:
                     pass
-                # 记录该线真实分片下载耗时（整段流式完成时刻）
+                # 仅记录实际播放吞吐用于诊断，不参与自动选线或固定线切换。
                 if _tog and _tline and not _is_pansou_line_name(_tline):
                     try:
                         linepredict.record_seg(
-                            _tog, _tidx, _tline, time.monotonic() - _t0)
+                            _tog, _tidx, _tline, time.monotonic() - _t0,
+                            nbytes=nbytes)
                     except Exception:
                         pass
 
