@@ -810,7 +810,7 @@ pre.log{max-height:240px;overflow:auto;background:#211f1b;color:#e9e4dc;border-r
         <div class="card-title">免责声明与版权声明</div>
         <div class="stack sm muted" style="line-height:1.7">
           <div><b>1. 工具性质：</b>本扩展是<b>开源、免费</b>的技术研究与个人媒体库整理工具，仅在你自己的 NAS / 设备上本地运行。它是一个中立的“播放器 / 接口聚合”技术框架，本身<b>不提供、不存储、不上传、不分发、不转码</b>任何影视、图片、字幕、播放地址或资源站点信息，也<b>不内置任何资源数据库、订阅、站点地址或第三方执行脚本</b>。</div>
-          <div><b>2. 不内置源、由你自备：</b>所有在线内容均来自你<b>自行添加</b>的第三方接口、TVBox 订阅或 DRPY JavaScript 规则；是否添加、添加什么、是否启用，完全由你决定并自行承担。Guard/普通 csp_ 等安卓执行源不受支持。请仅使用你拥有合法授权或有权访问的内容与组件。</div>
+          <div><b>2. 源由你选择：</b>所有在线内容均来自你<b>自行添加或主动部署</b>的第三方接口、TVBox 订阅、DRPY JavaScript 规则或红果容器；内置红果仅提供部署入口，点击后才会下载镜像并启用。是否添加、添加什么、是否启用，完全由你决定并自行承担。Guard/普通 csp_ 等安卓执行源不受支持。请仅使用你拥有合法授权或有权访问的内容与组件。</div>
           <div><b>3. 版权归原权利人：</b>第三方接口返回内容的版权归原权利人所有。本项目不依附、不代表任何内容提供方，不对任何第三方内容的合法性、准确性、可用性负责；如涉及版权问题，请联系内容实际提供方处理。</div>
           <div><b>4. 仅供学习交流：</b>本工具仅供学习、研究与个人合法播放自有或已获授权内容使用，<b>不得用于商业用途，不得下载、录制、再传播任何侵权内容</b>。请遵守你所在地的法律法规。</div>
           <div><b>5. 风险与责任：</b>第三方接口可能失效、变更或包含不当内容；使用过程中产生的流量、账号、费用与一切法律责任均由<b>使用者本人</b>承担，与本工具作者无关。请合法、自律使用，并妥善管理设备与访问权限，避免 18 周岁以下人员接触不适宜内容。</div>
@@ -903,7 +903,8 @@ async function switchPage(page){
       }
     });
   }
-  if(page==="sources"){try{await refreshSources();}catch(e){}try{loadHealth();}catch(e){}try{renderQuality();}catch(e){}}
+  if(page==="sources"){try{await refreshSources();}catch(e){}try{loadHealth();}catch(e){}try{renderQuality();}catch(e){}
+  }
   if(page==="data"){try{loadCacheStatus();}catch(e){}try{loadOnline();}catch(e){}}
   if(page==="network"){try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{initSrcProxy();}catch(e){}if($("updProxy"))$("updProxy").value=(CFG&&CFG.update_proxy)||"";}
   if(page==="playback"){try{loadAdfilter();}catch(e){}}
