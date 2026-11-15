@@ -255,15 +255,41 @@ def search_item(b: dict) -> dict:
 
 
 def detail_item(b: dict) -> dict:
+    # TMDB 富化：仅读缓存（命中才用），并后台异步补全，绝不阻塞详情返回。
+    try:
+        import tmdb
+        _tm = tmdb.enrich(b) if tmdb.enabled() else None
+    except Exception:
+        _tm = None
     guid = b["guid"]
     title = _f(b, "title")
     year = _f(b, "year")
-    overview = _f(b, "overview")
+    overview = (_tm.get("overview") if _tm else "") or _f(b, "overview")
     actor = _f(b, "actor")
-    director = _f(b, "director")
+    if _tm and _tm.get("cast"):
+        actor = " / ".join(c.get("name", "") for c in _tm["cast"][:8]
+                           if c.get("name"))
+    director = (_tm.get("director") if _tm else "") or _f(b, "director")
     typ = fnos_type(b)
     nep = _ep_count(b)
-    ov = overview + (f"\n\n主演：{actor}" if actor else "") + (f"\n导演：{director}" if director else "")
+    # 飞牛详情模型的 genres 契约是整型类型 ID，豆瓣/TMDB 给的是名称字符串；
+    # 直接下发会让 iOS/TV 整页 fromJson 失败（HTTP 200 也显示“无数据”）。
+    # 在线虚拟库没有官方类型 ID，模型字段只保留合法整型；名称放简介中展示。
+    _raw_genres = (_tm.get("genres") if _tm else []) or []
+    _genre_ids = [g for g in _raw_genres
+                  if isinstance(g, int) and not isinstance(g, bool)]
+    _genre_names = [str(g).strip() for g in _raw_genres
+                    if isinstance(g, str) and str(g).strip()]
+    _genre_text = " / ".join(_genre_names[:6])
+    ov = overview + (f"\n\n类型：{_genre_text}" if _genre_text else "") + \
+        (f"\n\n主演：{actor}" if actor else "") + \
+        (f"\n导演：{director}" if director else "")
+    _poster_url = (_tm.get("poster") if _tm and _tm.get("poster")
+                   else _f(b, "poster"))
+    _backdrop_url = (_tm.get("backdrop") if _tm and _tm.get("backdrop")
+                     else _f(b, "poster"))
+    _vote = (str(_tm.get("vote_average")) if _tm and _tm.get("vote_average")
+             else (_f(b, "score", "0") or "0"))
     return {
         "guid": guid,
         "imdb_id": "",
@@ -272,16 +298,17 @@ def detail_item(b: dict) -> dict:
         "parent_title": "",
         "title": title,
         "logos": "",
-        "original_title": "",
-        "backdrops": _poster(_f(b, "poster")),
-        "posters": _poster(_f(b, "poster")),
+        "original_title": (_tm.get("original_title") if _tm else "") or "",
+        "backdrops": _poster(_backdrop_url),
+        "posters": _poster(_poster_url),
         "poster_width": 0,
         "poster_height": 0,
-        "vote_average": _f(b, "score", "0") or "0",
-        "genres": [],
+        "vote_average": _vote,
+        "genres": _genre_ids,
         "content_ratings": "",
-        "release_date": year,
-        "runtime": 0,
+        "release_date": (_tm.get("release_date") if _tm and _tm.get("release_date")
+                         else year),
+        "runtime": (_tm.get("runtime") if _tm else 0) or 0,
         "production_countries": [_f(b, "area")] if _f(b, "area") else [],
         "overview": ov,
         "is_favorite": 0,
@@ -547,9 +574,18 @@ def history_item(brief: dict, rec: dict, ep: dict | None = None) -> dict:
         ts = 0
     cover = _poster(_f(brief, "poster"))
     # 飞牛「继续观看/播放历史」按横幅排版，实际取图字段在不同端不一致，
-    # 三个图片字段统一指向 16:9 中心裁切横图（?crop=16x9），保证无论客户端
-    # 读 poster / posters / backdrops 都拿到横幅；竖幅封面仍保留在详情/海报墙。
-    landscape = _backdrop(_f(brief, "poster"))
+    # 三个图片字段统一指向 16:9 横图，保证无论客户端读 poster/posters/backdrops
+    # 都拿到横幅；竖幅封面仍保留在详情/海报墙。
+    # 优先 TMDB 真实 16:9 backdrop（官方图床，快且清晰）；无则源海报中心裁切。
+    try:
+        import tmdb
+        _tm = tmdb.enrich(brief) if tmdb.enabled() else None
+    except Exception:
+        _tm = None
+    if _tm and _tm.get("backdrop"):
+        landscape = _poster(_tm["backdrop"])
+    else:
+        landscape = _backdrop(_f(brief, "poster"))
     return {
         "guid": item_guid,
         "lan": "zh-CN", "imdb_id": "",

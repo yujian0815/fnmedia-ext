@@ -30,6 +30,8 @@ _SNAPSHOT_KEYS = (
     "guid", "online_id", "title", "type_name", "year", "poster", "overview",
     "remarks", "score", "actor", "director", "area", "locator",
     "catalog_cat", "catalog_scope", "catalog_source",
+    # 榜单绑定身份（小 dict）：历史横幅按库识别（TMDB 等）需要库归属
+    "chart", "douban_id",
 )
 # 单条快照（含剧集被播放那一集的线路信息）的软上限，超出则不存 lines（只留元信息）。
 _SNAPSHOT_MAX_BYTES = 64 * 1024

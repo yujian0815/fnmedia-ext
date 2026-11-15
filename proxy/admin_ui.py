@@ -705,6 +705,24 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         </div>
       </div>
 
+      <div class="card" id="tmdbCard">
+        <div class="card-title">🎬 影视元数据（豆瓣 + TMDB）</div>
+        <div class="stack sm">
+          <p class="card-sub">豆瓣移动公开接口提供简介 / 类型 / 评分 / 演员头像与角色（免 Key、通常更快）；TMDB 补充横幅剧照与兜底。仅识别「热门四库」与「海量四库」，单源独立/自定义等其它媒体库暂不识别。后台异步缓存，不阻塞播放。</p>
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+            <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="tmdbEnabled"> 启用元数据富化</label>
+            <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="doubanEnabled"> 豆瓣优先（详情/演员，免 Key）</label>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <input type="text" id="tmdbKey" placeholder="TMDB API Key（32 位）" style="flex:1;min-width:220px;padding:6px 8px;border-radius:6px;border:1px solid var(--border,#d0d7de);background:var(--bg,#fff);color:inherit">
+            <button class="btn primary" id="tmdbSave">保存</button>
+            <button class="btn" id="tmdbTest">测试 TMDB</button>
+            <button class="btn" id="doubanTest">测试豆瓣</button>
+          </div>
+          <div class="hint" id="tmdbStatus">API Key 仅存本机，不入包、不上传。可在 themoviedb.org/settings/api 免费申请。</div>
+        </div>
+      </div>
+
       <div class="card" id="donateCard" style="text-align:center">
         <div class="card-title" style="justify-content:center">☕ 为爱发电 · 欢迎打赏</div>
         <p class="card-sub" style="max-width:560px;margin:0 auto 12px">
@@ -946,6 +964,46 @@ document.addEventListener("DOMContentLoaded",()=>{
     const inp=document.getElementById("updProxy");
     if(inp&&r.config&&r.config.update_proxy)inp.value=r.config.update_proxy;
   }catch(e){}})();
+  // TMDB 设置：回填 + 保存 + 测试
+  (async()=>{try{
+    const r=await jget("/v/api/ext/status");
+    const c=r.config||{};
+    const en=document.getElementById("tmdbEnabled"),k=document.getElementById("tmdbKey");
+    if(en)en.checked=c.tmdb_enabled!==false;
+    const db=document.getElementById("doubanEnabled");
+    if(db)db.checked=c.douban_enabled!==false;
+    if(k&&c.tmdb_api_key)k.value=c.tmdb_api_key;
+  }catch(e){}})();
+  const tmdbSave=document.getElementById("tmdbSave");
+  if(tmdbSave)tmdbSave.addEventListener("click",async()=>{
+    const en=document.getElementById("tmdbEnabled").checked;
+    const db=document.getElementById("doubanEnabled").checked;
+    const k=(document.getElementById("tmdbKey").value||"").trim();
+    if(k && !/^[0-9a-fA-F]{32}$/.test(k)){alert("TMDB API Key 应为 32 位十六进制字符");return;}
+    try{
+      const r=await jpost("/v/api/ext/config",{tmdb_enabled:en,douban_enabled:db,tmdb_api_key:k});
+      if(r&&r.code===0){toast("TMDB 设置已保存");const st=document.getElementById("tmdbStatus");if(st)st.textContent="已保存。富化后台异步生效，详情/历史逐步完善。";}
+      else{alert("保存失败："+((r&&r.msg)||"未知错误"));}
+    }catch(e){alert("保存失败："+e.message);}
+  });
+  const tmdbTest=document.getElementById("tmdbTest");
+  if(tmdbTest)tmdbTest.addEventListener("click",async()=>{
+    const st=document.getElementById("tmdbStatus");
+    if(st)st.textContent="正在测试 TMDB 连接…";
+    try{
+      const r=await jget("/v/api/ext/tmdb/test");
+      if(st)st.textContent=(r&&r.code===0)?"✅ "+(r.msg||"TMDB 连接正常"):"❌ "+((r&&r.msg)||"连接失败");
+    }catch(e){if(st)st.textContent="❌ 测试失败："+e.message;}
+  });
+  const doubanTest=document.getElementById("doubanTest");
+  if(doubanTest)doubanTest.addEventListener("click",async()=>{
+    const st=document.getElementById("tmdbStatus");
+    if(st)st.textContent="正在测试豆瓣连接…";
+    try{
+      const r=await jget("/v/api/ext/douban/test");
+      if(st)st.textContent=(r&&r.code===0)?"✅ "+(r.msg||"豆瓣连接正常"):"❌ "+((r&&r.msg)||"连接失败");
+    }catch(e){if(st)st.textContent="❌ 测试失败："+e.message;}
+  });
 });
 
 /* ---------- 概览 ---------- */

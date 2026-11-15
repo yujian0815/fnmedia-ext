@@ -648,6 +648,33 @@ def _folder_title_hint(guid: str) -> str:
 _FOLDER_FULL_FB: set[str] = set()
 
 
+def _inherit_lib_identity(guid: str, bound: dict) -> None:
+    """冷片按片名搜源绑定时，继承其来源目录的库身份（chart/catalog 标记）。
+
+    搜索聚合出的 brief 本身不带库归属；不继承的话，海量库冷片绑定后就认不出
+    所属媒体库（TMDB 按库识别等会漏掉）。纯本地反查、零网络，只补展示层身份
+    字段，不改 guid/线路/播放链。"""
+    try:
+        meta = chart_cache.get_guid(guid)
+        if meta:
+            bound["chart"] = {"title": meta.get("title", ""),
+                              "cat": meta.get("cat", ""),
+                              "cover": meta.get("cover", ""),
+                              "rating": meta.get("rating", 0)}
+            if meta.get("id"):
+                bound["douban_id"] = str(meta["id"])
+            return
+        cb = catalog.find_brief_by_guid(guid)
+        if cb is None:
+            cb = catalog.identity_of_guid(guid)
+        if cb:
+            for k in ("catalog_cat", "catalog_scope", "catalog_source"):
+                if cb.get(k) is not None:
+                    bound[k] = cb[k]
+    except Exception:
+        pass
+
+
 def _schedule_folder_full_fallback(guid: str, title: str, want_year: str) -> None:
     """快源未命中时后台跑一次全源搜索并挂到该 guid，不阻塞当前请求。"""
     if guid in _FOLDER_FULL_FB or store.get_title_by_guid(guid):
@@ -662,6 +689,7 @@ def _schedule_folder_full_fallback(guid: str, title: str, want_year: str) -> Non
             if pick is not None:
                 bound = dict(pick)
                 bound["guid"] = guid
+                _inherit_lib_identity(guid, bound)
                 store.remember_merged([bound])
         except Exception:
             pass
@@ -719,6 +747,7 @@ def _start_folder_bind(guid: str) -> asyncio.Future:
             if pick is not None:
                 bound = dict(pick)
                 bound["guid"] = guid
+                _inherit_lib_identity(guid, bound)
                 store.remember_merged([bound])
                 schedule_prewarm_title(guid, 0)
                 if not fut.done():
@@ -3270,9 +3299,18 @@ async def item_detail(guid: str, request: Request):
         if bound is not None:
             data = inj.detail_item(bound)
             _apply_marks(data)
-            # 用榜单的优质海报/评分/简介覆盖资源站元数据
+            # 用榜单的优质海报/评分/简介覆盖资源站元数据；若 TMDB 已提供真实
+            # 横版 backdrop，则不再用竖版榜单海报覆盖横幅（海报 posters 仍优先榜单）。
+            _has_tmdb_backdrop = False
+            try:
+                import tmdb
+                _tm0 = tmdb.enrich(bound) if tmdb.enabled() else None
+                _has_tmdb_backdrop = bool(_tm0 and _tm0.get("backdrop"))
+            except Exception:
+                pass
             if meta.get("cover"):
-                for k in ("backdrops", "posters"):
+                for k in (("posters",) if _has_tmdb_backdrop
+                          else ("backdrops", "posters")):
                     if data.get(k):
                         data[k] = inj._poster(meta["cover"])
             if meta.get("rating"):
@@ -4772,9 +4810,96 @@ def vg_for(mg: str) -> str:
 
 @app.post("/v/api/v1/person/list/{guid}")
 async def person_list(guid: str, request: Request):
-    if not store.get_title_by_guid(guid) and not store.get_episode(guid):
+    """在线影片的演职员卡（飞牛独立接口，不是详情 overview 文本）。
+
+    仅热门/海量库读取 TMDB 缓存演员表；未命中先回空列表，enrich 后台补齐后
+    客户端下一次进入详情即显示。自定义/单源库与本地库绝不触发 TMDB 请求。
+    """
+    # 二级线路墙使用复合 guid；演员接口必须归一到原影片 guid 再查库。
+    base_guid = _parse_line_folder_guid(guid)
+    if base_guid is None:
+        _li = _parse_line_item_guid(guid)
+        base_guid = _li[0] if _li else None
+    if base_guid is None:
+        _ls = _parse_line_season_guid(guid)
+        base_guid = _ls[0] if _ls else guid
+    brief = None
+    ep = store.get_episode(base_guid)
+    if ep:
+        brief = store.get_title_by_guid(ep.get("online_guid", ""))
+    if brief is None:
+        brief = store.get_title_by_guid(base_guid)
+    # 榜单未绑定时也可按榜单标题/年份富化，无需先搜到 CMS 播放源。
+    if brief is None and chart_cache.is_chart_guid(base_guid):
+        meta = chart_cache.get_guid(base_guid) or {}
+        brief = {"guid": base_guid, "title": meta.get("title", ""),
+                 "year": meta.get("year", ""),
+                 "type_name": "电影" if meta.get("cat") == "movie" else "电视剧",
+                 "chart": meta}
+    # 海量/自定义目录冷片：仅在本地目录缓存反查；enrich 会按 scope 再过滤。
+    if brief is None:
+        try:
+            brief = catalog.find_brief_by_guid(base_guid)
+        except Exception:
+            brief = None
+    if brief is None:
+        try:
+            brief = catalog.identity_of_guid(base_guid)
+        except Exception:
+            brief = None
+    # store/目录缓存已淘汰时，历史快照仍保留 catalog_scope/chart 身份，可继续
+    # 为热门/海量历史片提供演员表；自定义库仍由 enrich 白名单排除。
+    if brief is None:
+        try:
+            brief = history.get_snapshot(base_guid)
+        except Exception:
+            brief = None
+    if not brief:
+        if base_guid != guid:
+            # 服务重启/冷片首次进入时，person/list 可能先于详情绑定到达；
+            # 复用现有非阻塞绑定，下一次进入或轮询即可拿到库身份与演员。
+            try:
+                prefetch_folder_binding(base_guid)
+            except Exception:
+                pass
+            return JSONResponse({"code": 0, "msg": "", "data": {
+                "total": 0, "list": []}})
         return await forward_upstream(request)
-    return JSONResponse({"code": 0, "msg": "", "data": {"total": 0, "list": []}})
+    # 旧绑定缺库身份时纯本地补齐，保证历史热门/海量片仍在识别范围内。
+    try:
+        brief = dict(brief)
+        if not (brief.get("chart") or brief.get("catalog_scope")):
+            _inherit_lib_identity(base_guid, brief)
+    except Exception:
+        pass
+    try:
+        import tmdb
+        meta = tmdb.enrich(brief) if tmdb.enabled() else None
+    except Exception:
+        meta = None
+    people = []
+    for idx, c in enumerate((meta or {}).get("cast") or []):
+        name = str(c.get("name") or "").strip()
+        if not name:
+            continue
+        pid = c.get("id")
+        _source = str(c.get("source") or "tmdb")
+        person_guid = f"{_source}-person-{pid}" if pid else \
+            f"{_source}-person-" + hashlib.md5(name.encode("utf-8")).hexdigest()
+        profile = inj._poster(c.get("profile") or "")
+        people.append({
+            "guid": person_guid,
+            "person_guid": person_guid,
+            "name": name,
+            "original_name": c.get("original_name") or name,
+            "profile_path": profile,
+            "role": c.get("character") or "",
+            "job": "Actor",
+            "order": idx,
+            "is_favorite": 0,
+        })
+    return JSONResponse({"code": 0, "msg": "", "data": {
+        "total": len(people), "list": people}})
 
 
 @app.post("/v/api/v1/play/record")
@@ -7730,17 +7855,41 @@ async def _poster_fetch(request: Request, url: str, headers: dict,
                         host: str):
     """海报回源带一次短重试：直连出现连接级异常时，用全新短生命周期客户端再取一次，
     避免偶发 ConnectTimeout/ReadError 直接把整面海报墙变成占位图。正常 HTTP 错误不重试。"""
+    r = None
     try:
-        return await _poster_http(request).get(url, headers=headers)
+        r = await _poster_http(request).get(url, headers=headers)
+        if r.status_code == 200:
+            return r
+        if host != "image.tmdb.org":
+            return r
     except _POSTER_NETWORK_ERRORS as first:
         _log.info("poster retry host=%s err=%s", host, type(first).__name__)
         try:
             # netutil 复用既有“直连失败按主机自动切代理”能力；未配置代理时
             # 也相当于一条全新直连，能避开失效连接/连接池中的异常连接。
             async with netutil.async_client(timeout=12.0) as cli:
-                return await cli.get(url, headers=headers)
+                r = await cli.get(url, headers=headers)
+                if r.status_code == 200 or host != "image.tmdb.org":
+                    return r
         except Exception:
-            raise first
+            if host != "image.tmdb.org":
+                raise first
+    # TMDB 官方图床直连被 DNS/路由阻断时，复用用户已配置的持久代理；
+    # 目标仍是 image.tmdb.org 原始 URL，不改图床、不用第三方镜像。
+    if host == "image.tmdb.org":
+        try:
+            px = str(config.get().get("source_proxy")
+                     or config.get().get("update_proxy") or "").strip()
+            if px:
+                async with httpx.AsyncClient(proxy=px, trust_env=False,
+                                             timeout=12.0) as cli:
+                    return await cli.get(url, headers=headers)
+        except Exception:
+            pass
+    # 非 TMDB 图床保持原回退语义；TMDB 所有通道失败时让调用方回占位。
+    if r is not None:
+        return r
+    raise RuntimeError("poster fetch failed")
 
 
 async def _serve_online_poster(tok_path: str, request: Request) -> Response:
@@ -8044,6 +8193,38 @@ async def ext_update_channel(request: Request):
     return await updater.check(force=True)
 
 
+@app.get("/v/api/ext/tmdb/test")
+async def ext_tmdb_test(request: Request):
+    """测试 TMDB 连接与 key 有效性（官方 API 搜索一部已知影片）。"""
+    import tmdb
+    if not tmdb._key():
+        return {"code": 1, "msg": "未配置 TMDB API Key"}
+    res = await asyncio.to_thread(tmdb._get, "/search/movie",
+                                  {"query": "Inception"})
+    if res and res.get("results"):
+        return {"code": 0, "msg": "TMDB 连接正常",
+                "enabled": tmdb.enabled()}
+    return {"code": 1, "msg": "TMDB 连接失败或 Key 无效"}
+
+
+@app.get("/v/api/ext/douban/test")
+async def ext_douban_test(request: Request):
+    """测试豆瓣移动公开接口（免 Key，仅官方 subject_suggest）。"""
+    import douban
+    import urllib.parse
+
+    def _test():
+        with douban._new_client() as cli:
+            return douban._get(
+                cli, douban._SUGGEST + "?" + urllib.parse.urlencode(
+                    {"q": "Inception"}), "https://movie.douban.com/")
+    rows = await asyncio.to_thread(_test)
+    if isinstance(rows, list) and rows:
+        return {"code": 0, "msg": "豆瓣连接正常（免 Key）",
+                "enabled": douban.enabled()}
+    return {"code": 1, "msg": "豆瓣连接失败"}
+
+
 @app.post("/v/api/ext/update/now")
 async def ext_update_now(request: Request):
     # 仅管理台显式触发；下载校验后交给 fnOS 应用中心正规升级（会短暂重启服务）。
@@ -8283,6 +8464,7 @@ async def ext_set_config(request: Request):
         "pan_cache_cleanup_enabled", "pan_cache_ttl_hours",
         "pan_cache_cleanup_interval_hours",
         "update_proxy", "update_channel",
+        "tmdb_enabled", "tmdb_api_key", "tmdb_libs", "douban_enabled",
     }
     patch = {k: v for k, v in body.items() if k in allowed}
     if "prewarm_mode" in patch:
@@ -8317,6 +8499,28 @@ async def ext_set_config(request: Request):
     if "update_proxy" in patch:
         pu = str(patch["update_proxy"]).strip()[:300]
         patch["update_proxy"] = pu if re.match(r"^(https?|socks5h?)://", pu) else ""
+    if "update_channel" in patch:
+        ch = str(patch["update_channel"]).strip().lower()
+        if ch in ("stable", "beta"):
+            patch["update_channel"] = ch
+        else:
+            patch.pop("update_channel", None)
+    if "tmdb_enabled" in patch:
+        patch["tmdb_enabled"] = bool(patch["tmdb_enabled"])
+    if "douban_enabled" in patch:
+        patch["douban_enabled"] = bool(patch["douban_enabled"])
+    if "tmdb_api_key" in patch:
+        tk = str(patch["tmdb_api_key"]).strip()[:64]
+        patch["tmdb_api_key"] = tk if re.match(r"^[0-9a-fA-F]{32}$", tk) or tk == "" else ""
+    if "tmdb_libs" in patch:
+        # TMDB 识别库白名单：字符串数组（库类型或具体库键）；非法输入忽略该项。
+        # 空数组合法=所有库都不识别；后期管理页按库开关写这里。
+        vl = patch["tmdb_libs"]
+        if isinstance(vl, list):
+            patch["tmdb_libs"] = [str(x).strip()[:80] for x in vl
+                                  if isinstance(x, str) and str(x).strip()][:200]
+        else:
+            patch.pop("tmdb_libs", None)
     if "pan_cache_ttl_hours" in patch:
         try:
             # 允许 1 小时 ~ 30 天

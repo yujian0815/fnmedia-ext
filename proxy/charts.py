@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import threading
 import time
@@ -22,6 +23,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+
+_log = logging.getLogger(__name__)
 
 STATE = Path(__file__).resolve().parent.parent / "state" / "charts.json"
 REFRESH_TIMEOUT = 60.0
@@ -298,6 +301,29 @@ async def collect_charts() -> dict[str, Any]:
     }
 
 
+def _guard_refresh_charts(new_charts: dict, old_charts: dict):
+    """防止一次异常空响应/缩水响应覆盖旧榜单。
+
+    老库 ≥20 条时，新结果不足一半且少于 10 条视为异常；小库则只在被清零时
+    保留。返回 (可用 charts, 被保留的[(cat, 旧数, 新数)])。纯展示层，不触碰播放。
+    """
+    out: dict[str, list[dict]] = {}
+    preserved: list[tuple[str, int, int]] = []
+    for cat, _, _ in CHART_CATEGORIES:
+        new_rows = list(new_charts.get(cat) or [])
+        old_rows = list(old_charts.get(cat) or [])
+        if len(old_rows) >= 20:
+            shrink = len(new_rows) < max(10, len(old_rows) // 2)
+        else:
+            shrink = bool(old_rows) and not new_rows
+        if shrink:
+            out[cat] = old_rows
+            preserved.append((cat, len(old_rows), len(new_rows)))
+        else:
+            out[cat] = new_rows
+    return out, preserved
+
+
 class ChartCache:
     def __init__(self):
         self._lock = threading.RLock()
@@ -398,7 +424,18 @@ class ChartCache:
             total = sum(len(v) for v in charts.values())
             if data.get("provider_ok", 0) == 0 or total == 0:
                 raise RuntimeError("榜单全部获取失败/为空，保留旧缓存")
-            data["last_error"] = ""
+            # 某分类异常腰斩/清零时保留该分类旧数据；全部异常则整个刷新失败。
+            charts, preserved = _guard_refresh_charts(charts, self._charts)
+            if preserved and len(preserved) == len(CHART_CATEGORIES):
+                raise RuntimeError("本次榜单全部分类异常缩水，保留旧缓存")
+            data["charts"] = charts
+            data["last_error"] = (
+                "部分榜单异常缩水，已保留旧数据：" + ", ".join(
+                    f"{cat} {new}/{old}" for cat, old, new in preserved)
+                if preserved else "")
+            for cat, old, new in preserved:
+                _log.warning("chart shrink rejected cat=%s new=%d old=%d",
+                             cat, new, old)
             with self._lock:
                 self._persist(data)
                 self._apply(data)

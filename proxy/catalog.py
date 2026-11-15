@@ -12,8 +12,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -32,6 +34,10 @@ EMPTY_TTL = 15
 # standalone 独立库窗口结果的短缓存：挡住客户端重复打开媒体库的重复深翻
 STANDALONE_WINDOW_TTL = 60
 HTTP_TIMEOUT = 12.0
+# 元数据专用轻量身份索引（不含 lines/播放目标，不参与选线或播放绑定）。
+IDENTITY_STATE = Path(__file__).resolve().parent.parent / "state" / "catalog_identity.json"
+_IDENTITY_KEYS = ("guid", "title", "year", "type_name", "poster", "overview",
+                  "catalog_cat", "catalog_scope", "catalog_source")
 
 # 大类 -> 展示名 / MediaDB category
 CATALOG_CATEGORIES = [
@@ -195,6 +201,62 @@ class Catalog:
         # 避免客户端重复打开同一媒体库时每次都跨四类重新深翻（实测 1~5s），
         # 同时与 folder 冷片搜索争抢事件循环/连接池。短 TTL 兼顾“最近更新”新鲜度。
         self._standalone_cache: dict[tuple, tuple[float, list, int]] = {}
+        self._identity: dict[str, dict] = {}
+        self._identity_dirty = False
+        self._identity_saved = 0.0
+        self._load_identity()
+
+    def _load_identity(self) -> None:
+        try:
+            j = json.loads(IDENTITY_STATE.read_text())
+            rows = j.get("items") if isinstance(j, dict) else None
+            if isinstance(rows, dict):
+                self._identity = {str(k): dict(v) for k, v in rows.items()
+                                  if isinstance(v, dict) and v.get("guid")}
+        except Exception:
+            self._identity = {}
+
+    def _register_identity(self, briefs: list[dict]) -> None:
+        """仅记录展示层身份，绝不保存/回放线路数据。"""
+        if not briefs:
+            return
+        with self._lock:
+            for b in briefs:
+                if not b.get("guid") or not b.get("catalog_scope"):
+                    continue
+                slim = {k: b.get(k, "") for k in _IDENTITY_KEYS}
+                self._identity[b["guid"]] = slim
+            self._identity_dirty = True
+            if len(self._identity) > 30000:
+                for old in list(self._identity)[:2000]:
+                    self._identity.pop(old, None)
+
+    def _save_identity(self, force: bool = False) -> None:
+        with self._lock:
+            if not self._identity_dirty:
+                return
+            if not force and time.monotonic() - self._identity_saved < 15:
+                return
+            rows = dict(self._identity)
+            self._identity_dirty = False
+            self._identity_saved = time.monotonic()
+        try:
+            IDENTITY_STATE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = IDENTITY_STATE.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"items": rows}, ensure_ascii=False,
+                                      separators=(",", ":")))
+            tmp.replace(IDENTITY_STATE)
+        except Exception:
+            with self._lock:
+                self._identity_dirty = True
+
+    def identity_of_guid(self, guid: str) -> dict | None:
+        """元数据专用身份反查（不含 lines）；播放绑定仍用 find_brief_by_guid。"""
+        if not guid:
+            return None
+        with self._lock:
+            row = self._identity.get(guid)
+            return dict(row) if row else None
 
     def reset(self) -> None:
         """清空海量库分类路由/分页/聚合缓冲（管理页一键清缓存）。
@@ -211,6 +273,12 @@ class Catalog:
             self._dense_count.clear()
             self._fallbacks.clear()
             self._standalone_cache.clear()
+            self._identity.clear()
+            self._identity_dirty = False
+            try:
+                IDENTITY_STATE.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     @staticmethod
     def _scope_key(scope: str, cat: str) -> str:
@@ -491,6 +559,7 @@ class Catalog:
         dense = self._dense.setdefault(sk, [])
         if len(dense) < offset + limit:
             await self._extend_dense(scope, cat, offset + limit)
+        await asyncio.to_thread(self._save_identity)
         return dense[offset:offset + limit]
 
     async def get_page(self, cat: str, page: int, scope: str = AGG_SCOPE) -> list[dict]:
@@ -589,6 +658,7 @@ class Catalog:
                 "catalog_cat": cat, "catalog_scope": scope,
                 "catalog_source": route["source_id"],
             })
+        self._register_identity(briefs)
         return briefs
 
     async def _load_page(self, scope: str, cat: str, page: int) -> list[dict]:

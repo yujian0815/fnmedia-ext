@@ -135,6 +135,16 @@ DEFAULTS = {
     # 插件更新通道：stable=仅正式版（与 Moo 商店一致）；beta=正式+预发布（尝鲜）。
     # 仅影响本插件内置更新器（直连 GitHub Release）；Moo 商店始终只推正式版。
     "update_channel": "stable",
+    # TMDB 元数据富化：简介/类型/评分/剧照/演员表 + 官方图床海报加速 + 历史横幅。
+    # API key 仅存本机 state，不入包、不上传；留空则回退资源站数据。
+    "tmdb_enabled": True,
+    "tmdb_api_key": "",
+    # 豆瓣移动 API 主源（免 Key）：详情/演员/剧照优先走豆瓣，TMDB 补横幅与兜底。
+    "douban_enabled": True,
+    # TMDB 识别范围（媒体库白名单）：默认只识别热门四库(chart)+海量四库(catalog)，
+    # 单源独立/自定义等其它库先排除；元素可为库类型或具体库键(chart:movie 等)，
+    # 后期管理页按库开关直接写此配置。空数组=所有库都不识别。
+    "tmdb_libs": ["chart", "catalog"],
     # m3u8 流层去广告总开关（TVBox/OK影视 Pro rules 引擎 + 通用启发式）。
     "ad_filter_enabled": True,
     # 播放时动态检测（无订阅 rules 时，按 DISCONTINUITY 分段+时长/CDN/位置识别广告段）。
