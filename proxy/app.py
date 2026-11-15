@@ -3918,7 +3918,9 @@ def _online_play_info(guid: str, request: Request) -> dict | None:
     # 或只有影片级旧记录的情况）。T4 剧集有独立的 resume 语义，跳过此兜底。
     if brief.get("locator", {}).get("kind") != "t4":
         latest_ep_rec = history.latest_episode_record(guid)
-        if latest_ep_rec:
+        # 最近一集已看完时不能优先停在其结尾；必须落入下面的
+        # resume_episode，由全集历史统一选择下一集并从 0 秒起播。
+        if latest_ep_rec and not history._finished(latest_ep_rec):
             _sb, _se = _history_from_snapshot(latest_ep_rec)
             if _se is not None:
                 info = inj.episode_play_info(_se)
@@ -3952,9 +3954,10 @@ def _vod_play_info_from_snapshot(og: str, line: str, index: int,
     """
     try:
         eg = episode_guid(og, "", index)
-        rec = history.get(eg) or history.get(og)
-        if not rec:
-            rec = history.latest_episode_record(og)
+        # 显式集与历史记录必须严格对应：其他集/影片级快照只能补元数据，
+        # 绝不能把它的 ts 套到本集，否则手动下一集会从上一集结尾起播。
+        same_ep_rec = history.get(eg)
+        rec = same_ep_rec or history.get(og) or history.latest_episode_record(og)
         if not rec:
             return None
         brief, snap_ep = _history_from_snapshot(rec)
@@ -3962,6 +3965,8 @@ def _vod_play_info_from_snapshot(og: str, line: str, index: int,
             return None
         snap_ep = dict(snap_ep)
         snap_ep["index"] = index
+        snap_ep["episode_number"] = index + 1
+        snap_ep["ep_title"] = f"第{index + 1}集"
         snap_ep["ep_guid"] = eg
         snap_ep["season"] = snap_ep.get("season") or 1
         snap_ep["season_guid"] = season_guid(og, int(snap_ep.get("season") or 1))
@@ -3979,7 +3984,7 @@ def _vod_play_info_from_snapshot(og: str, line: str, index: int,
                 og, line, int(snap_ep.get("season") or 1))
             witem["media_guid"] = ep_media_guid(eg, line)
             witem["video_guid"] = ep_video_guid(eg, line)
-            info["ts"] = rec.get("ts", 0)
+            info["ts"] = int((same_ep_rec or {}).get("ts", 0) or 0)
         else:
             info = inj.play_info(brief)
             info["media_guid"] = ep_media_guid(og, line)
@@ -4039,7 +4044,8 @@ def _vod_play_info(guid: str, client) -> JSONResponse | None:
             _witem["parent_guid"] = _line_season_guid(og, line, int(ep.get("season") or 1))
             _witem["media_guid"] = ep_media_guid(eg, line)
             _witem["video_guid"] = ep_video_guid(eg, line)
-            _rec = history.get(eg) or history.get(og)
+            # 显式选集只继承同一集的进度；og 是整部剧的旧记录，不能回退。
+            _rec = history.get(eg)
             if _rec:
                 info["ts"] = _rec.get("ts", 0)
             _ensure_resume_duration(info)

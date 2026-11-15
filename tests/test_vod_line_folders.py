@@ -50,7 +50,7 @@ class VodResumeTests(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         guids = [episode_guid("og", "", i) for i in range(8)]
-        appmod.history.delete(guids)
+        appmod.history.delete(guids + ["og"])
 
     def test_resume_index_and_play_info_locate_exact_episode_and_ts(self):
         all_eg = [episode_guid("og", "", i) for i in range(8)]
@@ -137,6 +137,82 @@ class VodResumeTests(unittest.IsolatedAsyncioTestCase):
         data = json.loads(response.body)["data"]
         self.assertEqual(data["guid"], all_eg[5])
         self.assertEqual(data["item"]["episode_number"], 6)
+
+    def test_finished_previous_episode_resume_targets_next_at_zero(self):
+        # 自动连播/从整部剧恢复时，上一集达到95%后应定位下一集且 ts=0。
+        all_eg = [episode_guid("og", "", i) for i in range(8)]
+        appmod.history.set_position(all_eg[0], 950, 1000)
+        target_eg, resume_ts = appmod.history.resume_episode(all_eg)
+        self.assertEqual(target_eg, all_eg[1])
+        self.assertEqual(resume_ts, 0)
+
+    def test_finished_latest_snapshot_does_not_block_global_next_episode(self):
+        # 普通CMS/T4之外的全局入口也不能把已看完的最近快照当作续播目标。
+        all_eg = [episode_guid("og", "", i) for i in range(8)]
+        appmod.history.record({"item_guid": all_eg[0], "ts": 950,
+                               "duration": 1000}, snapshot={
+            "guid": "og", "title": self.brief["title"],
+            "type_name": self.brief["type_name"], "_ep_index": 0,
+            "_ep_guid": all_eg[0], "lines": {}})
+        with patch.object(appmod.store, "get_title_by_guid", return_value=self.brief), \
+                patch.object(appmod.store, "tv_episode_guids", return_value=all_eg), \
+                patch.object(appmod.store, "get_episode",
+                             side_effect=lambda g: {
+                                 "index": all_eg.index(g), "ep_guid": g,
+                                 "online_guid": "og", "season_guid": "season",
+                                 "title": self.brief["title"],
+                                 "ep_title": f"第{all_eg.index(g)+1}集"}
+                             if g in all_eg else None):
+            info = appmod._online_play_info("og", MagicMock())
+        self.assertEqual(info["guid"], all_eg[1])
+        self.assertEqual(info["ts"], 0)
+        self.assertEqual((info.get("item") or {}).get("episode_number"), 2)
+
+    def test_explicit_next_episode_ignores_series_level_progress(self):
+        # 显式下一集只能继承本集自己的记录，不能把影片级旧进度套到新集。
+        all_eg = [episode_guid("og", "", i) for i in range(8)]
+        appmod.history.set_position("og", 950, 1000)
+        with patch.object(appmod.store, "get_title_by_guid", return_value=self.brief), \
+                patch.object(appmod.store, "get_episode",
+                             side_effect=lambda g: {
+                                 "index": all_eg.index(g), "ep_guid": g,
+                                 "online_guid": "og", "season_guid": "season",
+                                 "title": self.brief["title"],
+                                 "ep_title": f"第{all_eg.index(g)+1}集"}
+                             if g in all_eg else None), \
+                patch.object(appmod.store, "resolve_episode",
+                             side_effect=lambda og, line, idx: target(line, idx)), \
+                patch.object(appmod.store, "list_episodes",
+                             side_effect=lambda og, line=None: self.brief["lines"][line]):
+            response = appmod._vod_play_info(
+                appmod._line_item_guid("og", "lzi::lzm3u8", 5),
+                clientmod.Client(kind="web"))
+        data = json.loads(response.body)["data"]
+        self.assertEqual(data["guid"], all_eg[5])
+        self.assertEqual(data["item"]["episode_number"], 6)
+        self.assertEqual(data["ts"], 0)
+
+    def test_explicit_next_episode_snapshot_fallback_starts_at_zero(self):
+        # store 淘汰后也不能把上一集快照的 ts 带给显式下一集。
+        all_eg = [episode_guid("og", "", i) for i in range(8)]
+        appmod.history.record({"item_guid": all_eg[1], "ts": 950,
+                               "duration": 1000}, snapshot={
+            "guid": "og", "title": self.brief["title"],
+            "type_name": self.brief["type_name"], "_ep_index": 1,
+            "_ep_guid": all_eg[1],
+            "lines": {"lzi::lzm3u8": [{"title": "第02集",
+                        "url": "https://cdn.test/v2.m3u8", "direct": True,
+                        "headers": {}, "redirect": False}]}})
+        with patch.object(appmod.store, "get_title_by_guid", return_value=None), \
+                patch.object(appmod.store, "resolve_episode", return_value=None), \
+                patch.object(appmod.store, "get_episode", return_value=None):
+            response = appmod._vod_play_info(
+                appmod._line_item_guid("og", "lzi::lzm3u8", 5),
+                clientmod.Client(kind="web"))
+        data = json.loads(response.body)["data"]
+        self.assertEqual(data["guid"], all_eg[5])
+        self.assertEqual(data["item"]["episode_number"], 6)
+        self.assertEqual(data["ts"], 0)
 
     def test_fixed_line_play_info_survives_store_eviction_via_snapshot(self):
         # 复现真实故障：store 已淘汰该片，真机仍持复合 line-item guid 重进。
