@@ -1672,7 +1672,10 @@ async def __aggregate_briefs_inner(keyword, maxn, fast_only, soft_timeout,
     # 可选特性源不进入全局搜索（公开构建下该开关恒关，等价于不过滤）。
     sources = [s for s in config.enabled_sources()
                if not (features.ADULT and s.get("adult"))
-               and (include_t4 or s.get("kind") != "t4")]
+               and (include_t4 or s.get("kind") != "t4")
+               # 小雅只经 builtin-xiaoya 虚拟手动线调用；旧 provider 的目录占位
+               # 不得进入 store 被 best_line/竞速当成真实直链。
+               and s.get("id") != "xiaoya"]
     if fast_only:
         sources = [s for s in sources
                    if not s.get("guard") and not s.get("guard_native")
@@ -2659,12 +2662,16 @@ def _fixed_media_target(mg: str, request: Request | None = None) -> dict | None:
             og, line, _season_no = season_parsed
             parsed = (og, line, 0)
     if not parsed:
-        # 网盘虚拟线的 media/video guid 是哈希：用登记的反查映射还原 (og,index)。
+        # 网盘/小雅虚拟线的 media/video guid 是哈希：用登记的反查映射还原 (og,index)。
         ref = _PANSOU_MEDIA_MAP.get(mg)
         if ref:
             parsed = (ref[0], PANSOU_LINE, ref[1])
         else:
-            return None
+            ref = _XIAOYA_MEDIA_MAP.get(mg)
+            if ref:
+                parsed = (ref[0], XIAOYA_LINE, ref[1])
+            else:
+                return None
     og, line, index = parsed
     if request is not None:
         try:
@@ -2674,9 +2681,13 @@ def _fixed_media_target(mg: str, request: Request | None = None) -> dict | None:
     brief = store.get_title_by_guid(og)
     if not brief:
         return None
-    # PanSou 网盘高清是虚拟手动线（不在 store），构造其专用 target，不解析、不测速。
+    # PanSou/小雅是虚拟手动线（不在 store），构造专用 target，不解析、不测速。
     if _is_pansou_line_name(line):
         target = _pansou_manual_target(index)
+    elif _is_xiaoya_line_name(line):
+        if not _xiaoya_available():
+            return None
+        target = _xiaoya_manual_target(og, index)
     else:
         target = store.resolve_episode(og, line, index)
         if not target:
@@ -2922,6 +2933,10 @@ async def _vod_line_folder(parent: str, body: dict, client) -> JSONResponse:
             source_rows[provider] = t
     rows = [_vod_line_card(brief, t["line"], index, parent)
             for t in source_rows.values() if t.get("line")]
+    # 小雅固定手动卡：此处不搜索，点击后的 direct 起播才按片名/年份找资源。
+    if _xiaoya_available():
+        _xiaoya_manual_target(parent, index)  # 登记虚拟 media/video guid 反查
+        rows.append(_vod_line_card(brief, XIAOYA_LINE, index, parent))
     # 网盘高清手动线作为独立来源卡追加在末尾（仅完整版且 PanSou 可用）。
     pansou_card = _vod_pansou_card(brief, index, parent)
     if pansou_card is not None:
@@ -3597,6 +3612,39 @@ async def _stream_list_impl(guid: str, request: Request):
         for _v in sl.get("video_streams") or []:
             _v["guid"] = _p_vg
             _v["media_guid"] = _p_mg
+        if _is_xiaoya_line_name(_p_line):
+            # 小雅是直连文件（MP4/MKV），绝非 HLS。必须返回直连文件元数据（wrapper MP4、
+            # play_link 指向 /direct），否则播放器按 CMS 的 HLS(.m3u8) 元数据去解析直连
+            # 文件字节，Web/App 均「播放出错」。与分类库 _xlib_stream_payload 同构。
+            _xy_title = brief.get("title", "") or "小雅资源"
+            _xy_fname = _xy_title + ".mp4"
+            _xy_res = "2160p" if ("2160" in _xy_title or "4K" in _xy_title.upper()) else "1080p"
+            _xy_q = urllib.parse.urlencode({"line": _p_line, "index": _p_idx})
+            sl = {
+                "files": [{
+                    "guid": _p_mg, "path": f"网盘/{_xy_fname}", "file_name": _xy_fname,
+                    "size": 0, "timestamp": 0, "type": 1, "sort_num": 0, "can_play": 1,
+                    "play_error": "", "create_time": 0, "update_time": 0,
+                    "parent_fv_guid": "", "progress_thumb_hash_dir": "",
+                }],
+                "video_streams": [{
+                    "media_guid": _p_mg, "title": "", "guid": _p_vg,
+                    "resolution_type": _xy_res, "color_range_type": "SDR",
+                    "codec_name": "hevc", "codec_type": "video", "color_range": "tv",
+                    "profile": "High", "index": 0, "width": 0, "height": 0,
+                    "coded_width": 0, "coded_height": 0, "display_aspect_ratio": "16:9",
+                    "pix_fmt": "yuv420p", "level": "40", "color_space": "",
+                    "color_transfers": "", "color_primaries": "", "duration": 0,
+                    "dv_profile": 0, "refs": 1, "r_frame_rate": "24 fps",
+                    "avg_frame_rate": "24 fps", "bits_per_raw_sample": "8", "bps": 0,
+                    "progressive": 1, "bit_depth": 8, "wrapper": "MP4",
+                    "create_time": 0, "update_time": 0, "rotation": 0, "ext1": 0,
+                    "is_bluray": False,
+                }],
+                "audio_streams": [], "subtitle_streams": [],
+                "play_link": f"{ONLINE_PREFIX}/{_p_mg}/direct?{_xy_q}",
+                "qualities": [], "cloud_storage_info": None,
+            }
     else:
         ep = store.get_episode(guid)
         target = None
@@ -3644,7 +3692,9 @@ async def _stream_list_impl(guid: str, request: Request):
     # 打开详情/线路菜单即后台预热默认线路播放列表（单飞，真正取 main 时并入）。
     # PanSou 是虚拟手动线，只在用户真正播放时才搜索转存，菜单阶段绝不预热。
     if target and not target.get("_pansou_manual") \
-            and not _is_pansou_line_name(target.get("line", "")):
+            and not target.get("_xiaoya_manual") \
+            and not _is_pansou_line_name(target.get("line", "")) \
+            and not _is_xiaoya_line_name(target.get("line", "")):
         try:
             _mg = (sl.get("video_streams") or [{}])[0].get("media_guid")
             if _mg:
@@ -4011,6 +4061,7 @@ def _vod_play_info(guid: str, client) -> JSONResponse | None:
     if not brief:
         return _vod_play_info_from_snapshot(og, line, index, client)
     is_pansou = _is_pansou_line_name(line)
+    is_xiaoya = _is_xiaoya_line_name(line)
     # 必须尊重请求中显式编码的集 index：线路卡已用 _vod_resume_index 生成默认
     # 续播卡，而 episode/list 的每一集与原生自动连播的“下一集”都有明确 guid。
     # 不能再拿 latest_episode_record 覆盖它，否则手动选集和连播都会退回最近观看集。
@@ -4020,6 +4071,8 @@ def _vod_play_info(guid: str, client) -> JSONResponse | None:
         # 登记 media/video guid 反查，使随后 play/play、media/range、preset/main
         # 能锁定本网盘线（否则透传官方 invalid sign，触发链不启动）。
         _pansou_register_media(og, index)
+    elif is_xiaoya:
+        target = _xiaoya_manual_target(og, index)
     else:
         target = store.resolve_episode(og, line, index)
         if not target:
@@ -4279,6 +4332,13 @@ def _line_choices(target: dict, *, include_pansou: bool = True) -> list[dict]:
         except Exception:
             _idx = 0
         out.append({**_pansou_manual_target(_idx), "label": PANSOU_LABEL})
+    # 固定小雅卡的播放页保留当前线高亮。普通自动播放菜单不注入该虚拟线，
+    # 避免 App 跨片残留码率把它当默认；统一从二级线路墙明确点选。
+    if include_pansou and _xiaoya_available() and target.get("online_guid") \
+            and _is_xiaoya_line_name(target.get("line", "")):
+        out.append({**_xiaoya_manual_target(
+            target["online_guid"], int(target.get("index", 0) or 0)),
+            "label": XIAOYA_LABEL})
     # 保持当前线路第一
     out.sort(key=lambda t: t["line"] != cur)
     return out
@@ -4572,6 +4632,9 @@ def _guess_wrapper(target: dict) -> tuple[str, bool]:
     """不发起任何网络请求，预判该线路该用 HLS 还是 MP4 包装。
     返回 (wrapper, is_hls)。预判可能失误：main/direct 入口在真正解析后会做
     双向 302 兜底，所以这里宁可默认 HLS（绝大多数资源是 m3u8）。"""
+    # 小雅虚拟占位尚未带文件扩展名，但它始终走原画 direct，不可误入 HLS/preset。
+    if target.get("_xiaoya_manual"):
+        return "MP4", False
     url = (target.get("url") or "")
     path = url.split("?", 1)[0].lower()
     # 裸 mp4 直链（非跳转/解析页）才直接判 MP4
@@ -4624,6 +4687,10 @@ async def play_play(request: Request):
                 _pansou_manual_arm(mg, _t0, _pidx0)
         except Exception:
             pass
+    # 普通菜单不注入小雅；若客户端残留旧码率，固定卡之外一律回落默认线。
+    if chosen_line == XIAOYA_LINE and not base_target.get("_fixed_line") \
+            and not _pansou_is_user_pick(mg):
+        chosen_line = None
     # 网盘线永不作跨片默认：App 会记住上一部选的 bitrate 并带到新视频，而 PanSou
     # 在每部片菜单都存在，导致换新片仍默认网盘。真正手切网盘必先请求
     # preset?line=PanSou（已对该 mg 登记 user_pick）；无此意图的 bitrate 命中一律回落。
@@ -4672,6 +4739,19 @@ async def play_play(request: Request):
             "video_index": 0, "wrapper": _wr,
             "non_fatal_errno": None, "video_encoder": "",
             "not_supported_resolution": "", "supported_highest_resolution": ""}})
+    if chosen_line == XIAOYA_LINE:
+        # 原画 MP4/MKV 走 direct；搜索、剧集定位和签名 /d 均在播放器取流时执行。
+        _xidx = int(base_target.get("index", 0) or 0)
+        _xq = urllib.parse.urlencode({"line": XIAOYA_LINE, "index": _xidx})
+        return JSONResponse({"code": 0, "msg": "", "data": {
+            "audio_guid": "", "audio_index": -1, "hls_time": 6,
+            "is_subtitle_external": 0, "media_guid": mg,
+            "play_link": f"{ONLINE_PREFIX}/{mg}/direct?{_xq}",
+            "subtitle_guid": "", "subtitle_index": -1,
+            "subtitle_link": "", "video_guid": body.get("video_guid", vg_for(mg)),
+            "video_index": 0, "wrapper": "MP4", "non_fatal_errno": None,
+            "video_encoder": "", "not_supported_resolution": "",
+            "supported_highest_resolution": ""}})
     if chosen_line and chosen_line != base_target.get("line"):
         if base_target.get("kind") == "episode" and base_target.get("ep_guid"):
             target = store.get_episode_target(base_target["ep_guid"], chosen_line) or base_target
@@ -5467,6 +5547,26 @@ def _pan_match(text: str):
 # NameError、也绝不会出现网盘线。full 版加载时块内真实定义会覆盖这些兜底。
 PANSOU_LINE = "builtin-pansou::PanSou网盘高清"
 PANSOU_LABEL = "🎞️网盘高清（PanSou）"
+XIAOYA_LINE = "builtin-xiaoya::小雅资源"
+XIAOYA_LABEL = "小雅资源"
+_XIAOYA_MEDIA_MAP: dict[str, tuple] = {}
+
+
+def _is_xiaoya_line_name(line: str) -> bool:
+    return bool(line) and str(line).startswith("builtin-xiaoya::")
+
+
+if not features.CATVOD:
+    def _xiaoya_available() -> bool:
+        return False
+
+
+    def _xiaoya_manual_target(og: str, index: int = 0) -> dict:
+        return {}
+
+
+    async def _ensure_xiaoya_manual(og: str, index: int = 0):
+        return None
 
 
 def _is_pansou_line_name(line: str) -> bool:
@@ -7152,6 +7252,7 @@ _PROVIDER_CN = {
     "baofeng": "暴风", "ffzy": "非凡", "lzi": "量子", "wujin": "无尽",
     "youku": "优酷", "guangsu": "光速", "ruyi": "如意", "jisu": "极速",
     "xinlang": "新狼", "dytt": "电影天堂", "s360": "360",
+    "builtin-xiaoya": XIAOYA_LABEL,
 }
 _GROUP_CN = {"m3u8": "主线路", "yun": "云播", "ff": "非凡", "uk": "优酷",
              "gs": "光速", "bf": "暴风", "lz": "量子"}

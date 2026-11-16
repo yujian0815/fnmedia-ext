@@ -30,6 +30,12 @@ def _brief(g="cat-og"):
 
 
 class CatalogFolderTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # 本组只验证 CMS 冷片绑定；小雅固定卡由独立测试覆盖，避免本机启用配置影响总数。
+        xy_off = patch.object(appmod, "_xiaoya_available", return_value=False)
+        xy_off.start()
+        self.addCleanup(xy_off.stop)
+
     async def test_folder_calls_ensure_bound_when_not_in_store(self):
         g = "cat-cold-1"
         bound = _brief(g)

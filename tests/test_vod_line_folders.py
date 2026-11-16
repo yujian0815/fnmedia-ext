@@ -289,6 +289,10 @@ class VodResumeTests(unittest.IsolatedAsyncioTestCase):
 class VodPansouCardTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.b = brief(tv=True)
+        # PanSou 卡片顺序单独验证；小雅固定卡由 test_xiaoya_manual_line 覆盖。
+        xy_off = patch.object(appmod, "_xiaoya_available", return_value=False)
+        xy_off.start()
+        self.addCleanup(xy_off.stop)
 
     def test_pansou_card_only_when_available(self):
         # PanSou 不可用时不出网盘卡
@@ -445,6 +449,12 @@ class VodPansouCardTests(unittest.IsolatedAsyncioTestCase):
 
 
 class VodLineFolderTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # 本组既有断言针对 CMS/PanSou；显式关闭新增小雅卡，消除本机配置与测试顺序依赖。
+        xy_off = patch.object(appmod, "_xiaoya_available", return_value=False)
+        xy_off.start()
+        self.addCleanup(xy_off.stop)
+
     def test_first_level_chart_is_directory(self):
         row = appmod.chart_card({"guid": "og", "cat": "movie", "title": "蜘蛛侠：崭新之日",
                                   "year": "2026", "rating": 8.0, "cover": "https://img.test/p.jpg",

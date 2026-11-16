@@ -392,6 +392,10 @@ class Store:
         ordered = ([default] if default else []) + \
                   [ln for ln in brief.get("lines", {}) if ln != default]
         for ln in ordered:
+            # 旧 xiaoya provider 的目录 vod_id 只是占位，唯一真实入口是
+            # builtin-xiaoya 虚拟手动线；历史快照也不得进入菜单/竞速。
+            if str(ln).startswith("xiaoya::"):
+                continue
             eps = self._direct_eps(brief, ln)
             if idx >= len(eps):
                 continue
@@ -628,6 +632,8 @@ class Store:
         # 直链线路优先于仅可解析的线路
         best, bestn, best_direct = None, -1, False
         for ln, eps in brief.get("lines", {}).items():
+            if str(ln).startswith("xiaoya::"):
+                continue  # 旧目录占位线永不作默认（见 target_lines）
             play = self._playable(eps)
             nd = sum(1 for e in play if e.get("direct"))
             if not play:
@@ -696,18 +702,24 @@ class Store:
             eg = self.episode_guid_at(guid, int(ep_index or 0))
             return self._ep_resolve(eg, line) if eg else None
         lines = brief.get("lines", {})
+        if line and str(line).startswith("xiaoya::"):
+            return None  # 旧占位线即使存在于历史快照也不可起播
         # 选线路：指定 > 第一条可播（直链优先，其次可解析页）
         name = None
         if line and line in lines and self._playable(lines[line]):
             name = line
         else:
-            # 直链优先
+            # 直链优先；旧 xiaoya 目录占位线不得作为兜底默认。
             for ln, eps in lines.items():
+                if str(ln).startswith("xiaoya::"):
+                    continue
                 if any(e.get("direct") for e in eps):
                     name = ln
                     break
             if name is None:
                 for ln, eps in lines.items():
+                    if str(ln).startswith("xiaoya::"):
+                        continue
                     if self._playable(eps):
                         name = ln
                         break

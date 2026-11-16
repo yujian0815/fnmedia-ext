@@ -19,6 +19,22 @@ if [ -n "${FNMEDIA_REPO_DIR}" ] && [ -f "${UNIT_FILE}" ]; then
 fi
 
 [ -n "${FNMEDIA_REPO_DIR}" ] || exit 0
+# 可选下载前的捆绑 Guard 引擎先迁入 state；新版 repo 不再携带引擎。
+if [ -f "${FNMEDIA_REPO_DIR}/proxy/assets/guard-engine/build/guard-engine.jar" ] && \
+   [ ! -e "${FNMEDIA_REPO_DIR}/state/guard-engine/current" ] && \
+   [ ! -L "${FNMEDIA_REPO_DIR}/state/guard-engine/current" ]; then
+  mkdir -p "${FNMEDIA_REPO_DIR}/state/guard-engine/versions"
+  if [ ! -f "${FNMEDIA_REPO_DIR}/state/guard-engine/versions/bundled/build/guard-engine.jar" ]; then
+    rm -rf "${FNMEDIA_REPO_DIR}/state/guard-engine/versions/bundled"
+    cp -a "${FNMEDIA_REPO_DIR}/proxy/assets/guard-engine" \
+      "${FNMEDIA_REPO_DIR}/state/guard-engine/versions/bundled"
+  fi
+  if [ -f "${FNMEDIA_REPO_DIR}/tools/prune_guard_assets.py" ]; then
+    python3 "${FNMEDIA_REPO_DIR}/tools/prune_guard_assets.py" \
+      "${FNMEDIA_REPO_DIR}/state/guard-engine/versions/bundled/lib" >> "${FNMEDIA_LOG}" 2>&1 || true
+  fi
+  ln -s versions/bundled "${FNMEDIA_REPO_DIR}/state/guard-engine/current"
+fi
 BACKUP_DIR="${TRIM_PKGVAR:-/tmp}/upgrade-backup"
 rm -rf "${BACKUP_DIR}"; mkdir -p "${BACKUP_DIR}"
 if [ -d "${FNMEDIA_REPO_DIR}/state" ]; then

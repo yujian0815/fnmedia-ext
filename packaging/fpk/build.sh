@@ -36,6 +36,7 @@ rsync -a --delete \
   --exclude='/proxy/no_android_router.py' \
   --exclude='/proxy/assets/guard/' \
   --exclude='/proxy/assets/spiders/' \
+  --exclude='/proxy/assets/guard-engine/' \
   --exclude='/proxy/assets/guard/guard.jar' \
   --exclude='/proxy/assets/guard/sites.json' \
   --exclude='/proxy/assets/guard/imported.json' \
@@ -51,6 +52,14 @@ rsync -a --delete \
   --exclude='*.apk' \
   "${REPO_ROOT}/" "${STAGE}/app/repo/"
 
+# Guard 仅保留 Linux x86_64/aarch64 与引擎使用的 ARM64/sdk23 来宾库；分析 CLI 不进包。
+# 仅裁剪暂存副本，厂商原始 lib 与工作树不变。
+if [ -f "${REPO_ROOT}/tools/prune_guard_assets.py" ] && [ -d "${STAGE}/app/repo/proxy/assets/guard-engine/lib" ]; then
+  "${PYTHON:-python3}" "${REPO_ROOT}/tools/prune_guard_assets.py" \
+    "${STAGE}/app/repo/proxy/assets/guard-engine/lib" > "${STAGE}.guard-prune.json"
+  "${PYTHON:-python3}" -c 'import json,sys; j=json.load(open(sys.argv[1])); print("[fpk] Guard 原生冗余裁剪:", j["saved_bytes"], "bytes")' \
+    "${STAGE}.guard-prune.json"
+fi
 
 # 不再创建 Android/redroid、Guard/SPIDER 或 no_android 资产目录，也不播种
 # 任何 bridge APK/JAR；这些运行时及其管理入口已从分发包移除。
