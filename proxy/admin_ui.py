@@ -1462,6 +1462,7 @@ async function savePreferQ(){
   if(r.code===0){CFG.prefer_quality_source=$("preferQ").checked;toast("已保存");}else toast("失败","fail");
 }
 
+
 /* ---------- 资源站 ---------- */
 function renderSources(){
   const all=CFG.sources;
