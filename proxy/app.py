@@ -1675,7 +1675,8 @@ async def __aggregate_briefs_inner(keyword, maxn, fast_only, soft_timeout,
                and (include_t4 or s.get("kind") != "t4")]
     if fast_only:
         sources = [s for s in sources
-                   if not s.get("guard") and not s.get("spider_src")
+                   if not s.get("guard") and not s.get("guard_native")
+                   and not s.get("spider_src")
                    and not str(s.get("id", "")).startswith(("spider-", "drpy-"))
                    and s.get("api")
                    and s.get("id") not in ("dduo", "xiaoya")]

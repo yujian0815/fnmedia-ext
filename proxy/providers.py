@@ -501,7 +501,7 @@ def _is_heavy_search_source(s: dict) -> bool:
     if s.get("kind") == "t4":
         return True
     return bool(s.get("catvod") or s.get("drpy") or s.get("guard")
-                or s.get("spider_src") or s.get("xsrc"))
+                or s.get("guard_native") or s.get("spider_src") or s.get("xsrc"))
 
 
 async def _search_cms(keyword: str, sources,

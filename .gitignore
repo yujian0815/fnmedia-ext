@@ -37,6 +37,7 @@ dist/
 /proxy/catvod.py
 /proxy/drpy.py
 /proxy/guard.py
+/proxy/guard_native_engine.py
 /proxy/runner_client.py
 /proxy/xlib.py
 /proxy/spiders.py
@@ -44,6 +45,7 @@ dist/
 /proxy/assets/catvod/
 /proxy/assets/drpy/
 /proxy/assets/guard/
+/proxy/assets/guard-engine/
 # 用户导入的 TVBox 加固源配置（私有，含第三方 ext/凭证，绝不入库）
 /proxy/assets/guard/imported.json
 /spider-runner/

@@ -179,6 +179,9 @@ _BUILTIN_IDS = {s["id"] for s in DEFAULT_SOURCES}
 
 def _is_android_source(source: dict) -> bool:
     """历史 Guard/普通 csp 源判定；DRPY、T4、CMS 与网盘模块不受影响。"""
+    # 自研 Unidbg sidecar 不依赖 Android/redroid，不能被旧安卓停用规则误伤。
+    if source.get("guard_native"):
+        return False
     sid = str(source.get("id") or "")
     api = str(source.get("api") or "")
     return bool(source.get("guard") or source.get("spider_src")
