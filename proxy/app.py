@@ -2198,8 +2198,11 @@ async def mediadb_list(request: Request):
         # 3) 单源独立媒体库（用户在管理页为某个源勾选“作为独立媒体库”）
         for s in standalone_sources_active():
             scope = s["id"]
-            if not catalog.standalone_available(scope):
-                continue
+            # 独立库是用户显式启用的长期配置，不能因重启/一次路由探测失败
+            # 就隐藏整张卡片。路由未就绪时仍显示库，后台重建后补内容/海报。
+            if not catalog.standalone_available(scope) and \
+                    catalog.routes_stale() and not catalog._refreshing:
+                asyncio.create_task(catalog.refresh_routes(config.enabled_sources()))
             ps: list[str] = []
             # 同样只用缓存海报，不联网；后台预热会逐步填充海报
             try:
