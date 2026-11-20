@@ -115,17 +115,36 @@ def _t4_node(guid):
 
 UPSTREAM_SOCK = os.environ.get("FNMEDIA_UPSTREAM_SOCK",
                                "/var/run/trim_media_upstream.sock")
-# 本服务回环基址：网盘原画/转码播放地址是根相对路径，HLS 探测/改写需经本机
-# HTTP 自调用（nginx 5666 → 本应用），不能直接喂给外站 client。
-SELF_BASE = os.environ.get("FNM_SELF_BASE", "http://127.0.0.1:5666")
+# 本服务自调用：网盘原画/转码播放地址、HLS 探测/改写等需要把根相对地址绝对化后
+# 由本机再请求一次。默认走本应用接管的 unix socket（SELF_SOCK），与 nginx 对外
+# 端口完全解耦——用户把飞牛影视改成任意非标准端口都不影响自调用（全端口兼容）。
+# 仅当显式设置 FNM_SELF_BASE（TCP 回环基址）时才退回旧的 nginx TCP 自调用。
+SELF_SOCK = os.environ.get("FNM_SELF_SOCK", "/var/run/trim_media.sock")
+SELF_BASE = os.environ.get("FNM_SELF_BASE", "http://fnmedia.self")
+_SELF_UDS = not os.environ.get("FNM_SELF_BASE")
 ONLINE_PREFIX = "/v/media/online"
 
 
 def _self_url(url: str) -> str:
-    """把本服务根相对地址绝对化为回环地址；外站绝对地址原样返回。"""
+    """把本服务根相对地址绝对化为自调用地址；外站绝对地址原样返回。"""
     if url.startswith("/"):
         return SELF_BASE.rstrip("/") + url
     return url
+
+
+def _is_self_url(url: str) -> bool:
+    """是否本服务自调用地址（_self_url 产物）。外站地址返回 False。"""
+    return isinstance(url, str) and url.startswith(SELF_BASE.rstrip("/") + "/")
+
+
+def _self_or(client, req: Request, url: str):
+    """自调用地址改走 unix socket 客户端（端口无关）；外站地址用原客户端。
+
+    显式配置 FNM_SELF_BASE 时保持 TCP 回环（_SELF_UDS=False），原样走原客户端。
+    """
+    if _SELF_UDS and _is_self_url(url):
+        return self_client(req)
+    return client
 _search_cache: dict[str, tuple[float, list]] = {}
 _search_inflight: dict[str, asyncio.Future] = {}
 CACHE_TTL = 120
@@ -1360,6 +1379,25 @@ def ext_client(req: Request) -> httpx.AsyncClient:
     return req.app.state.ext
 
 
+def self_client(req: Request | None = None) -> httpx.AsyncClient:
+    """本应用自调用客户端：经 unix socket 直达自身，端口无关（全端口兼容）。
+
+    惰性构建并缓存于 app.state；supervise 未接管（无 SELF_SOCK）时回退 ext。
+    无 Request 的后台任务可传 None，直接用全局 app。
+    """
+    st = (req.app if req is not None else app).state
+    cli = getattr(st, "self_cli", None)
+    if cli is not None and not cli.is_closed:
+        return cli
+    if not os.path.exists(SELF_SOCK):
+        return st.ext
+    cli = httpx.AsyncClient(
+        transport=httpx.AsyncHTTPTransport(uds=SELF_SOCK),
+        timeout=httpx.Timeout(30), trust_env=False, follow_redirects=True)
+    st.self_cli = cli
+    return cli
+
+
 def _poster_http(req: Request) -> httpx.AsyncClient:
     """海报专用客户端（连接池与预热/播放隔离）；未就绪时回退 ext。"""
     try:
@@ -1407,7 +1445,7 @@ async def ext_get_retry(req: Request, url: str, headers: dict | None = None,
                         *, tries: int = 3, timeout: float | None = 20.0):
     """带重试的外站 GET。成功（2xx/3xx 或不可重试状态码）即返回；网络异常或
     可重试状态码指数退避后重试，最后一次把原始响应/异常交给调用方。"""
-    client = ext_client(req)
+    client = _self_or(ext_client(req), req, url)
     last_exc: Exception | None = None
     r = None
     for attempt in range(tries):
@@ -1471,7 +1509,7 @@ async def ext_get_stream_retry(req: Request, url: str, headers: dict | None = No
     仅供普通 HLS 分片做真实边下边传；调用方必须负责关闭响应。需要 AES 解密、
     PNG 剥壳、网盘 Cookie 或非 identity 编码时，仍可 await aread() 后走整段路径。
     """
-    client = ext_client(req)
+    client = _self_or(ext_client(req), req, url)
     last_exc: Exception | None = None
     r = None
     for attempt in range(tries):
@@ -5524,8 +5562,9 @@ async def direct_proxy(mg: str, request: Request):
     if request.headers.get("range"):
         fwd["Range"] = request.headers["range"]
     try:
-        req = ext_client(request).build_request("GET", src_url, headers=fwd)
-        r = await ext_client(request).send(req, stream=True)
+        _cli = _self_or(ext_client(request), request, src_url)
+        req = _cli.build_request("GET", src_url, headers=fwd)
+        r = await _cli.send(req, stream=True)
     except Exception as exc:
         # 直链连接失败：记忆坏线并自动换线重试一次
         if _autofail_on():
@@ -6341,7 +6380,7 @@ async def _latency_from_playlist(body: str, cand: dict,
             return None
         url = _self_url(first) if first.startswith("/") else first
         return await _first_seg_download_latency(
-            src_client(request), url, cand.get("headers")
+            _self_or(src_client(request), request, url), url, cand.get("headers")
             or {"User-Agent": "Mozilla/5.0"})
     except Exception:
         return None
@@ -6434,7 +6473,7 @@ async def _probe_latency(cand: dict, request: Request,
         # 网盘转存后是本服务根相对地址（/v/api/ext/pan/play?fid=…），经回环自调用
         url = _self_url(raw_url)
         headers = cand.get("headers") or {"User-Agent": "Mozilla/5.0"}
-        cli = src_client(request)
+        cli = _self_or(src_client(request), request, url)
 
         # 非 HLS（网盘 /d 直链、mp4 等）：Range GET 探测
         is_m3u8 = bool(cand.get("m3u8")) or bool(
@@ -6646,7 +6685,7 @@ _RESURRECT_FUT: dict[str, asyncio.Future] = {}  # 规范化片名 -> 后台回�
 async def _http_head_ok(url: str, headers: dict) -> bool:
     """不依赖 request 的首片段验活：Range 取 2KB，4xx/错误页/空体判死。"""
     try:
-        cli = app.state.ext
+        cli = _self_or(app.state.ext, None, url)
         req = cli.build_request(
             "GET", url, headers={**headers, "Range": _PROBE_RANGE})
         r = await cli.send(req, follow_redirects=True)
@@ -6730,7 +6769,7 @@ async def _resurrect_worker(picked: dict, mg: str, nkey: str) -> bool:
                     if is_hls:
                         cur, seg_url = real, ""
                         for _d in range(3):  # 跟随嵌套 master 取首个分片
-                            rr = await app.state.ext.get(
+                            rr = await _self_or(app.state.ext, None, cur).get(
                                 cur, headers=hdrs, timeout=15,
                                 follow_redirects=True)
                             txt = rr.text
@@ -8942,6 +8981,29 @@ def _decode_poster_tok(tok: str) -> tuple[str, str, int | None, int | None]:
     return url, pan_label, grade, speed
 
 
+# 字节 novel-pic 图床：红果 human/comic/ai 分类回的是 reading-sign.fqnovelpic.com
+# 签名 HEIC 封面（带 x-expires/x-signature）——Web 端无法渲染 HEIC，签名到期还会
+# 403。同一 novel-pic id 搬到 novel.byteimg.com 主机 + ~tplv-shrink 即得无签名、
+# 永久有效的 JPEG（实测 p3/p6 可用、p9 403；直接改 fqnovelpic 后缀为 .jpeg 会 403，
+# 因签名绑定 .heic 路径）。short 分类本就是 byteimg JPEG，不受影响。
+_FQNOVEL_PIC_RE = re.compile(
+    r"^https?://[^/]*fqnovelpic\.com/novel-pic/([0-9A-Za-z]+)")
+
+
+def _normalize_poster_url(url: str) -> str:
+    """把签名 HEIC 的 novel-pic 封面改写为无签名 byteimg JPEG；其它图床原样返回。
+
+    在海报回源前调用，故已缓存 brief（token 内仍是旧 fqnovelpic URL）也立即生效，
+    无需等页缓存过期，且对 Web/iOS/TV 统一。"""
+    if not url or "fqnovelpic.com" not in url:
+        return url
+    m = _FQNOVEL_PIC_RE.match(url)
+    if not m:
+        return url
+    return (f"https://p3-novel.byteimg.com/novel-pic/{m.group(1)}"
+            "~tplv-shrink:640:0.image")
+
+
 def _poster_fallback() -> Response:
     svg = """<svg xmlns="http://www.w3.org/2000/svg" width="300" height="450" viewBox="0 0 300 450">
   <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
@@ -9024,6 +9086,8 @@ async def _serve_online_poster(tok_path: str, request: Request) -> Response:
     want_landscape = request.query_params.get("crop", "") in ("16x9", "1", "landscape")
     if not u.startswith("http"):
         return _poster_fallback()
+    # 签名 HEIC 封面（红果 human/comic/ai）→ 无签名 byteimg JPEG，Web 可渲染且不过期。
+    u = _normalize_poster_url(u)
     want_badge = bool(pan_label) or health_grade is not None
     headers = {"User-Agent": "Mozilla/5.0"}
     host = urllib.parse.urlsplit(u).netloc.lower()
