@@ -52,6 +52,12 @@
 3. 普通 CMS `main.m3u8` 不得再套 8 秒占位，也不得用 `_MAIN_SERVE_FUT` 合并不同请求；真实清单失败按 242 返回 502/503。
 4. 去广告只跑同步本地规则，禁止起播时读取分片 SPS 指纹。
 5. 不得恢复海报预热、全量预热或任何服务端海报/清单磁盘缓存；线路菜单按242规则按资源站去重，不为展示条数改成多线串行预取。
+6. iOS 1.13 的 `media/range` 使用 `preset.m3u8?from=mr` 直接交付 main 媒体清单，不返回 master；仅发往 iOS 的清单副本把本代理分片缩短为社区同形的 `/v/media/online/seg/<id>.ts`（URL 不带 media guid），由短 ID 映射恢复原 guid/query 后复用原分片端点。旧 `/{mg}/seg/{sid}.ts` 仅作兼容别名并校验 guid。Web/TV 清单和选线语义不变，禁止借此恢复 MKV relay 或全量预热。
+7. 固定线路电影与剧集的 `play/info`、`stream/list`、`stream` 必须返回一致的带线路 media/video guid；电影没有 `ep_guid` 时同样用 `episode_guid(online_guid, "", index)` 派生，不得回退基础 video guid。
+8. iOS 清单使用 `Cache-Control: no-store` 与 `Connection: close`，避免 fncache 存储旧清单或复用播放前状态；非 iOS 保持原缓存/连接响应头。
+9. iOS `stream` 必须复用 `stream/list` 已为当前线启动的 `_warm_playlist` 单飞任务，并等待同一 `_get_playlist_cached` 就绪后再返回；不得另建全线路预热或竞速。返回前用清单 EXTINF 总时长填充 `video_stream.duration`，使后续 preset/main 命中同一内存缓存。清单失败保留原 stream 响应，由既有 HLS 错误路径处理；TV/Web、T4、网盘和直连文件不得走这段等待。
+10. iOS 媒体清单必须符合 RFC 8216 的行终止要求：包括最后的 `#EXT-X-ENDLIST` 或分片 URI 在内，最后一行也必须以 LF/CRLF 结束。缺少末尾换行时仅在 iOS 响应副本补一个 LF，不得改动非 iOS 清单字节；内容长度必须同步重算。
+11. 固定线路卡的 `stream/list.play_link` 必须使用响应 `video_streams[].media_guid`，与 `files[].guid`、`video_streams[].guid` 及 `play/info` 的线路身份保持一致；不得把页面条目 `fnmedia-line-item:...` 直接拼进媒体 URL。普通条目的 play_link 生成路径保持不变。
 
 ## 七、回归验证
 

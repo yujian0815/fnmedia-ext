@@ -17,8 +17,10 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import os
 import re
+import struct
 import threading
 import time
 import urllib.parse
@@ -34,6 +36,7 @@ import features
 import netutil
 import providers
 import sourcehealth
+import hls_short
 import linepredict
 import t4
 from t4_service import T4Service
@@ -3579,6 +3582,53 @@ async def stream_list_post(request: Request):
     return await _stream_list_impl(guid, request)
 
 
+def _ios_relay_duration(target: dict | None, brief: dict) -> int:
+    """返回当前实际线路的片长；资料时长只在真实媒体信息不可用时兜底。"""
+    if target:
+        try:
+            j = _RELAY_JOBS.get(_relay_key(target)) or {}
+            if (j.get("duration_source") != "brief"
+                    and float(j.get("duration") or 0) > 0):
+                return int(round(float(j["duration"])))
+            playlist_duration = _relay_duration_fallback(target)
+            if playlist_duration > 0:
+                return playlist_duration
+        except Exception:  # noqa: BLE001
+            pass
+    runtime = (brief or {}).get("runtime")
+    try:
+        return int(float(runtime) * 60) if runtime else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _apply_ios_relay_metadata(sl: dict, brief: dict, target: dict = None):
+    """把 HLS 虚拟流统一描述为 relay 实际交付的 MKV 文件。
+
+    duration 优先取当前 line/index 的真实媒体清单或 relay 探测结果，size 仅用于
+    客户端判可播和稳定 Range 估算，绝不参与时间轴换算。两个 stream 入口必须共用
+    同一 duration/size 规则。
+    """
+    duration = _ios_relay_duration(target, brief)
+    videos = sl.get("video_streams") or []
+    for v in videos:
+        v["wrapper"] = "MKV"
+        if duration:
+            v["duration"] = duration
+        if not v.get("duration"):
+            v["duration"] = 5400
+    estimated_duration = (videos[0].get("duration") if videos else 0) or 5400
+    for f in sl.get("files") or []:
+        file_name = (brief.get("title") or "video").replace("/", "_") + ".mkv"
+        parent = str(f.get("path") or "在线/video.m3u8").rsplit("/", 1)[0]
+        f["file_name"] = file_name
+        # iOS 按 file_stream.path 建缓存/识别实际交付格式；不能只改展示文件名，
+        # 否则 wrapper/file_name 都是 MKV，path 却仍把播放器导向 HLS。
+        f["path"] = parent + "/" + file_name
+        if not f.get("size"):
+            f["size"] = int(estimated_duration * 4_000_000 / 8)
+
+
 async def _stream_list_impl(guid: str, request: Request):
     error = await _load_t4_detail(guid, request)
     if error is not None:
@@ -3701,6 +3751,24 @@ async def _stream_list_impl(guid: str, request: Request):
                 _warm_playlist(_mg, target, request)
         except Exception:
             pass
+    if target is not None:
+        # 固定线路卡的入参 guid 是页面条目 fnmedia-line-item:...，不是播放
+        # 媒体 guid。play_link 必须与 files/video_streams/play/info 使用同一个
+        # 带线路 media guid，否则 iOS 在 stream 后因身份不匹配而不请求媒体地址。
+        _link_mg = guid
+        if fixed is not None:
+            _link_mg = ((sl.get("video_streams") or [{}])[0].get("media_guid")
+                        or guid)
+        sl["play_link"] = _stream_play_link(target, _link_mg, request)
+        if _client_of(request).kind == clientmod.IOS and _guess_wrapper(target)[1] \
+                and not _is_xiaoya_line_name(target.get("line", "")):
+            # iOS fncache relay：stream/list 与 stream POST 共用同一 MKV 元数据。
+            _tb = store.get_title_by_guid(target.get("online_guid", "")) or {}
+            _apply_ios_relay_metadata(sl, _tb, target)
+            try:
+                asyncio.create_task(_ensure_relay_job(target, request))
+            except Exception:  # noqa: BLE001
+                pass
     return JSONResponse({"code": 0, "msg": "", "data": sl})
 
 
@@ -4052,7 +4120,7 @@ def _vod_play_info_from_snapshot(og: str, line: str, index: int,
         return None
 
 
-def _vod_play_info(guid: str, client) -> JSONResponse | None:
+def _vod_play_info(guid: str, client, request: Request = None) -> JSONResponse | None:
     parsed = _parse_line_item_guid(guid)
     if not parsed:
         return None
@@ -4153,6 +4221,9 @@ def _vod_play_info(guid: str, client) -> JSONResponse | None:
         _item_dur = int(float(item.get("duration") or 0))
         if _item_dur > 0:
             item["runtime"] = max(1, int(_item_dur / 60))
+    if request is not None:
+        # 社区新版：播放页一打开就启动当前线单飞；函数自身限制为 iOS/HLS。
+        _ios_prepare_playlist(ep_media_guid(eg, line), target, request)
     return JSONResponse({"code": 0, "msg": "", "data":
                          clientmod.normalize_detail(info, client)})
 
@@ -4171,7 +4242,7 @@ async def play_info(request: Request):
         if _fd is not None:
             return _fd
     if _parse_line_item_guid(guid):
-        fixed_info = _vod_play_info(guid, client)
+        fixed_info = _vod_play_info(guid, client, request)
         if fixed_info is not None:
             return fixed_info
     error = await _load_t4_detail(guid, request)
@@ -4180,8 +4251,20 @@ async def play_info(request: Request):
 
 
     def _prewarm_from_info(info: dict):
-        """v0.2.42 按需模式：详情页不触发后台预热。"""
-        return None
+        """仅 iOS 当前线按需预热；Web/TV 仍保持 v0.2.42 的详情页零预热。"""
+        if client.kind != clientmod.IOS:
+            return
+        try:
+            mg = str(info.get("media_guid") or "")
+            target = _pick_episode(mg, request) if mg else None
+            if target:
+                _ios_prepare_playlist(mg, target, request)
+                # iOS 走 MKV relay：详情页即启动 ffmpeg remux，把转封装等待前移到
+                # 用户浏览详情阶段，掩盖首次 Range 的起播延迟（单飞，不重复启动）。
+                if _guess_wrapper(target)[1]:
+                    asyncio.create_task(_ensure_relay_job(target, request))
+        except Exception:
+            _log.debug("iOS play/info relay prewarm failed", exc_info=True)
 
     ep = store.get_episode(guid)
     rec = history.get(guid)
@@ -4527,6 +4610,7 @@ async def stream_post(request: Request):
                   len(qualities), len(sl["audio_streams"]),
                   int((time.monotonic() - started) * 1000))
         return JSONResponse({"code": 0, "msg": "", "data": data})
+    playlist_meta = await _ios_stream_playlist_meta(mg, target, request)
     if target.get("kind") == "episode":
         sl = inj.episode_stream_list(target)
     else:
@@ -4534,6 +4618,40 @@ async def stream_post(request: Request):
         sl = inj.stream_list(brief)
     f = sl["files"][0]
     v = sl["video_streams"][0]
+    if playlist_meta.get("duration"):
+        v["duration"] = playlist_meta["duration"]
+    # stream 回传的 media/video guid 必须与 play/info（及请求 mg）一致，否则 iOS
+    # 检测到流 guid 与 play/info 不匹配就不发起 media/range 取流（一直加载不出画）。
+    f["guid"] = mg
+    v["media_guid"] = mg
+    _eg = target.get("ep_guid")
+    # 固定线路电影的 ep_guid 为空，但 play/info 同样使用 episode_guid(og, "", index)
+    # 派生带线路 media/video guid。不能只对剧集识别线路 media_guid，否则电影在
+    # stream 阶段退化成基础 video_guid，iOS 会因与 play/info 不匹配而停取流。
+    _line_eg = _eg or episode_guid(target["online_guid"], "",
+                                   int(target.get("index", 0) or 0))
+    if mg == ep_media_guid(_line_eg, target["line"]):
+        v["guid"] = ep_video_guid(_line_eg, target["line"])
+    elif _eg:
+        v["guid"] = ep_video_guid(_eg, "")
+    else:
+        v["guid"] = video_guid(target["online_guid"])
+    if _is_xiaoya_line_name(target.get("line", "")):
+        # 小雅是直连文件，stream 元数据必须 MP4（非 HLS），与 play_link /direct 一致。
+        _t = (store.get_title_by_guid(target["online_guid"]) or {}).get("title", "") or "小雅资源"
+        v["wrapper"] = "MP4"
+        v["codec_name"] = "hevc"
+        f["file_name"] = _t + ".mp4"
+        f["path"] = "网盘/" + _t + ".mp4"
+    elif _client_of(request).kind == clientmod.IOS and _guess_wrapper(target)[1]:
+        # iOS HLS(fncache) 零分片坏路径 → 渐进式 MKV relay。镜像本地契约：
+        # wrapper MKV + 非零 duration/size + .mkv path；预热 remux 掩盖起播延迟。
+        _b = store.get_title_by_guid(target["online_guid"]) or {}
+        _apply_ios_relay_metadata(sl, _b, target)
+        try:
+            asyncio.create_task(_ensure_relay_job(target, request))
+        except Exception:  # noqa: BLE001
+            pass
     quals = _qualities(target)
     if quals:
         # 高亮必须与【实际播放线路 target.line】一致，不能盲目标第一条，
@@ -4552,7 +4670,8 @@ async def stream_post(request: Request):
     return JSONResponse({"code": 0, "msg": "", "data": {
         "file_stream": f, "video_stream": v,
         "audio_streams": [], "subtitle_streams": [],
-        "qualities": quals, "cloud_storage_info": None}})
+        "qualities": quals, "cloud_storage_info": None,
+        "play_link": _stream_play_link(target, mg, request)}})
 
 
 @app.api_route("/v/api/v1/media/range/{mg}", methods=["GET", "HEAD"])
@@ -4571,8 +4690,14 @@ async def media_range(mg: str, request: Request):
         _dead = _CHART_FAIL_LEVEL.get(chart_g) == "dead"
         if not _dead or _chart_cooldown_left(chart_g) <= 0:
             start_resolve_chart(chart_g)
-        return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/preset.m3u8?index=0",
-                                status_code=302)
+        # iOS 1.13 不跟随 master variant：准备中的榜单片也直接交给 main 的
+        # phwait 占位媒体清单，由既有短分片轮询等待绑定完成。
+        params = {"index": "0"}
+        if _client_of(request).kind == clientmod.IOS:
+            params.update({"from": "mr", "phwait": "1"})
+        return RedirectResponse(
+            f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{urllib.parse.urlencode(params)}",
+            status_code=302)
     if not target:
         # 本地真实媒体字节（Flutter 原生播放器 Range 请求）：必须流式透传，
         # 不能整包缓冲几 GB 的影片，否则打满内存/swap 拖死整机。
@@ -4615,17 +4740,458 @@ async def media_range(mg: str, request: Request):
                 _warm_playlist(mg, target, request)
         except Exception:
             pass
-        # 新版 iOS 的 media/range 需要像官方一样直接拿到播放内容：
-        # 302 到 main 虽能下载清单，原生播放器却不继续请求分片；这里在同一
-        # 请求内构造单线路 main 并直接返回 200，其它端仍走原 preset 跳转。
+        # iOS 1.13 的 HLS(fncache) 是零分片坏路径（issue#98 官方已知）；真机唯一
+        # 验证可播的是渐进式文件，故 iOS+HLS 302 到 /relay（ffmpeg remux MKV，
+        # 文件式 Range 可 seek）。Web/TV 仍 preset master 选线菜单。
         if _client_of(request).kind == clientmod.IOS:
-            main_scope = dict(request.scope)
-            main_scope["path"] = f"{ONLINE_PREFIX}/{mg}/main.m3u8"
-            main_scope["query_string"] = q.encode()
-            return await hls_main(mg, Request(main_scope))
+            return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/relay?{q}",
+                                    status_code=302)
         return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{q}",
                                 status_code=302)
     return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/direct?{q}", status_code=302)
+
+
+_RELAY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "relay")
+_RELAY_JOBS: dict = {}
+_RELAY_LOCK = asyncio.Lock()
+_RELAY_MAX_JOBS = 3
+_RELAY_TTL = 120.0
+_RELAY_RANGE_MAX = 4 * 1024 * 1024  # 单次同步读取上限，避免开放区间吃光内存。
+
+
+def _relay_key(target: dict) -> str:
+    raw = f"{target.get('online_guid')}|{target.get('line')}|{target.get('index')}"
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
+def _relay_kill(j: dict):
+    p = j.get("proc")
+    if p is not None and p.returncode is None:
+        try:
+            p.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _relay_drop(key: str):
+    j = _RELAY_JOBS.pop(key, None)
+    if not j:
+        return
+    _relay_kill(j)
+    try:
+        os.remove(j["path"])
+    except OSError:
+        pass
+
+
+def _relay_cleanup():
+    now = time.time()
+    for k, j in list(_RELAY_JOBS.items()):
+        # TTL 从最后一次取流算起；尚未关闭的连续响应必须继续持有任务，不能按
+        # ffmpeg 创建时间强杀，否则长播/暂停后恢复会突然删文件或重新下载。
+        if j.get("active", 0) > 0 or now - j["ts"] <= _RELAY_TTL:
+            continue
+        _relay_drop(k)
+
+
+def _relay_reuse(key: str):
+    """在 _RELAY_LOCK 内复用健康任务；失败任务立即删除以便重建。"""
+    j = _RELAY_JOBS.get(key)
+    if j is None:
+        return None
+    rc = j["proc"].returncode
+    if rc is None or (rc == 0 and time.time() - j["ts"] < _RELAY_TTL):
+        j["ts"] = time.time()
+        return j
+    _relay_drop(key)
+    return None
+
+
+def _relay_input_args(target: dict) -> list[str]:
+    """ffmpeg/ffprobe 共用输入 UA/鉴权头。
+
+    普通 CMS 延续真机验证过的“不额外带 Referer”策略；需解析/专有源显式声明的
+    Referer 则是播放契约的一部分，必须与 Cookie/Authorization 一起传到分片和密钥。
+    """
+    raw = target.get("headers") or {}
+    headers = {str(k).lower(): str(v) for k, v in raw.items()}
+    ua = headers.get("user-agent") or "Mozilla/5.0"
+    args = ["-user_agent", ua.replace("\r", " ").replace("\n", " ")]
+    full = bool(target.get("_relay_full_headers") or target.get("xsrc")
+                or any(target.get(k) for k in ("catvod", "drpy", "guard", "spider_src")))
+    names = ["cookie", "origin", "authorization"] + (["referer"] if full else [])
+    labels = {"cookie": "Cookie", "origin": "Origin",
+              "authorization": "Authorization", "referer": "Referer"}
+    lines = []
+    for name in names:
+        value = headers.get(name, "")
+        if value:
+            value = value.replace("\r", " ").replace("\n", " ")
+            lines.append(f"{labels[name]}: {value}\r\n")
+    if lines:
+        args += ["-headers", "".join(lines)]
+    return args
+
+
+def _ebml_next(buf: bytes, offset: int, limit: int):
+    """读取一个 EBML 元素边界；未知大小只允许由调用方限定在已知父元素内。"""
+    start = offset
+    if offset >= limit:
+        return None
+    first = buf[offset]
+    mask, id_len = 0x80, 1
+    while id_len <= 4 and not (first & mask):
+        mask >>= 1
+        id_len += 1
+    if id_len > 4 or offset + id_len >= limit:
+        return None
+    element_id = int.from_bytes(buf[offset:offset + id_len], "big")
+    offset += id_len
+    first = buf[offset]
+    mask, size_len = 0x80, 1
+    while size_len <= 8 and not (first & mask):
+        mask >>= 1
+        size_len += 1
+    if size_len > 8 or offset + size_len > limit:
+        return None
+    size = first & (mask - 1)
+    for value in buf[offset + 1:offset + size_len]:
+        size = (size << 8) | value
+    data_start = offset + size_len
+    end = limit if size == (1 << (7 * size_len)) - 1 else data_start + size
+    if end > limit:
+        return None
+    return element_id, start, data_start, end
+
+
+def _mkv_write_duration(path: str, seconds: float) -> bool:
+    """在 ffmpeg 预留的 Info/Void 中原位写入 Duration，绝不改变文件长度。
+
+    ffmpeg 通常只在 remux 完成时把 11 字节 Void 改为 Duration。只接受严格的
+    Segment→Info 结构、8 字节 double 和恰好等长的 Void；任何不兼容都安全跳过。
+    """
+    try:
+        seconds = float(seconds)
+        if not math.isfinite(seconds) or seconds <= 0:
+            return False
+        with open(path, "rb") as src:
+            buf = src.read(1024 * 1024)
+        limit = len(buf)
+        offset, segment = 0, None
+        while offset < limit:
+            element = _ebml_next(buf, offset, limit)
+            if element is None:
+                return False
+            eid, _start, data_start, end = element
+            if eid == 0x18538067:  # Segment
+                segment = (data_start, end)
+                break
+            offset = end
+        if segment is None:
+            return False
+        offset, segment_end = segment
+        info = None
+        while offset < segment_end:
+            element = _ebml_next(buf, offset, segment_end)
+            if element is None:
+                return False
+            eid, _start, data_start, end = element
+            if eid == 0x1549A966:  # Info
+                info = (data_start, end)
+                break
+            if eid == 0x1F43B675:  # Cluster：Info 已不会再出现
+                return False
+            offset = end
+        if info is None:
+            return False
+        offset, info_end = info
+        scale, duration_element, void_element = 1_000_000, None, None
+        while offset < info_end:
+            element = _ebml_next(buf, offset, info_end)
+            if element is None:
+                return False
+            eid, start, data_start, end = element
+            if eid == 0x2AD7B1 and 0 < end - data_start <= 8:  # TimecodeScale
+                scale = int.from_bytes(buf[data_start:end], "big")
+            elif eid == 0x4489 and end - data_start == 8:  # Duration
+                duration_element = element
+            elif eid == 0xEC and end - start == 11:  # ffmpeg 的 Duration 占位 Void
+                void_element = element
+            offset = end
+        if scale <= 0:
+            return False
+        ticks = seconds * 1_000_000_000 / scale
+        if not math.isfinite(ticks) or ticks <= 0:
+            return False
+        payload = struct.pack(">d", ticks)
+        if duration_element is not None:
+            _eid, _start, data_start, end = duration_element
+            current = struct.unpack(">d", buf[data_start:end])[0]
+            if math.isfinite(current) and current > 0:
+                return True
+            write_at, old, new = data_start, buf[data_start:end], payload
+        elif void_element is not None:
+            _eid, start, _data_start, end = void_element
+            write_at, old = start, buf[start:end]
+            new = b"\x44\x89\x88" + payload
+        else:
+            return False
+        with open(path, "r+b", buffering=0) as out:
+            out.seek(write_at)
+            if out.read(len(old)) != old:
+                return False
+            out.seek(write_at)
+            return out.write(new) == len(new)
+    except (OSError, OverflowError, ValueError, struct.error):
+        return False
+
+
+def _relay_write_duration(j: dict):
+    if (j.get("duration_header") or j["proc"].returncode is not None
+            or float(j.get("duration") or 0) <= 0):
+        return
+    if _mkv_write_duration(j["path"], j["duration"]):
+        j["duration_header"] = True
+
+
+async def _ensure_relay_job(target: dict, request: Request = None) -> dict:
+    """单飞启动/复用 ffmpeg remux 到临时 MKV，供文件式 Range 服务。"""
+    key = _relay_key(target)
+    needs_resolve = any(target.get(k) for k in
+                        ("resolve", "redirect", "xsrc", "catvod", "drpy", "guard", "spider_src"))
+    if request is not None and needs_resolve:
+        # 每个 Range 都会经过这里：健康任务直接复用，不能重复解析分享页/专有源。
+        async with _RELAY_LOCK:
+            _relay_cleanup()
+            j = _relay_reuse(key)
+            if j is not None:
+                return j
+        # 只在真正需要解析的后台任务里联网；普通 CMS 直链没有额外起播探测。
+        target = dict(target, _relay_full_headers=True)
+        target = await _resolve_if_needed(target, request) or target
+    if not target.get("url"):
+        raise ValueError("relay 未解析出媒体地址")
+    # stream/list、stream、play/play 会连续预热同一目标；锁内二次检查，避免多个
+    # 调用都在登记任务前 await spawn，进而重复启动 ffmpeg 写同一路径。
+    async with _RELAY_LOCK:
+        _relay_cleanup()
+        j = _relay_reuse(key)
+        if j is not None:
+            return j
+        while len(_RELAY_JOBS) >= _RELAY_MAX_JOBS:
+            # 优先淘汰空闲且最久未使用的任务；只有全部活跃才淘汰最旧活跃任务。
+            ok = min(_RELAY_JOBS,
+                     key=lambda k: (_RELAY_JOBS[k].get("active", 0) > 0,
+                                    _RELAY_JOBS[k]["ts"]))
+            _relay_drop(ok)
+        os.makedirs(_RELAY_DIR, exist_ok=True)
+        path = os.path.join(_RELAY_DIR, key + ".mkv")
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+               "-probesize", "2000000", "-analyzeduration", "2000000"]
+        # 官方本地播放契约：MKV + application/octet-stream + File-Size + 数字Content-Range，
+        # iOS 可直接播 MKV（本地库实证），无需 MP4/faststart。remux 为 matroska。
+        # -y 覆盖服务重启后留下的同 key 文件，避免 ffmpeg 等待交互而直接退出。
+        cmd += _relay_input_args(target)
+        cmd += ["-i", target["url"], "-c", "copy", "-f", "matroska", path]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL)
+        cached_duration = _relay_duration_fallback(target)
+        j = {"proc": proc, "path": path, "ts": time.time(),
+             "duration": cached_duration,
+             "duration_source": "playlist" if cached_duration else "",
+             "size_est": int(cached_duration * 4_000_000 / 8),
+             "duration_header": False, "active": 0}
+        _RELAY_JOBS[key] = j
+        try:
+            asyncio.create_task(_relay_probe_meta(j, target))
+        except Exception:  # noqa: BLE001
+            pass
+        return j
+
+
+def _relay_duration_fallback(target: dict) -> int:
+    """从已缓存清单的 EXTINF 求和得时长（无网络、快），ffprobe 不可靠时的兜底。"""
+    try:
+        hit = _PLAYLIST_CACHE.get(_playlist_cache_key(target))
+        body = hit[1] if hit else None
+        if body and isinstance(body, str):
+            return int(sum(float(x) for x in
+                           re.findall(r"#EXTINF:([\d.]+)", body)))
+    except Exception:  # noqa: BLE001
+        pass
+    return 0
+
+
+async def _relay_probe_meta(j: dict, target: dict):
+    """探测真实时长；HLS 清单的 format.bit_rate 不是媒体码率，绝不用于估算。"""
+    p = None
+    try:
+        p = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", *_relay_input_args(target),
+            "-show_entries", "format=duration,bit_rate", "-of", "json",
+            "-i", target["url"],
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(p.communicate(), 15)
+        d = (json.loads(out) or {}).get("format", {})
+        dur = float(d.get("duration") or 0)
+        if dur > 0:
+            duration = int(round(dur))
+            j["duration"] = duration
+            j["duration_source"] = "ffprobe"
+            j["size_est"] = int(duration * 4_000_000 / 8)
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        # wait_for 超时只取消 communicate，不会自动结束 ffprobe；必须主动 kill。
+        if p is not None and p.returncode is None:
+            try:
+                p.kill()
+            except Exception:  # noqa: BLE001
+                pass
+    if not j.get("duration"):
+        fb = _relay_duration_fallback(target)
+        if fb > 0:
+            j["duration"] = fb
+            j["duration_source"] = "playlist"
+            j["size_est"] = int(fb * 4_000_000 / 8)
+
+
+async def _relay_wait_size(j: dict, n: int, timeout: float) -> int:
+    loop = asyncio.get_event_loop()
+    end = loop.time() + timeout
+    while loop.time() < end:
+        try:
+            sz = os.path.getsize(j["path"])
+        except OSError:
+            sz = 0
+        if sz >= 4096:
+            _relay_write_duration(j)
+        if sz >= n or j["proc"].returncode is not None:
+            return sz
+        await asyncio.sleep(0.15)
+    try:
+        return os.path.getsize(j["path"])
+    except OSError:
+        return 0
+
+
+async def _relay_wait_done(j: dict, timeout: float) -> bool:
+    loop = asyncio.get_event_loop()
+    end = loop.time() + timeout
+    while loop.time() < end:
+        if j["proc"].returncode is not None:
+            return True
+        await asyncio.sleep(0.3)
+    return j["proc"].returncode is not None
+
+
+@app.get(f"{ONLINE_PREFIX}/{{mg}}/relay")
+async def ios_relay(mg: str, request: Request):
+    """iOS 1.13 fncache：文件式可 seek relay。ffmpeg remux HLS→临时 MKV，以
+    Content-Length/Range 服务，支持进度/续播/拖动；预热掩盖起播延迟。仅 iOS。"""
+    # 与 main/preset 共用选线：play/play 写入 URL 的显式 line 必须覆盖默认线，
+    # 固定线路 guid 仍由 _pick_episode 优先解析，不在这里重新竞速。
+    target = _pick_episode(mg, request)
+    if not target or not target.get("url"):
+        return Response("线路未就绪", status_code=404,
+                        headers={"Cache-Control": "no-store"})
+    try:
+        j = await _ensure_relay_job(target, request)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("ios relay spawn failed: %r", exc)
+        return Response("relay 不可用", status_code=502)
+    path = j["path"]
+    H = {"Accept-Ranges": "bytes", "Cache-Control": "no-store",
+         "Access-Control-Allow-Origin": "*"}
+    rng = request.headers.get("range")
+    # 优先用 ffprobe 估算保持稳定进度；实际字节超过估值后必须上调，绝不可返回
+    # Content-Range: bytes 0-99/50 这类非法响应。ffmpeg 完成后以真实文件大小为准。
+    total_est = j.get("size_est") or 0
+
+    def _total(sz: int, minimum: int = 0) -> int:
+        if j["proc"].returncode is not None:
+            return max(sz, minimum)
+        return max(j.get("size_est") or 0, total_est, sz, minimum)
+
+    def _hdr(total: int):
+        return {**H, "File-Size": str(total)}
+
+    if rng:
+        m = re.fullmatch(r"bytes=(\d+)-(\d*)", rng.strip())
+        if m:
+            s = int(m.group(1))
+            e = int(m.group(2)) if m.group(2) else None
+            if e is not None and e < s:
+                try:
+                    cur = os.path.getsize(path)
+                except OSError:
+                    cur = 0
+                return Response(b"", status_code=416,
+                                headers={**H, "Content-Range": f"bytes */{_total(cur)}"})
+            probe = (s == 0 and (e is None or e <= 1))
+            sz = await _relay_wait_size(j, s + 1, 10 if probe else 60)
+            total_est = j.get("size_est") or total_est
+            rc = j["proc"].returncode
+            if sz <= s:
+                if rc is not None:
+                    if rc != 0:
+                        return Response("relay 转封装失败", status_code=502,
+                                        headers={"Cache-Control": "no-store"})
+                    return Response(b"", status_code=416, media_type="application/octet-stream",
+                                    headers={**_hdr(sz), "Content-Range": f"bytes */{sz}"})
+                if probe:
+                    # 下载尚未产出时只给首探测返回 EBML 魔数，保持 iOS 不起播即 416
+                    # 的兼容行为；其它 Range 必须继续等待或以可重试错误结束。
+                    n = (e + 1) if e is not None else 2
+                    total = max(total_est, sz, n)
+                    return Response(b"\x1a\x45\xdf\xa3"[:n], status_code=206,
+                                    media_type="application/octet-stream",
+                                    headers={**_hdr(total),
+                                             "Content-Range": f"bytes 0-{n-1}/{total}"})
+                return Response("媒体尚未生成到请求位置", status_code=503,
+                                headers={"Cache-Control": "no-store", "Retry-After": "1"})
+            requested_end = e if e is not None else sz - 1
+            end = min(requested_end, sz - 1, s + _RELAY_RANGE_MAX - 1)
+            with open(path, "rb") as f:
+                f.seek(s)
+                data = f.read(end - s + 1)
+            # 读取期间文件仍可能增长；以实际返回区间的末端为总长的最低合法值。
+            if not data:
+                return Response("媒体读取竞态，请重试", status_code=503,
+                                headers={"Cache-Control": "no-store", "Retry-After": "1"})
+            actual_end = s + len(data) - 1
+            total = _total(sz, actual_end + 1)
+            return Response(data, status_code=206,
+                            media_type="application/octet-stream",
+                            headers={**_hdr(total),
+                                     "Content-Range": f"bytes {s}-{actual_end}/{total}"})
+
+    j["active"] = j.get("active", 0) + 1
+
+    async def pump():
+        try:
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if chunk:
+                        # 连续响应也是活动引用，不能只靠创建时间判断 TTL。
+                        j["ts"] = time.time()
+                        yield chunk
+                        continue
+                    if j["proc"].returncode is not None:
+                        break
+                    await asyncio.sleep(0.2)
+        finally:
+            j["active"] = max(0, j.get("active", 1) - 1)
+            j["ts"] = time.time()
+
+    try:
+        current_size = os.path.getsize(path)
+    except OSError:
+        current_size = 0
+    return StreamingResponse(pump(), media_type="application/octet-stream",
+                             headers={**H, "File-Size": str(_total(current_size))})
 
 
 def _guess_wrapper(target: dict) -> tuple[str, bool]:
@@ -4643,6 +5209,44 @@ def _guess_wrapper(target: dict) -> tuple[str, bool]:
         return "MP4", False
     # 跳转页 / 分享解析页 / 普通直链默认 HLS；解析后若实为 mp4，main 会 302 到 direct
     return "HLS", True
+
+
+def _absolute_media_url(request: Request, path: str) -> str:
+    """按当前请求或可信反代头生成新 iOS Alamofire 可解析的绝对地址。"""
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    if not host:
+        return path
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme or "http"
+    proto = proto.split(",", 1)[0].strip().lower()
+    if proto not in ("http", "https"):
+        proto = request.url.scheme or "http"
+    return f"{proto}://{host}{path}"
+
+
+def _stream_play_link(target: dict, mg: str, request: Request = None) -> str:
+    """新版飞牛 App（1.13+）起播读 stream/play-info 的 play_link，不再调 media/range。
+    iOS HLS 给 /relay（渐进式 MKV）、Web/TV HLS 给 preset.m3u8、直连文件给 /direct；
+    固定线路不带 auto（不竞速）。iOS 与官方 play/play 一样返回相对路径复用当前会话。"""
+    params = {"line": target.get("line", ""), "index": int(target.get("index", 0) or 0)}
+    if not target.get("_fixed_line"):
+        params["auto"] = "1"
+    _w, is_hls = _guess_wrapper(target)
+    _ios = request is not None and _client_of(request).kind == clientmod.IOS
+    q = urllib.parse.urlencode(params)
+    if is_hls and _ios:
+        # iOS 1.13 的 HLS(fncache) 是零分片坏路径（issue#98 官方已知；resolver 能播
+        # 实为 MP4）。真机唯一验证可播的是渐进式文件，故 iOS HLS 走 /relay MKV。
+        ep = "relay?"
+    elif is_hls:
+        ep = "preset.m3u8?"
+    else:
+        ep = "direct?"
+    path = f"{ONLINE_PREFIX}/{mg}/" + ep + q
+    # iOS relay 与官方 play/play 一致返回相对路径，复用 App 当前服务器会话；
+    # 绝对 http://nas.local 地址曾在 fncache 取流前报 HTTP Error。
+    if request is not None and not (is_hls and _ios):
+        return _absolute_media_url(request, path)
+    return path
 
 
 @app.post("/v/api/v1/play/play")
@@ -4770,13 +5374,23 @@ async def play_play(request: Request):
     # 卡在海报墙像“点了没反应”）。先瞬时返回播放地址让播放器立刻进入加载页转圈，
     # 真正的解析延迟到播放器内部取 main.m3u8 / direct 时再做（那里本就有加载指示）。
     wrapper, is_hls = _guess_wrapper(target)
+    use_ios_relay = is_hls and _client_of(request).kind == clientmod.IOS
     # 固定线路卡等价于用户手动选线：不带 auto=1，禁止被自动选优覆盖。
     params = {"line": target["line"], "index": target["index"]}
     if not target.get("_fixed_line"):
         params["auto"] = "1"
     q = urllib.parse.urlencode(params)
     if is_hls:
-        play_link = f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{q}"
+        if use_ios_relay:
+            # iOS HLS(fncache) 零分片坏路径 → 渐进式 MKV relay（真机唯一可播）。
+            play_link = f"{ONLINE_PREFIX}/{mg}/relay?{q}"
+            # 预热：提前 remux 首段掩盖起播延迟（有界后台任务，TTL 自动清理）。
+            try:
+                asyncio.create_task(_ensure_relay_job(target, request))
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            play_link = f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{q}"
         # 后台立刻预热全部普通线路（含解析 + 播放列表），播放器取 main 时大概率已就绪
         try:
             _tgts = [t for t in store.target_lines(target)[:_PREWARM_MAX]
@@ -4792,12 +5406,14 @@ async def play_play(request: Request):
             pass
     else:
         play_link = f"{ONLINE_PREFIX}/{mg}/direct?{q}"
+    # 官方 iOS play/play 返回相对路径；真机使用绝对 http://nas.local 地址时曾在
+    # fncache 发起 media/range 之前报 HTTP Error。相对路径复用 App 当前服务器会话。
     return JSONResponse({"code": 0, "msg": "", "data": {
         "audio_guid": "", "audio_index": -1, "hls_time": 6,
         "is_subtitle_external": 0, "media_guid": mg,
         "play_link": play_link, "subtitle_guid": "", "subtitle_index": -1,
         "subtitle_link": "", "video_guid": body.get("video_guid", vg_for(mg)),
-        "video_index": 0, "wrapper": wrapper,
+        "video_index": 0, "wrapper": "MKV" if use_ios_relay else wrapper,
         "non_fatal_errno": None, "video_encoder": "",
         "not_supported_resolution": "", "supported_highest_resolution": ""}})
 
@@ -6698,6 +7314,9 @@ try:
 except Exception:
     _MAIN_SLOW_BUDGET = 2.4
 _MAIN_SLOW_BUDGET = min(max(_MAIN_SLOW_BUDGET, 0.8), 2.8)
+# 社区新版 iOS media/range 专用的真实清单就绪预算；超时只返回占位，
+# 不取消 _get_playlist_cached 的共享单飞任务。
+_IOS_READY_BUDGET = 2.2
 
 
 def _is_slow_line(p: dict) -> bool:
@@ -7049,6 +7668,60 @@ def _warm_playlist(mg: str, picked: dict, request: Request) -> None:
     asyncio.create_task(_get_playlist_cached(mg, picked, request))
 
 
+def _ios_prepare_playlist(mg: str, target: dict, request: Request) -> bool:
+    """社区新版策略：详情/取流只启动当前线单飞，不增加候选、不等待。"""
+    if _client_of(request).kind != clientmod.IOS or not target or target.get("t4"):
+        return False
+    if target.get("_pansou_manual") or target.get("_xiaoya_manual") \
+            or _is_pansou_line_name(target.get("line", "")) \
+            or _is_xiaoya_line_name(target.get("line", "")):
+        return False
+    _wrapper, is_hls = _guess_wrapper(target)
+    if not is_hls:
+        return False
+    try:
+        _warm_playlist(mg, target, request)
+        return True
+    except Exception as exc:
+        _log.debug("iOS playlist prewarm failed: %s", exc)
+        return False
+
+
+async def _ios_stream_playlist_meta(mg: str, target: dict, request: Request) -> dict:
+    """只读已就绪的共享清单；pending/失败立即返回，绝不在 stream 等待上游。
+
+    与社区 get_playlist_meta 一致。2.2s 就绪窗口只存在于
+    iOS media/range → preset(from=mr) → main(ph=1)。
+    """
+    if not _ios_prepare_playlist(mg, target, request):
+        return {}
+    key = _playlist_cache_key(target)
+    now = time.time()
+    body = None
+    hit = _PLAYLIST_CACHE.get(key)
+    if hit and now - hit[0] < _PLAYLIST_TTL:
+        body = hit[1]
+    else:
+        # _PLAYLIST_FUT 直接保存 asyncio.Future，不是 (timestamp, future)。
+        fut = _PLAYLIST_FUT.get(key)
+        if fut is not None and fut.done() and not fut.cancelled():
+            try:
+                body = fut.result()
+            except Exception:
+                body = None
+    if isinstance(body, (bytes, bytearray)):
+        text = bytes(body).decode("utf-8-sig", "replace")
+    elif isinstance(body, str):
+        text = body
+    else:
+        return {}
+    if not _playlist_has_segment(text):
+        return {}
+    duration = int(sum(float(v) for v in
+                       re.findall(r"#EXTINF:([\d.]+)", text)))
+    return {"duration": max(1, duration)} if duration > 0 else {}
+
+
 # preset 菜单预热线：飞牛播放器拿到多线路 master 后，会在【起播前】对每条变体串行预取
 # 一次 main（冷清单每条要真打上游 150~300ms，20 条串行累计 4~25s，表现为“起播慢”，
 # 实测 play/play 到首个分片被拖到 4.7s）。preset 返回前并发后台预热所有普通 CMS 线
@@ -7075,6 +7748,85 @@ def _warm_preset_lines(mg: str, targets: list[dict], request: Request) -> None:
     return None
 
 
+def _ios_playlist_absolute_uris(body: bytes, request: Request) -> bytes:
+    """仅 iOS：把清单内本代理的分片/变体/URI 属性改写成当前外部 origin 的绝对地址。
+
+    新版 fncache 会把清单缓存到本地（文件或本地代理）再交给 AVPlayer，根相对
+    `/v/media/online/seg/...` 随之失去远端 HTTP base，被解析成本地路径，于是一个
+    分片都不发（实测 preset 200 后零 seg）。社区 fork 也曾用绝对地址修此问题
+    （6d792c3），后因丢端口回退相对——但回退重新引入了该 bug。这里用请求自身的
+    Host/X-Forwarded-Proto（含端口）生成绝对地址，保留短 .ts 路径不变。
+    共享缓存仍是规范根相对正文；已有绝对源站 URL 与非 HTTP scheme 不动。
+    """
+    try:
+        text = body.decode("utf-8")
+    except Exception:
+        return body
+    if not text.lstrip("\ufeff").startswith("#EXTM3U"):
+        return body
+    base = _absolute_media_url(request, request.url.path)
+    if "://" not in base:
+        return body
+
+    def _abs(u: str) -> str:
+        if u.startswith("/") and "://" not in u and u.startswith(ONLINE_PREFIX):
+            return urllib.parse.urljoin(base, u)
+        return u
+
+    out = []
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            new = _abs(stripped)
+            if new != stripped:
+                line = line.replace(stripped, new, 1)
+        elif 'URI="' in line:
+            line = re.sub(r'URI="([^"]+)"',
+                          lambda m: 'URI="' + _abs(m.group(1)) + '"', line)
+        out.append(line)
+    return "".join(out).encode("utf-8")
+
+
+def _m3u8_resp(body, request: Request, headers: dict = None) -> Response:
+    """返回完整 HLS 文本清单；Range 探测不能切成不可解析的字节片段。"""
+    if isinstance(body, str):
+        body = body.encode("utf-8")
+    is_ios = _client_of(request).kind == clientmod.IOS
+    if is_ios:
+        # 新版 fncache 对长查询分片处理不稳。共享缓存仍保存规范长 URL，
+        # 仅把发往 iOS 的响应副本改成本服务短 .ts 路径。
+        root = ONLINE_PREFIX + "/"
+        path = request.url.path
+        if path.startswith(root):
+            mg = path[len(root):].split("/", 1)[0]
+            if mg:
+                # RFC 8216 要求每一行（包括最后一行）以换行结束。
+                # 新版 iOS 可能整份拒绝缺少末尾换行的清单，Android通常容忍。
+                if (body.startswith((b"#EXTM3U", b"\xef\xbb\xbf#EXTM3U"))
+                        and not body.endswith((b"\n", b"\r"))):
+                    body += b"\n"
+                body = hls_short.shorten_playlist(body, mg, ONLINE_PREFIX)
+                # 短 .ts 仍是根相对；fncache 本地缓存会使其失去远端 base。
+                # 进一步改写成外部绝对地址，AVPlayer 才会真正发起分片请求。
+                body = _ios_playlist_absolute_uris(body, request)
+    h = {"Access-Control-Allow-Origin": "*"}
+    if headers:
+        h.update(headers)
+    if is_ios:
+        # 社区新版 iOS 适配：no-cache 仍允许 fncache 存储并反复取回清单；
+        # 禁止存储并关闭该清单连接，避免复用播放前的缓存状态。
+        h["Cache-Control"] = "no-store"
+        h["Connection"] = "close"
+    # m3u8 是播放指令而非可随机读取的媒体字节。即使 fncache 发 Range，也必须
+    # 返回完整 200；二进制 seg/direct/relay 的 Range 由各自响应单独处理。
+    for key in list(h):
+        if key.lower() in ("content-length", "content-range", "accept-ranges"):
+            h.pop(key)
+    h["Content-Length"] = str(len(body))
+    return Response(body, status_code=200,
+                    media_type="application/vnd.apple.mpegurl", headers=h)
+
+
 @app.get(f"{ONLINE_PREFIX}/{{mg}}/preset.m3u8")
 async def hls_preset(mg: str, request: Request):
     _pl = request.query_params.get("line")
@@ -7084,9 +7836,23 @@ async def hls_preset(mg: str, request: Request):
     # 播放页就会漏登记，导致 main 误判“非手切”回落 CMS、网盘线永远 arm 不起来。
     if _pl == PANSOU_LINE:
         _pansou_mark_user_pick(mg)
+    # 完整复刻社区 v0.0.2.16 的 iOS media/range 入口：preset 只是稳定 URL，
+    # 实际请求必须改写成 main + ph=1，启用 2.2s 就绪预算；慢源先回可轮询的
+    # 占位媒体清单，后台同一单飞继续抓取。只转发原 query 会漏掉这套恢复机制。
+    if (_client_of(request).kind == clientmod.IOS
+            and request.query_params.get("from") == "mr"):
+        scope = dict(request.scope)
+        scope["path"] = f"{ONLINE_PREFIX}/{mg}/main.m3u8"
+        main_query = {"line": _pl or "", "index": str(idx0), "ph": "1"}
+        for key in ("start", "phwait"):
+            value = request.query_params.get(key)
+            if value:
+                main_query[key] = value
+        scope["query_string"] = urllib.parse.urlencode(main_query).encode()
+        return await hls_main(mg, Request(scope))
     # direct/mp4 取流失败回跳入口：直接给占位 master，不再枚举可能同样失效的线路
     if request.query_params.get("ph") == "1":
-        return _placeholder_master_response(idx0)
+        return _placeholder_master_response(idx0, mg, request)
     # 榜单片可能尚未绑定：确保后台绑定任务已启动，但 preset【绝不长时间等待】
     #（搜索最坏 25s，会先撞上客户端~3s 首字节超时，导致连占位都拿不到）。仅极短
     # 等一下，未就绪立刻回占位 master，由 main(phwait) 继续等待并自动切正片。
@@ -7095,7 +7861,7 @@ async def hls_preset(mg: str, request: Request):
         start_resolve_chart(_cg)
     picked = _pick_episode(mg, request)
     if not picked:
-        return _placeholder_master_response(idx0)
+        return _placeholder_master_response(idx0, mg, request)
     # 起播即跳过已知坏线（用户显式选线除外）
     picked = _dodge_known_bad(picked, request)
     # 注意：此处不 await _resolve_if_needed —— preset 只输出线路变体菜单，
@@ -7170,7 +7936,7 @@ async def hls_preset(mg: str, request: Request):
                 or t.get("resolve") or t.get("redirect") or _need_resolve(t):
             hls_targets.append(t)
     if not hls_targets:
-        return _placeholder_master_response(idx0)
+        return _placeholder_master_response(idx0, mg, request)
     # 显式线单变体时，仍在后台并发预热该片全部普通 CMS 线（供线路菜单切线秒切），
     # 但不把它们写进本次 master，避免播放器串行预取拖慢首帧。
     if explicit_line and explicit_line != PANSOU_LINE:
@@ -7214,6 +7980,8 @@ async def hls_preset(mg: str, request: Request):
         # 手动 PanSou 线即使排首位也绝不带 auto=1（它必须由用户主动选择才触发搜索）
         if is_auto_first and not _is_manual_pansou(t):
             q["auto"] = "1"
+        # 保持 v1.1.0 已验证的 master 相对变体契约，由播放器基于 preset URL
+        # 解析到同目录 main；不要再按客户端改写成另一种路径形状。
         return "main.m3u8?" + urllib.parse.urlencode(q)
 
     # 起播前并发后台预热最可能起播的若干普通 CMS 线，摊平播放器对各变体串行预取
@@ -7244,8 +8012,7 @@ async def hls_preset(mg: str, request: Request):
             # 仅首个（自动起播）变体带 auto=1
             out.append(variant_uri(t, auto_mode and i == 0))
         master = "\n".join(out) + "\n"
-    return Response(master, media_type="application/vnd.apple.mpegurl",
-                    headers={"Access-Control-Allow-Origin": "*"})
+    return _m3u8_resp(master, request)
 
 
 _PROVIDER_CN = {
@@ -7407,6 +8174,10 @@ def _cached_sibling_playlist(picked: dict, *, prefer: str | None = None):
 
 @app.get(f"{ONLINE_PREFIX}/{{mg}}/main.m3u8")
 async def hls_main(mg: str, request: Request):
+    return await _hls_main_impl(mg, request)
+
+
+async def _hls_main_impl(mg: str, request: Request):
     phwait = request.query_params.get("phwait") == "1"
     picked = None
     _req_t0 = time.time()
@@ -7423,7 +8194,7 @@ async def hls_main(mg: str, request: Request):
         # 网盘线 dead：先在播放画面烧字提示"网盘分享已失效，已切换在线线路"数秒，
         # 窗口过后放行下方正常选线回退在线 CMS——明确告知而非静默回退。
         if _pansou_dead_msg_active(mg):
-            return _placeholder_playlist_response(mg)
+            return _placeholder_playlist_response(mg, request=request)
         # 网盘 dead 提示窗口过后：按底层影片 og 回退在线 CMS（绕过死的网盘 target），
         # 实现"已切换在线线路"。picked 置为 CMS 目标后，下方 _pick_episode 不再覆盖。
         _cms_fb = _pansou_dead_cms_target(mg, request)
@@ -7452,7 +8223,7 @@ async def hls_main(mg: str, request: Request):
                 or (og == mg and _pick_episode(mg_eff, request))):
             # 非榜单片也给一次后台按片名找线机会（由 preset/点击侧已触发则复用）。
             # 始终回【直播式】占位（无 ENDLIST，播放器持续重拉不报错）。
-            return _placeholder_playlist_response(mg)
+            return _placeholder_playlist_response(mg, request=request)
         # 已绑定：落入正常流程（继续按下面的 query 决定线路；phwait 不指定具体线，
         # 走默认/竞速），播放真实清单。
 
@@ -7473,7 +8244,7 @@ async def hls_main(mg: str, request: Request):
         if _pansou_manual_state(mg) != "ready":
             if _ttitle:
                 _pansou_manual_arm(mg, _ttitle, _pidx)
-            return _placeholder_playlist_response(mg)
+            return _placeholder_playlist_response(mg, request=request)
         _snap = _PANSOU_MAN_SNAP.get(mg)
         if _snap:
             picked = dict(_snap, index=_pidx)
@@ -7534,10 +8305,10 @@ async def hls_main(mg: str, request: Request):
             # 仅待命、记录片名，绝不在这里搜索/转存（main 会被菜单预取）。
             # 真正触发发生在用户切到该线、播放器拉占位分片时（placeholder kick）。
             _pansou_manual_arm(mg, title, pidx)
-            return _placeholder_playlist_response(mg)
+            return _placeholder_playlist_response(mg, request=request)
         snap = _PANSOU_MAN_SNAP.get(mg)
         if not snap:
-            return _placeholder_playlist_response(mg)
+            return _placeholder_playlist_response(mg, request=request)
         picked = dict(snap, index=pidx)
         request.state._failover_picked = picked
         request.state._play_mg = mg
@@ -7554,7 +8325,7 @@ async def hls_main(mg: str, request: Request):
             body = await asyncio.wait_for(
                 asyncio.shield(_build_pan()), timeout=_MAIN_SLOW_BUDGET)
         except asyncio.TimeoutError:
-            return _placeholder_playlist_response(mg)
+            return _placeholder_playlist_response(mg, request=request)
         if body and (body is _NOT_HLS or _playlist_has_segment(body)):
             if body is _NOT_HLS:
                 # 网盘直链 MP4：走 /direct 取新鲜签名直链 302（阿里/UC 免 NAS 中转），
@@ -7563,14 +8334,30 @@ async def hls_main(mg: str, request: Request):
                 return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/direct?{_dqp}",
                                         status_code=302,
                                         headers={"Cache-Control": "no-store"})
-            return Response(body, media_type="application/vnd.apple.mpegurl",
-                            headers={"Cache-Control": "no-cache",
-                                     "Access-Control-Allow-Origin": "*"})
+            return _m3u8_resp(body, request, {"Cache-Control": "no-cache"})
         # 抓取瞬间失败/空清单：回占位等下次轮询，不弹错误锁菜单
-        return _placeholder_playlist_response(mg)
+        return _placeholder_playlist_response(mg, request=request)
 
     # 起播即跳过已知坏线（用户显式选线除外），避免无谓探测延迟
     picked = _dodge_known_bad(picked, request)
+
+    # 社区 v0.0.2.16 的 iOS from=mr 完整路径：只给真实清单 2.2s 就绪预算。
+    # stream/list、stream 和 media/range 已启动的同一 _PLAYLIST_FUT 会被复用；
+    # 超时绝不取消它，而是返回占位媒体清单，让 fncache/播放器继续轮询。
+    if (request.query_params.get("ph") == "1"
+            and _client_of(request).kind == clientmod.IOS):
+        _warm_playlist(mg, picked, request)
+        try:
+            body = await asyncio.wait_for(
+                asyncio.shield(_get_playlist_cached(mg, picked, request)),
+                timeout=_IOS_READY_BUDGET)
+        except asyncio.TimeoutError:
+            return _placeholder_playlist_response(mg, request=request)
+        except Exception:
+            body = None
+        if (body is not None and body is not _NOT_HLS
+                and _playlist_has_segment(body)):
+            return _m3u8_resp(body, request, {"Cache-Control": "no-cache"})
 
     async def _serve_normal(_p: dict):
         # 【自动起播秒播快路径】auto 起播时，先看本片本片是否已有预建好的真实清单：
@@ -7595,19 +8382,15 @@ async def hls_main(mg: str, request: Request):
                                 and "_placeholder/" not in _fbc[1][:400]):
                             _log.info("播放中检测到慢线，静默切换 %s -> %s",
                                       _p.get("line"), _faster)
-                            return Response(_fbc[1],
-                                            media_type="application/vnd.apple.mpegurl",
-                                            headers={"Cache-Control": "no-cache",
-                                                     "Access-Control-Allow-Origin": "*"})
+                            return _m3u8_resp(_fbc[1], request,
+                                              {"Cache-Control": "no-cache"})
             except Exception:
                 pass
         if auto_play:
             _fast = remembered_fast_line(_p)
             _ready = _cached_sibling_playlist(_p, prefer=_fast)
             if _ready is not None:
-                return Response(_ready, media_type="application/vnd.apple.mpegurl",
-                                headers={"Cache-Control": "no-cache",
-                                         "Access-Control-Allow-Origin": "*"})
+                return _m3u8_resp(_ready, request, {"Cache-Control": "no-cache"})
         # 线路健康探测 + 自动选最快线（含为胜者建清单，可能耗时）：必须在总预算内，
         # 否则自动竞速慢源时首个 main 仍可能超过客户端~3s 超时。
         if _autofail_on():
@@ -7636,7 +8419,7 @@ async def hls_main(mg: str, request: Request):
             # v0.2.42：普通 CMS 抓流失败直接报错，不返回假 HLS 造成无限占位；
             # 加固/爬虫等慢源仍保留占位自愈通道。
             if _is_slow_line(_p):
-                return _placeholder_playlist_response(mg)
+                return _placeholder_playlist_response(mg, request=request)
             return Response("fetch fail upstream", status_code=502)
         if body is _NOT_HLS:
             # 预判为 HLS、解析后实为 mp4：302 到直链代理（direct 复用已解析结果）
@@ -7652,14 +8435,12 @@ async def hls_main(mg: str, request: Request):
                     body2 = await _get_playlist_cached(mg, alt, request)
                     if body2 and body2 is not _NOT_HLS \
                             and _playlist_has_segment(body2):
-                        return Response(body2, media_type="application/vnd.apple.mpegurl",
-                                        headers={"Cache-Control": "no-cache",
-                                                 "Access-Control-Allow-Origin": "*"})
+                        return _m3u8_resp(body2, request, {"Cache-Control": "no-cache"})
             if status == "fail":
                 return Response("暂无可播线路（该源分片已失效，且未找到其他可用源）",
                                 status_code=502)
             if _is_slow_line(_p):
-                return _placeholder_playlist_response(mg)
+                return _placeholder_playlist_response(mg, request=request)
             # v0.2.42 running：让客户端 3 秒后重试，不返回占位视频。
             return Response("正在为你寻找可用线路…", status_code=503,
                             headers={"Retry-After": "3",
@@ -7667,9 +8448,7 @@ async def hls_main(mg: str, request: Request):
         _sk = sourcehealth.source_key_of(_p.get("line"), _p)
         if _sk:
             sourcehealth.record(_sk, True)
-        return Response(body, media_type="application/vnd.apple.mpegurl",
-                        headers={"Cache-Control": "no-cache",
-                                 "Access-Control-Allow-Origin": "*"})
+        return _m3u8_resp(body, request, {"Cache-Control": "no-cache"})
 
     # 起播策略（复刻 v0.2.17 的秒播语义）：
     #  - 普通 CMS 直链：【同步等到真清单】，竞速 gather 各候选(单条≤4s)、胜者当场建清单，
@@ -7694,7 +8473,7 @@ async def hls_main(mg: str, request: Request):
         return await asyncio.wait_for(asyncio.shield(fut),
                                       timeout=_budget_left(floor=0.2))
     except asyncio.TimeoutError:
-        return _placeholder_playlist_response(mg)
+        return _placeholder_playlist_response(mg, request=request)
 
 
 def _cors_preflight() -> Response:
@@ -7722,7 +8501,8 @@ _PH_SEG_DUR = 2.0
 _PH_WIN = 3  # 直播式滑动窗口分片数（3×2s≈6s：缩短冷片占位后的转正重拉间隔）
 
 
-def _placeholder_playlist_response(mg: str = "", live: bool = True) -> Response:
+def _placeholder_playlist_response(mg: str = "", live: bool = True,
+                                   request: Request = None) -> Response:
     """返回循环提示 HLS（HTTP 200）。飞牛对 4xx/5xx 清单会弹“播放出错”并锁死
     线路菜单；200 的有效 HLS 让播放器停在提示画面、菜单仍可切换。
 
@@ -7738,34 +8518,61 @@ def _placeholder_playlist_response(mg: str = "", live: bool = True) -> Response:
         lines.append(f"#EXTINF:{_PH_SEG_DUR:.3f},")
         lines.append(f"{_PH_SEG_TS}?n={seq + i}")
     body = "\n".join(lines) + "\n"
+    headers = {"Cache-Control": "no-store",
+               "Access-Control-Allow-Origin": "*",
+               "X-fnmedia-Placeholder": "1"}
+    if request is not None:
+        # iOS 占位清单同样走统一出口：no-store + Connection close + 末尾换行。
+        return _m3u8_resp(body.encode("utf-8"), request, headers)
     return Response(content=body, media_type="application/vnd.apple.mpegurl",
-                    headers={"Cache-Control": "no-store",
-                             "Access-Control-Allow-Origin": "*",
-                             "X-fnmedia-Placeholder": "1"})
+                    headers=headers)
 
 
-def _placeholder_master_response(idx: int = 0) -> Response:
-    """线路未就绪时的【master】占位（HTTP 200）。返回单变体，其 main 带 phwait=1，
+def _placeholder_master_response(idx: int = 0, mg: str = "",
+                                 request: Request = None) -> Response:
+    """线路未就绪时的【master】占位。返回单变体，其 main 带 phwait=1，
     hls_main 见到该标记会持续返回占位媒体清单（不挑线路、不报 4xx/5xx），后台绑定/
     找线完成后由后续正常请求自动切回正片。保证任何情况下播放器都不弹“播放出错”、
-    线路菜单不被锁死。"""
+    线路菜单不被锁死。变体与真实 master 一样使用 v1.1.0 的相对路径；
+    带 request 时统一返回完整清单，忽略 fncache 的 Range 探测。"""
     q = urllib.parse.urlencode({"index": idx, "phwait": "1"})
     body = ("#EXTM3U\n#EXT-X-VERSION:3\n"
             '#EXT-X-STREAM-INF:BANDWIDTH=1000000,PROGRAM-ID=1,NAME="正在准备线路…"\n'
             f"main.m3u8?{q}\n")
-    return Response(content=body, media_type="application/vnd.apple.mpegurl",
-                    headers={"Cache-Control": "no-store",
-                             "Access-Control-Allow-Origin": "*",
-                             "X-fnmedia-Placeholder": "1"})
+    response = Response(content=body, media_type="application/vnd.apple.mpegurl",
+                        headers={"Cache-Control": "no-store",
+                                 "Access-Control-Allow-Origin": "*",
+                                 "X-fnmedia-Placeholder": "1"})
+    if request is not None:
+        return _m3u8_resp(response.body, request, dict(response.headers))
+    return response
 
 
-def _placeholder_ts_response() -> Response:
+def _segment_response_headers(request: Request, headers, drop=None) -> dict:
+    """iOS 分片按社区已验证契约收敛响应头，其它端保持原有透传。"""
+    if _client_of(request).kind != clientmod.IOS:
+        return _safe_response_headers(headers, drop)
+    blocked = {str(k).lower() for k in (drop or set())}
+    out = {}
+    for name in ("content-type", "content-range", "accept-ranges", "etag"):
+        if name not in blocked and headers.get(name):
+            out[name] = headers[name]
+    out["Access-Control-Allow-Origin"] = "*"
+    out["Cache-Control"] = "public, max-age=3600"
+    # 新版 iOS mediaserverd 长时间占用分片连接；与社区修复一致，用完即关。
+    out["Connection"] = "close"
+    return out
+
+
+def _placeholder_ts_response(request: Request = None) -> Response:
     p = _PH_DIR / "placeholder.ts"
     if not p.exists():
         return Response("not found", status_code=404)
-    return FileResponse(p, media_type="video/mp2t",
-                        headers={"Cache-Control": "public, max-age=86400",
-                                 "Access-Control-Allow-Origin": "*"})
+    headers = {"Cache-Control": "public, max-age=86400",
+               "Access-Control-Allow-Origin": "*"}
+    if request is not None and _client_of(request).kind == clientmod.IOS:
+        headers["Connection"] = "close"
+    return FileResponse(p, media_type="video/mp2t", headers=headers)
 
 
 @app.get(f"{ONLINE_PREFIX}/{{mg}}/_placeholder/placeholder.ts")
@@ -7804,7 +8611,7 @@ async def placeholder_ts(mg: str, request: Request):
             _pansou_manual_kick(mg)
     except Exception:
         pass
-    return _placeholder_ts_response()
+    return _placeholder_ts_response(request)
 
 
 @app.get(f"{ONLINE_PREFIX}/{{mg}}/seg")
@@ -7827,6 +8634,11 @@ async def hls_seg(mg: str, request: Request):
         fwd.pop("Range", None)
     if "range" in request.headers and request.query_params.get("dec") != "1":
         fwd["Range"] = request.headers["range"]
+    if _client_of(request).kind == clientmod.IOS and request.query_params.get("dec") != "1":
+        # fncache 会带条件请求；与社区 proxy_media 一致，仅 iOS 补传这两个头。
+        for name in ("if-range", "if-none-match"):
+            if request.headers.get(name):
+                fwd[name] = request.headers[name]
     is_decrypt = request.query_params.get("dec") == "1"
     _need_pan_cookie = _host.endswith("drive.quark.cn") or _host.endswith(".quark.cn") \
         or _host.endswith(".uc.cn")
@@ -7850,7 +8662,37 @@ async def hls_seg(mg: str, request: Request):
     _can_stream = (_stream_transport and r.status_code in (200, 206)
                    and _content_encoding in ("", "identity")
                    and hasattr(r, "aiter_raw"))
-    if not _can_stream and _stream_transport:
+    _presniff = None
+    _presniff_body = None
+    _presniff_unwrapped = False
+    if _can_stream and _client_of(request).kind == clientmod.IOS:
+        # 响应头必须在首字节前确定：iOS 先嗅探首块，PNG 则收齐剥壳后按新实体
+        # 返回；普通 TS 保留上游 Range/ETag/Content-Length 并继续流式发送。
+        ait = r.aiter_raw(64 * 1024)
+        try:
+            first = await ait.__anext__()
+        except StopAsyncIteration:
+            first = b""
+        if first[:8] == b"\x89PNG\r\n\x1a\n":
+            chunks = [first]
+            async for rest in ait:
+                chunks.append(rest)
+            raw = b"".join(chunks)
+            await r.aclose()
+            try:
+                import quality as _q
+                payload, _ = _q._unwrap_segment(raw)
+                if payload is not None:
+                    _presniff_body = payload
+                    _presniff_unwrapped = True
+            except Exception:
+                pass
+            if _presniff_body is None:
+                _presniff_body = raw
+            _can_stream = False
+        else:
+            _presniff = (ait, first)
+    if not _can_stream and _stream_transport and _presniff_body is None:
         try:
             await r.aread()
         finally:
@@ -7868,8 +8710,14 @@ async def hls_seg(mg: str, request: Request):
             buf = b""
             sniffed = False
             nbytes = 0
-            ait = r.aiter_raw(64 * 1024)
+            ait = _presniff[0] if _presniff is not None else r.aiter_raw(64 * 1024)
             try:
+                if _presniff is not None:
+                    first = _presniff[1]
+                    sniffed = True
+                    nbytes = len(first)
+                    if first:
+                        yield first
                 async for chunk in ait:
                     nbytes += len(chunk)
                     if not sniffed:
@@ -7907,9 +8755,14 @@ async def hls_seg(mg: str, request: Request):
                     except Exception:
                         pass
 
-        hs = _safe_response_headers(r.headers, {"content-security-policy"})
+        hs = _segment_response_headers(request, r.headers, {"content-security-policy"})
         hs["Access-Control-Allow-Origin"] = "*"
-        hs.pop("content-length", None)  # 剥 PNG 壳后长度可能变化，用分块传输
+        if _client_of(request).kind == clientmod.IOS:
+            # 已完成首块嗅探且不会变换字节，可安全保留上游实体长度。
+            if r.headers.get("content-length"):
+                hs["Content-Length"] = r.headers["content-length"]
+        else:
+            hs.pop("content-length", None)  # 旧 PNG 嗅探路径可能改变长度
         hs.setdefault("Content-Type", "video/mp2t")
         if r.status_code in _RETRY_STATUS:
             _log.warning("seg upstream %s %s", r.status_code,
@@ -7917,7 +8770,7 @@ async def hls_seg(mg: str, request: Request):
         return StreamingResponse(_stream_seg(),
                                  status_code=r.status_code, headers=hs)
 
-    body = r.content
+    body = _presniff_body if _presniff_body is not None else r.content
     # 服务端解密 AES-128 HLS 分片：m3u8 已移除 EXT-X-KEY，这里把密文 TS 解成纯 TS，
     # 并强制按完整 200 内容返回（密文 206 不能直接解密/拼接）。
     decrypt_resp_status = r.status_code
@@ -7934,8 +8787,8 @@ async def hls_seg(mg: str, request: Request):
                     decrypt_resp_status = 200
         except Exception as exc:
             _log.warning("seg decrypt fail: %s", type(exc).__name__)
-    ctype = r.headers.get("content-type", "")
-    unwrapped = False
+    ctype = "video/mp2t" if _presniff_unwrapped else r.headers.get("content-type", "")
+    unwrapped = _presniff_unwrapped
     # 部分源把真实 TS 分片伪装成「1×1 PNG 头 + TS」。剥掉 PNG 外壳
     # 还原成纯 TS，飞牛播放器才能正常解码（通用兼容，对所有源生效）
     if body[:8] == b"\x89PNG\r\n\x1a\n":
@@ -7953,9 +8806,15 @@ async def hls_seg(mg: str, request: Request):
         # 已在服务端解密并返回完整纯 TS：旧的 Range/content-range 必须移除，
         # 否则严格客户端会因 200 + Content-Range/Accept-Ranges 语义矛盾拒绝该分片。
         drop.update({"content-range", "accept-ranges"})
+        if _client_of(request).kind == clientmod.IOS:
+            drop.add("etag")
     if unwrapped:
         drop.add("content-type")
-    h = _safe_response_headers(r.headers, drop)
+        if _client_of(request).kind == clientmod.IOS:
+            # PNG 剥壳后字节与上游 ETag/Range 不再对应，必须按新的完整实体返回。
+            drop.update({"etag", "content-range", "accept-ranges"})
+            decrypt_resp_status = 200
+    h = _segment_response_headers(request, r.headers, drop)
     h["Access-Control-Allow-Origin"] = "*"
     h["Content-Length"] = str(len(body))
     if unwrapped or "content-type" not in {k.lower() for k in h}:
@@ -7982,6 +8841,10 @@ async def hls_compact(mg: str, request: Request):
     # 网盘 CDN 分片必须带登录 Cookie（裸取 412），按域名兜底注入
     if request.headers.get("range"):
         fwd["Range"] = request.headers["range"]
+    if _client_of(request).kind == clientmod.IOS:
+        for name in ("if-range", "if-none-match"):
+            if request.headers.get(name):
+                fwd[name] = request.headers[name]
     try:
         r = await ext_get_retry(request, src_url, fwd, tries=4, timeout=30.0)
     except Exception as exc:  # noqa: BLE001
@@ -7989,19 +8852,63 @@ async def hls_compact(mg: str, request: Request):
         return Response("seg fail", status_code=502)
     body = r.content
     ctype = r.headers.get("content-type", "")
+    unwrapped = False
     if body[:8] == b"\x89PNG\r\n\x1a\n":
         try:
             import quality
             payload, _ = quality._unwrap_segment(body)
             if payload is not body:
                 body, ctype = payload, "video/mp2t"
+                unwrapped = True
         except Exception:
             pass
-    h = _safe_response_headers(r.headers, {"content-security-policy"})
+    drop = {"content-security-policy"}
+    response_status = r.status_code
+    if unwrapped and _client_of(request).kind == clientmod.IOS:
+        drop.update({"etag", "content-range", "accept-ranges"})
+        response_status = 200
+    h = _segment_response_headers(request, r.headers, drop)
     h["Access-Control-Allow-Origin"] = "*"
     h["Content-Length"] = str(len(body))
     h.setdefault("Content-Type", ctype or "video/mp2t")
-    return Response(content=body, status_code=r.status_code, headers=h)
+    return Response(content=body, status_code=response_status, headers=h)
+
+
+async def _serve_hls_short(mg: str | None, sid: str, request: Request):
+    """从短 ID 恢复原端点；旧路径额外校验其中的 media guid。"""
+    hit = hls_short.get_segment(sid)
+    if (not hit or (mg is not None and hit[0] != mg)
+            or hit[1] not in ("seg", "hls")):
+        return Response("expired", status_code=404,
+                        headers={"Cache-Control": "no-store"})
+    mapped_mg, kind, query = hit
+    endpoint = "seg" if kind == "seg" else "hls"
+    path = f"{ONLINE_PREFIX}/{mapped_mg}/{endpoint}"
+    scope = dict(request.scope)
+    scope["path"] = path
+    scope["raw_path"] = path.encode("utf-8")
+    scope["query_string"] = query.encode("utf-8")
+    scope["path_params"] = {"mg": mapped_mg}
+    # 保留中间件写入的播放上下文，同时让 URL/query 按原分片解析。
+    state = getattr(request.state, "_state", None)
+    if state is not None:
+        scope["state"] = state
+    forwarded = Request(scope, receive=request.receive)
+    if kind == "seg":
+        return await hls_seg(mapped_mg, forwarded)
+    return await hls_compact(mapped_mg, forwarded)
+
+
+@app.get(f"{ONLINE_PREFIX}/seg/{{sid}}.ts")
+async def hls_short_seg_root(sid: str, request: Request):
+    """社区新版 iOS 契约：目标 guid 仅保存在服务端短 ID 映射中。"""
+    return await _serve_hls_short(None, sid, request)
+
+
+@app.get(f"{ONLINE_PREFIX}/{{mg}}/seg/{{sid}}.ts")
+async def hls_short_seg(mg: str, sid: str, request: Request):
+    """兼容本轮改动前已经下发的带 guid 短链。"""
+    return await _serve_hls_short(mg, sid, request)
 
 
 # ------------------------------------------------------------- 海报代理
