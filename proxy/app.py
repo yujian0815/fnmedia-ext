@@ -1737,6 +1737,7 @@ async def __aggregate_briefs_inner(keyword, maxn, fast_only, soft_timeout,
     loose_ids = {s["id"] for s in sources if s.get("loose_filter")}
     # T4 search cards intentionally have no episode list. Never merge them by name.
     remote = [inj.brief_of(t) for t in titles if t.locator.get("kind") == "t4"
+              and not catalogmod._is_adult_category(t.type_name)
               and not catalogmod.is_redline(t.title, t.remarks)
               and (t.provider in loose_ids or not config.is_junk(t.title, t.remarks))]
     titles = [t for t in titles if t.locator.get("kind") != "t4"]
@@ -1753,6 +1754,8 @@ async def __aggregate_briefs_inner(keyword, maxn, fast_only, soft_timeout,
                 continue
         except Exception:
             pass
+        if catalogmod._is_adult_category(t.type_name):
+            continue
         if t.provider not in loose_ids and config.is_junk(t.title, t.remarks):
             continue
         playable = [e for line in t.sources.values() for e in line
@@ -9330,12 +9333,49 @@ async def ext_cache_clear(request: Request):
             "msg": "已清除：" + "、".join(done) + ("，服务重启中" if need_restart else "")}
 
 
+def _schedule_takeover_disable() -> None:
+    """在独立 systemd 单元中停服，避免本进程随请求一起被终止。"""
+    import shutil
+    import subprocess
+
+    if not shutil.which("systemd-run") or not shutil.which("systemctl"):
+        raise RuntimeError("当前系统不支持 systemd 服务管理")
+    cmd = [
+        "systemd-run", "--no-block", "--unit", "fnmedia-ext-disable", "--collect",
+        "--description", "fnmedia-ext disable takeover",
+        "--property=Type=oneshot", "/bin/sh", "-c",
+        "sleep 2 && exec systemctl disable --now fnmedia-ext.service",
+    ]
+    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=10)
+
+
+@app.post("/v/api/ext/takeover/disable")
+async def ext_takeover_disable(request: Request):
+    """显式关闭接管；supervise 退出时负责恢复官方 socket。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if request.headers.get("x-fnmedia-admin") != "1" or body.get("confirm") is not True:
+        return JSONResponse({"ok": False, "code": 403,
+                             "msg": "需要在管理页显式确认后才能关闭接管"},
+                            status_code=403)
+    try:
+        await asyncio.to_thread(_schedule_takeover_disable)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "code": 503,
+                             "msg": f"调度关闭接管失败：{exc}"},
+                            status_code=503)
+    return {"ok": True, "accepted": True, "restore": "app_center"}
+
+
 @app.get("/v/api/ext/status")
 async def ext_status(request: Request):
     overrides = config.get().get("source_priority") or {}
     priorities = {s["id"]: providers.source_priority(s, overrides)
                   for s in config.all_sources()}
     return {"ok": True,
+            "takeover_active": True,
             "config": {k: v for k, v in config.get().items() if k != "admin_token"},
             "source_priority": priorities,
             "cached_titles": len(store._titles),

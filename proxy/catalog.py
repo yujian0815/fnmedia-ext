@@ -58,10 +58,24 @@ _VARIETY_KW = ("综艺", "真人秀", "脱口秀", "娱乐")
 _MOVIE_KW = ("电影", "影片", "纪录片", "纪录")
 _TV_KW = ("电视", "连续剧", "剧集", "美剧", "英剧", "韩剧", "日剧", "泰剧",
           "国产剧", "港台剧", "海外剧", "番剧")
-# 明确排除的脏类（伦理/福利/资讯/解说/预告/体育/短剧等）
+# 明确排除的脏类（理论/福利/资讯/解说/预告/体育/短剧等）
 _EXCLUDE_KW = ("理论", "福利", "写真", "午夜", "解说", "预告",
                "花絮", "资讯", "新闻", "体育", "赛事", "短剧", "漫剧", "AI",
                "演员", "音乐", "MV")
+
+# 成人分类必须先于普通“XX片”归类判断。普通源直接排除；显式授权的
+# 独立源可进入 ADULT_CAT，但任何情况下都不能泄漏进跨源海量四库。
+_ADULT_CATEGORY_KW = (
+    "伦理", "情色", "色情", "成人", "三级", "限制级", "风月", "福利",
+    "写真", "午夜", "性爱", "性交", "女优", "乱伦", "熟女", "少妇",
+    "人妻", "强奸", "迷奸", "偷拍", "淫", "巨乳", "探花", "调教",
+    "车震", "近亲", "鬼父",
+)
+
+
+def _is_adult_category(name: str) -> bool:
+    n = (name or "").strip()
+    return bool(n) and any(k in n for k in _ADULT_CATEGORY_KW)
 
 # 硬红线：任何开关都不能放开。涉未成年人性化、非自愿（换脸/迷奸/强奸/偷拍等）。
 # 同时作用于“分类名”和条目标题/备注，命中即丢弃，聚合库、独立库、搜索一律不收录。
@@ -114,7 +128,7 @@ def catalog_mdb(cat: str) -> str:
 
 def classify(name: str) -> str | None:
     n = (name or "").strip()
-    if not n or any(k in n for k in _EXCLUDE_KW):
+    if not n or _is_adult_category(n) or any(k in n for k in _EXCLUDE_KW):
         return None
     if any(k in n for k in _ANIME_KW):
         return "anime"
@@ -141,6 +155,8 @@ def classify_source_class(name: str, adult_allowed: bool) -> str | None:
     n = (name or "").strip()
     if not n or is_redline(n):
         return None
+    if _is_adult_category(n):
+        return ADULT_CAT if adult_allowed and _adult_on() else None
     cat = classify(n)
     if cat:
         return cat
@@ -373,7 +389,11 @@ class Catalog:
                 cats = CATS if (scope == AGG_SCOPE or not _adult_on()) else CATS + [ADULT_CAT]
                 for cat in cats:
                     if scope == AGG_SCOPE:
-                        rs = [probed[(cat, sid)] for (c2, sid) in probed if c2 == cat]
+                        # 扩展源只进自己的独立库。即使它提供普通分类，也绝不
+                        # 参与跨源聚合，避免授权范围从独立库扩大到海量四库。
+                        rs = [probed[(cat, sid)] for (c2, sid) in probed
+                              if c2 == cat and not (
+                                  self._source_by_id(sid) or {}).get("adult")]
                         rs.sort(key=lambda r: -(r.get("pagecount") or 0))
                         # 聚合：首选最深的源，并附带其余可深翻源做回退
                         out[cat] = rs
@@ -626,6 +646,11 @@ class Catalog:
     def _briefs_from_vods(self, vods: list, source: dict, route: dict,
                           scope: str, cat: str) -> list[dict]:
         from config import config as _cfg
+        # 聚合兜底：旧路由缓存、配置变更或异常源数据都不能把扩展来源/
+        # 成人分类带进海量四库。独立源仍按自身授权和分类规则处理。
+        if scope == AGG_SCOPE and (
+                source.get("adult") or _is_adult_category(route.get("type_name"))):
+            return []
         briefs = []
         for v in vods:
             try:
@@ -633,6 +658,8 @@ class Catalog:
             except Exception:
                 continue
             if not t or not t.title:
+                continue
+            if scope == AGG_SCOPE and _is_adult_category(t.type_name):
                 continue
             playable = [e for line in t.sources.values() for e in line
                         if e.direct or e.resolve]

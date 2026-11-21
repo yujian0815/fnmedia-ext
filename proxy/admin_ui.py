@@ -339,6 +339,16 @@ pre.log{max-height:240px;overflow:auto;background:#211f1b;color:#e9e4dc;border-r
         </div>
       </div>
 
+      <div class="card" id="takeoverCard">
+        <div class="card-title">插件接管</div>
+        <p class="card-sub">控制扩展是否接管飞牛影视接口。关闭后会停止本服务并恢复官方接口，媒体库与播放不再经过扩展。</p>
+        <label class="switch-row">
+          <input type="checkbox" id="takeoverEnabled" checked onchange="toggleTakeover(this)"/>
+          <span>接管飞牛影视接口
+            <span class="sub" id="takeoverHint">关闭后管理页将不可用；如需恢复，请在飞牛应用中心重新启动插件。</span></span>
+        </label>
+      </div>
+
       <div class="overview-grid">
         <div class="card diagnostic">
           <div class="card-head">
@@ -729,6 +739,34 @@ pre.log{max-height:240px;overflow:auto;background:#211f1b;color:#e9e4dc;border-r
     <!-- ============ 关于与更新 ============ -->
     <section class="page" id="page-about">
       <h2 class="page-title">关于与更新</h2>
+      <div class="card" id="donateCard" style="text-align:center">
+        <div class="card-title" style="justify-content:center">支持项目</div>
+        <p class="card-sub" style="max-width:560px;margin:0 auto 12px">
+          本扩展<b>开源、免费、无广告</b>，所有功能都利用业余时间开发维护。
+          如果它让你的飞牛影视更好用，你的一份打赏就是对作者最大的鼓励，
+          也会让后续适配新设备、维护资源解析更有动力
+        </p>
+        <div style="display:flex;flex-wrap:wrap;gap:20px;justify-content:center;align-items:flex-start">
+          <div style="display:inline-flex;flex-direction:column;align-items:center;gap:8px">
+            <div style="padding:10px;border:1px solid var(--line);border-radius:12px;background:#fff;display:flex;align-items:center;justify-content:center;height:260px">
+              <img src="/v/ext/alipay-qr" alt="支付宝打赏码"
+                   style="width:200px;height:240px;object-fit:contain;display:block;border-radius:6px"
+                   onerror="this.style.display='none'"/>
+            </div>
+            <div class="muted sm" style="font-weight:600">支付宝扫码打赏</div>
+          </div>
+          <div style="display:inline-flex;flex-direction:column;align-items:center;gap:8px">
+            <div style="padding:10px;border:1px solid var(--line);border-radius:12px;background:#fff;display:flex;align-items:center;justify-content:center;height:260px">
+              <img src="/v/ext/wechat-qr" alt="微信赞赏码"
+                   style="width:176px;height:240px;object-fit:contain;display:block;border-radius:6px"
+                   onerror="this.style.display='none'"/>
+            </div>
+            <div class="muted sm" style="font-weight:600">微信扫码赞赏</div>
+          </div>
+        </div>
+        <div class="muted sm" style="margin-top:8px">金额随意，感谢支持</div>
+      </div>
+
       <div class="card">
         <div class="card-title">fnmedia-ext · 飞牛影视在线扩展</div>
         <p class="card-sub">在原生搜索 / 媒体库注入在线影视并直接调用飞牛原生播放器播放。</p>
@@ -776,34 +814,6 @@ pre.log{max-height:240px;overflow:auto;background:#211f1b;color:#e9e4dc;border-r
           </div>
           <div class="hint" id="tmdbStatus">API Key 仅存本机，不入包、不上传。可在 themoviedb.org/settings/api 免费申请。</div>
         </div>
-      </div>
-
-      <div class="card" id="donateCard" style="text-align:center">
-        <div class="card-title" style="justify-content:center">支持项目</div>
-        <p class="card-sub" style="max-width:560px;margin:0 auto 12px">
-          本扩展<b>开源、免费、无广告</b>，所有功能都利用业余时间开发维护。
-          如果它让你的飞牛影视更好用，你的一份打赏就是对作者最大的鼓励，
-          也会让后续适配新设备、维护资源解析更有动力
-        </p>
-        <div style="display:flex;flex-wrap:wrap;gap:20px;justify-content:center;align-items:flex-start">
-          <div style="display:inline-flex;flex-direction:column;align-items:center;gap:8px">
-            <div style="padding:10px;border:1px solid var(--line);border-radius:12px;background:#fff;display:flex;align-items:center;justify-content:center;height:260px">
-              <img src="/v/ext/alipay-qr" alt="支付宝打赏码"
-                   style="width:200px;height:240px;object-fit:contain;display:block;border-radius:6px"
-                   onerror="this.style.display='none'"/>
-            </div>
-            <div class="muted sm" style="font-weight:600">支付宝扫码打赏</div>
-          </div>
-          <div style="display:inline-flex;flex-direction:column;align-items:center;gap:8px">
-            <div style="padding:10px;border:1px solid var(--line);border-radius:12px;background:#fff;display:flex;align-items:center;justify-content:center;height:260px">
-              <img src="/v/ext/wechat-qr" alt="微信赞赏码"
-                   style="width:176px;height:240px;object-fit:contain;display:block;border-radius:6px"
-                   onerror="this.style.display='none'"/>
-            </div>
-            <div class="muted sm" style="font-weight:600">微信扫码赞赏</div>
-          </div>
-        </div>
-        <div class="muted sm" style="margin-top:8px">金额随意，感谢支持</div>
       </div>
 
       <div class="card">
@@ -883,6 +893,25 @@ function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","
 async function jget(p){const r=await fetch(p);if(!r.ok)throw new Error(p+" "+r.status);return r.json();}
 async function jpost(p,b){const r=await fetch(p,{method:"POST",headers:{"Content-Type":"application/json"},
   body:JSON.stringify(b||{})});return r.json();}
+async function toggleTakeover(el){
+  if(el.checked)return;
+  if(!confirm("确定关闭插件接管吗？\n\n关闭后管理页将不可用，飞牛影视会恢复官方接口。如需恢复，请在飞牛应用中心重新启动插件。")){
+    el.checked=true;return;
+  }
+  el.disabled=true;
+  try{
+    const rr=await fetch("/v/api/ext/takeover/disable",{method:"POST",
+      headers:{"Content-Type":"application/json","x-fnmedia-admin":"1"},
+      body:JSON.stringify({confirm:true})});
+    const r=await rr.json();
+    if(!rr.ok||!r.ok)throw new Error(r.msg||("HTTP "+rr.status));
+    $("takeoverHint").textContent="正在关闭接管并恢复官方接口，管理页即将不可用…";
+    toast("关闭请求已受理");
+  }catch(e){
+    el.checked=true;el.disabled=false;
+    alert("关闭接管失败："+e.message);
+  }
+}
 
 /* ---------- 页面切换 ---------- */
 async function switchPage(page){
@@ -2037,6 +2066,8 @@ async function loadStatus(){
   STATUS=await jget("/v/api/ext/status");
   CFG=STATUS.config;
   PRIO=STATUS.source_priority||{};
+  if($("takeoverEnabled")&&!$("takeoverEnabled").disabled)
+    $("takeoverEnabled").checked=STATUS.takeover_active!==false;
 }
 async function init(){
   // 各初始化步骤独立容错：单个模块/元素缺失或接口异常只在控制台记录，

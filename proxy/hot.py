@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import providers
+import catalog
 
 STATE = Path(__file__).resolve().parent.parent / "state" / "hot.json"
 REFRESH_TIMEOUT = 180.0
@@ -56,7 +57,8 @@ def direct_count(t: providers.OnlineTitle) -> int:
 async def fetch_source_hot(client: httpx.AsyncClient, source: dict,
                            limit: int, pages: int = 2) -> list[providers.OnlineTitle]:
     """取一个资源站的最近更新详情。苹果 CMS 多数接口固定每页约 20 条。"""
-    if not source.get("enabled", True) or source.get("kind") == "t4":
+    if (not source.get("enabled", True) or source.get("kind") == "t4"
+            or source.get("adult")):
         return []
     out: list[providers.OnlineTitle] = []
     seen: set[tuple[str, str]] = set()
@@ -100,6 +102,8 @@ async def fetch_source_hot(client: httpx.AsyncClient, source: dict,
 
 async def collect_hot(sources: list[dict], limit_per_source: int,
                       max_items: int, is_junk, pages_per_source: int = 2) -> dict[str, Any]:
+    # 独立扩展源不参与普通热门聚合；条目的 type_name 再做一层兜底。
+    sources = [s for s in sources if not s.get("adult")]
     sem = asyncio.Semaphore(5)
     seen_url: set[str] = set()
 
@@ -120,6 +124,8 @@ async def collect_hot(sources: list[dict], limit_per_source: int,
         provider_count += 1
         for t in result:
             title = (t.title or "").strip()
+            if catalog._is_adult_category(t.type_name):
+                continue
             if not title or is_junk(title, t.remarks):
                 continue
             key = (norm_title(title), (t.year or "").strip())

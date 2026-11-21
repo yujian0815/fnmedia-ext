@@ -2,7 +2,7 @@
 # 应用中心 start/stop/status。
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "${SELF_DIR}/_common"
 case "${1:-}" in
-  start)  systemctl start fnmedia-ext.service 2>>"${FNMEDIA_LOG}" || true; exit 0 ;;
+  start)  systemctl enable --now fnmedia-ext.service 2>>"${FNMEDIA_LOG}" || true; exit 0 ;;
   stop)
     systemctl stop fnmedia-ext.service 2>>"${FNMEDIA_LOG}" || true
     sleep 0.5

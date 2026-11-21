@@ -107,6 +107,32 @@ class AdminUiFeatureTests(unittest.TestCase):
                       '/v/api/ext/drpy/import-file', '≤2MB', 'rule.title'):
             self.assertIn(token, html)
 
+    def test_takeover_switch_has_real_stop_confirmation_and_recovery_help(self):
+        html = admin_ui.ADMIN_HTML
+        overview = html[html.index('id="page-overview"'):html.index('id="page-library"')]
+        for token in ('id="takeoverCard"', 'id="takeoverEnabled"',
+                      'onchange="toggleTakeover(this)"', '飞牛应用中心重新启动插件'):
+            self.assertIn(token, overview)
+        for token in ('async function toggleTakeover(el)',
+                      '/v/api/ext/takeover/disable', '"x-fnmedia-admin":"1"',
+                      'body:JSON.stringify({confirm:true})', '确定关闭插件接管吗？',
+                      'el.disabled=true'):
+            self.assertIn(token, html)
+
+    def test_donation_card_is_first_in_about_page(self):
+        html = admin_ui.ADMIN_HTML
+        about = html[html.index('id="page-about"'):html.index('id="moreNav"')]
+        self.assertEqual(about.count('id="donateCard"'), 1)
+        donate = about.index('id="donateCard"')
+        project = about.index('fnmedia-ext · 飞牛影视在线扩展')
+        update = about.index('id="updCard"')
+        metadata = about.index('id="tmdbCard"')
+        disclaimer = about.index('免责声明与版权声明')
+        self.assertLess(donate, project)
+        self.assertLess(project, update)
+        self.assertLess(update, metadata)
+        self.assertLess(metadata, disclaimer)
+
     def test_responsive_design_and_live_playback_chain(self):
         html = admin_ui.ADMIN_HTML
         for token in ('class="card source-list-card"', 'id="liveSummary"',
