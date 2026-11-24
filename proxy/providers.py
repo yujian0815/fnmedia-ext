@@ -94,6 +94,9 @@ class Episode:
     # 远程 T4 订阅源：云端按需解析播放；episode_key 为云端集标识
     t4: bool = False
     episode_key: str = ""
+    # 小雅 native 文件的可选集身份；普通 CMS 保持默认 0，不改变其协议。
+    season: int = 0
+    number: int = 0
 
 
 @dataclass

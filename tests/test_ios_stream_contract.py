@@ -12,6 +12,7 @@ import json
 import sys
 import time
 import unittest
+import urllib.parse
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -85,6 +86,16 @@ class IosStreamContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("/relay", tv["play_link"])
         self.assertEqual(tv["wrapper"], "HLS")
         tv_relay.assert_not_awaited()
+
+    async def test_play_play_propagates_resume_start_and_prewarms_same_target(self):
+        with patch.object(appmod, "_ios_resume_seconds", return_value=1326) as resume:
+            ios, relay = await self._play(IOS_UA)
+            target, request = relay.await_args.args
+            self.assertEqual(resume(target, request), 1326)
+        params = urllib.parse.parse_qs(urllib.parse.urlsplit(ios["play_link"]).query)
+        self.assertEqual(params.get("start"), ["1326"])
+        self.assertTrue(params.get("g", [""])[0], "fncache资源代际必须进入play_link")
+        self.assertEqual(target["online_guid"], "og")
 
     async def test_stream_list_and_stream_post_use_ios_relay_contract(self):
         target = _target()

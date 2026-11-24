@@ -64,6 +64,50 @@ class IosMediaRangeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("/main.m3u8?", location)
         self.assertIn("line=lzi%3A%3Alzm3u8", location)
 
+    async def test_ios_relay_redirect_preserves_resume_start(self):
+        with patch.object(appmod, "_ios_resume_seconds", return_value=1326):
+            location = await self._location(IOS_UA)
+        params = urllib.parse.parse_qs(urllib.parse.urlsplit(location).query)
+        self.assertEqual(params.get("start"), ["1326"])
+
+    async def test_media_range_uses_episode_picker_for_resume_identity(self):
+        base = dict(_target(), kind="title", ep_guid="")
+        picked = dict(base, kind="episode", ep_guid="episode-14")
+        request = _request(IOS_UA)
+        with patch.object(appmod, "_fixed_media_target", return_value=base), \
+                patch.object(appmod, "_pick_episode", return_value=picked), \
+                patch.object(appmod.store, "target_lines", return_value=[base]), \
+                patch.object(appmod, "_warm_preset_lines"), \
+                patch.object(appmod, "start_fill_lines"), \
+                patch.object(appmod, "_ios_resume_seconds", return_value=2177) as resume:
+            response = await appmod.media_range("mg", request)
+        self.assertEqual(response.status_code, 302)
+        self.assertIs(resume.call_args.args[0], picked)
+        self.assertIn("start=2177", response.headers["location"])
+
+    async def test_media_range_middleware_reads_same_account_resume_history(self):
+        target = dict(_target(), kind="episode", ep_guid="episode-14", index=13)
+        request = _request(IOS_UA)
+        request.scope["path"] = "/v/api/v1/media/range/mg"
+        records = {"user-1": {"episode-14": {"ts": 2177, "duration": 0}}}
+
+        async def endpoint(req):
+            return await appmod.media_range("mg", req)
+
+        with patch.object(appmod.fnusers, "resolve", return_value={
+                "known": True, "guid": "user-1", "is_admin": True}), \
+                patch.object(appmod.history, "_users", records), \
+                patch.object(appmod, "_fixed_media_target", return_value=target), \
+                patch.object(appmod.store, "resolve_media_guid", return_value=target), \
+                patch.object(appmod.store, "target_lines", return_value=[target]), \
+                patch.object(appmod, "_warm_preset_lines"), \
+                patch.object(appmod, "start_fill_lines"), \
+                patch.object(appmod, "_live_record"):
+            response = await appmod._access(request, endpoint)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("start=2177", response.headers["location"])
+        self.assertEqual(appmod.histmod.current_user(), "")
+
     async def test_tv_hls_keeps_preset_master(self):
         location = await self._location(TV_UA)
         self.assertIn("/preset.m3u8?", location)

@@ -19,6 +19,7 @@ import hashlib
 import json
 import math
 import os
+import signal
 import re
 import struct
 import threading
@@ -1202,7 +1203,11 @@ async def lifespan(app: FastAPI):
             await t4_media.metadata.close()
         await app.state.up.aclose()
         await app.state.ext.aclose()
-        # 关闭前把防抖未落盘的在线资源缓存同步写一次（issue #42 异步落盘配套）
+        # 关闭前把防抖未落盘的小雅 guid 与在线资源缓存同步写一次。
+        try:
+            await asyncio.to_thread(_xiaoya_close_media_map)
+        except Exception:
+            pass
         try:
             await asyncio.to_thread(store.close)
         except Exception:
@@ -1262,11 +1267,13 @@ async def _access(request: Request, call_next):
     started = time.monotonic()
     # 在线播放历史按飞牛账号分区（issue #5）：为本次请求设置当前用户上下文。
     # fnusers 带 30s 缓存，识别失败/无 token 落到全局分区，行为同旧版。
+    # /v/api/v1/media/range 也必须识别账号：它在这里计算 iOS 续播 start，
+    # 漏掉该前缀会读空的全局历史并额外启动一路从 0 秒下载的 ffmpeg。
     _hist_tokens = None
     try:
         if request.url.path.startswith(("/v/api/v1/play/", "/v/api/v1/item/",
-                                        "/v/api/v1/play", "/v/media/online",
-                                        "/v/api/ext/skip-marks")):
+                                        "/v/api/v1/play", "/v/api/v1/media/",
+                                        "/v/media/online", "/v/api/ext/skip-marks")):
             _u = fnusers.resolve(request)
             if _u.get("known"):
                 _hist_tokens = histmod.set_current_user(
@@ -2549,21 +2556,34 @@ def _parse_line_folder_guid(guid: str) -> str | None:
     return None
 
 
-def _line_item_guid(og: str, line: str, index: int = 0) -> str:
-    raw = f"{og}|{line}|{int(index or 0)}".encode("utf-8")
+def _line_item_guid(og: str, line: str, index: int = 0,
+                    season: int | None = None) -> str:
+    # 旧三段格式逐字保留；仅小雅多季线路使用第四段，非小雅不受影响。
+    raw_text = f"{og}|{line}|{int(index or 0)}"
+    if season is not None:
+        raw_text += f"|{max(1, int(season or 1))}"
+    raw = raw_text.encode("utf-8")
     return _LINE_ITEM_PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
-def _parse_line_item_guid(guid: str) -> tuple[str, str, int] | None:
+def _parse_line_item_parts(guid: str) -> tuple[str, str, int, int | None] | None:
     if not isinstance(guid, str) or not guid.startswith(_LINE_ITEM_PREFIX):
         return None
     try:
         token = guid[len(_LINE_ITEM_PREFIX):]
         token += "=" * (-len(token) % 4)
-        og, line, index = base64.urlsafe_b64decode(token.encode()).decode().split("|", 2)
-        return og, line, int(index or 0)
+        parts = base64.urlsafe_b64decode(token.encode()).decode().split("|")
+        if len(parts) not in (3, 4):
+            return None
+        return (parts[0], parts[1], int(parts[2] or 0),
+                max(1, int(parts[3])) if len(parts) == 4 else None)
     except Exception:
         return None
+
+
+def _parse_line_item_guid(guid: str) -> tuple[str, str, int] | None:
+    parts = _parse_line_item_parts(guid)
+    return parts[:3] if parts else None
 
 
 def _vod_directory_card(row: dict) -> dict:
@@ -2699,14 +2719,16 @@ def _fixed_media_target(mg: str, request: Request | None = None) -> dict | None:
 
     line-season guid 解析为该线路该季的第 0 集，使播放页对季节点请求
     stream/list 时也能拿到流容器（否则返回空、右下角集数与选集入口消失）。"""
-    parsed = _parse_line_item_guid(mg)
+    parts = _parse_line_item_parts(mg)
+    parsed = parts[:3] if parts else None
+    fixed_season = parts[3] if parts else 1
     if not parsed:
         season_parsed = _parse_line_season_guid(mg)
         if season_parsed:
-            og, line, _season_no = season_parsed
+            og, line, fixed_season = season_parsed
             parsed = (og, line, 0)
     if not parsed:
-        # 网盘/小雅虚拟线的 media/video guid 是哈希：用登记的反查映射还原 (og,index)。
+        # 网盘/小雅虚拟线的 media/video guid 是哈希：用登记的反查映射还原。
         ref = _PANSOU_MEDIA_MAP.get(mg)
         if ref:
             parsed = (ref[0], PANSOU_LINE, ref[1])
@@ -2714,6 +2736,7 @@ def _fixed_media_target(mg: str, request: Request | None = None) -> dict | None:
             ref = _XIAOYA_MEDIA_MAP.get(mg)
             if ref:
                 parsed = (ref[0], XIAOYA_LINE, ref[1])
+                fixed_season = int(ref[2]) if len(ref) > 2 else 1
             else:
                 return None
     og, line, index = parsed
@@ -2722,24 +2745,38 @@ def _fixed_media_target(mg: str, request: Request | None = None) -> dict | None:
             index = int(request.query_params.get("index", index) or index)
         except (TypeError, ValueError):
             pass
+        if _is_xiaoya_line_name(line):
+            try:
+                fixed_season = max(1, int(request.query_params.get(
+                    "season", fixed_season) or fixed_season))
+            except (TypeError, ValueError):
+                pass
     brief = store.get_title_by_guid(og)
     if not brief:
-        return None
+        # 小雅 media map 是独立的持久化身份；store 短暂未回填时仍允许
+        # media/range/direct 取流，其它线路保持原有 store miss 行为。
+        if not _is_xiaoya_line_name(line):
+            return None
+        brief = {"guid": og, "title": "", "type_name": "电影"}
     # PanSou/小雅是虚拟手动线（不在 store），构造专用 target，不解析、不测速。
     if _is_pansou_line_name(line):
         target = _pansou_manual_target(index)
     elif _is_xiaoya_line_name(line):
         if not _xiaoya_available():
             return None
-        target = _xiaoya_manual_target(og, index)
+        target = _xiaoya_manual_target(og, index, fixed_season)
     else:
         target = store.resolve_episode(og, line, index)
         if not target:
             return None
     is_tv = inj.is_tv(brief)
+    base_eg = (_xiaoya_episode_guid(og, index, fixed_season)
+               if is_tv and _is_xiaoya_line_name(line)
+               else episode_guid(og, "", index) if is_tv else "")
     return dict(target, online_guid=og, title=brief.get("title", ""),
-                ep_guid=episode_guid(og, "", index) if is_tv else "",
-                kind="episode" if is_tv else "title", _fixed_line=True)
+                ep_guid=target.get("ep_guid") or base_eg,
+                kind=target.get("kind") or ("episode" if is_tv else "title"),
+                _fixed_line=True)
 
 
 def _vod_folder_detail_data(guid: str) -> dict | None:
@@ -3570,9 +3607,12 @@ async def season_list_route(guid: str, request: Request):
 @app.get("/v/api/v1/episode/list/{guid}")
 async def episode_list_route(guid: str, request: Request):
     # guid 可能是伪造的 season guid、固定线路卡/线路季 guid，也可能是 tv guid
-    parsed_line = _parse_line_item_guid(guid) or _parse_line_season_guid(guid)
+    parsed_item = _parse_line_item_parts(guid)
+    parsed_season = _parse_line_season_guid(guid)
+    parsed_line = (parsed_item[:3] if parsed_item else parsed_season)
     fixed_line = parsed_line[1] if parsed_line else None
-    fixed_season = parsed_line[2] if parsed_line else None
+    fixed_season = (parsed_item[3] if parsed_item and parsed_item[3]
+                    else parsed_season[2] if parsed_season else None)
     if parsed_line:
         guid = parsed_line[0]
     season = store.get_season(guid)
@@ -3598,7 +3638,14 @@ async def episode_list_route(guid: str, request: Request):
                     ep_index = int(row.get("episode_number") or 1) - 1
                 except (TypeError, ValueError):
                     ep_index = 0
-                row["guid"] = _line_item_guid(tv, fixed_line, ep_index)
+                if _is_xiaoya_line_name(fixed_line):
+                    row["guid"] = _line_item_guid(
+                        tv, fixed_line, ep_index, int(season_number or 1))
+                    # episode/list 直接消费 media_guid 时也必须可冷启动反查；
+                    # 用 inj 返回的真实集 guid，避免多季/非常规集号再猜一次。
+                    _xiaoya_register_media(tv, ep_index, int(season_number or 1), ep_g)
+                else:
+                    row["guid"] = _line_item_guid(tv, fixed_line, ep_index)
                 row["media_guid"] = ep_media_guid(ep_g, fixed_line)
                 row["video_guid"] = ep_video_guid(ep_g, fixed_line)
                 row["parent_guid"] = line_season
@@ -3623,34 +3670,155 @@ async def stream_list_post(request: Request):
     return await _stream_list_impl(guid, request)
 
 
-def _ios_relay_duration(target: dict | None, brief: dict) -> int:
-    """返回当前实际线路的片长；资料时长只在真实媒体信息不可用时兜底。"""
+def _relay_job_media_end(j: dict) -> float:
+    """只返回实际Cluster索引到的时间，绝不用资料duration虚构覆盖范围。"""
+    end = float(j.get("media_end") or 0)
+    if (j.get("proc") is not None and j["proc"].returncode == 0
+            and not j.get("index_finalized") and _relay_has_media(j)):
+        _mkv_update_index(j)
+        end = float(j.get("media_end") or 0)
+    return end
+
+
+def _relay_covering_job(target: dict, resume: int) -> dict | None:
+    """仅复用已索引覆盖新续播点的同集同线任务，不凭空承诺未下载区域。"""
+    if resume <= 0:
+        return None
+    base_key = _relay_key(dict(target, _relay_start=0))
+    candidates = []
+    for j in _RELAY_JOBS.values():
+        if j.get("base_key") != base_key:
+            continue
+        start = int(j.get("start") or 0)
+        if start > resume:
+            continue
+        active_index = bool(j.get("cues"))
+        completed_index = (j.get("proc") is not None
+                           and j["proc"].returncode == 0 and _relay_has_media(j))
+        end = _relay_job_media_end(j)
+        if (active_index or completed_index) and start <= resume <= end:
+            candidates.append((start, end, j))
+    if not candidates:
+        return None
+    # 优先离续播点最近的较早任务，减少播放器的向后seek距离。
+    return max(candidates, key=lambda row: (row[0], row[1]))[2]
+
+
+def _ios_relay_job_for(target: dict, request: Request = None) -> tuple[dict, int, str]:
+    """返回实际job、resume和资源key；别名与full回退共享同一URL代际。"""
+    resume = int(target.get("_relay_start") or 0)
+    if not resume and request is not None:
+        resume = _ios_resume_seconds(target, request)
+    resume_key = _relay_key(dict(target, _relay_start=resume))
+    full_key = _RELAY_RESUME_FALLBACK.get(resume_key)
+    if full_key:
+        return _RELAY_JOBS.get(full_key) or {}, 0, full_key
+    alias = _RELAY_REUSE_ALIAS.get(resume_key)
+    if alias:
+        actual_key, actual_start = alias
+        actual_full = _RELAY_RESUME_FALLBACK.get(actual_key)
+        if actual_full:
+            return _RELAY_JOBS.get(actual_full) or {}, 0, actual_full
+        return _RELAY_JOBS.get(actual_key) or {}, actual_start, actual_key
+    exact = _RELAY_JOBS.get(resume_key)
+    if exact is not None:
+        return exact, resume, resume_key
+    covering = _relay_covering_job(target, resume)
+    if covering is not None:
+        actual_start = int(covering.get("start") or 0)
+        _RELAY_REUSE_ALIAS[resume_key] = (covering["key"], actual_start)
+        return covering, actual_start, covering["key"]
+    return {}, resume, resume_key
+
+
+def _ios_relay_url_identity(target: dict, request: Request = None) -> tuple[int, str]:
+    """把fncache资源代际放进URL；job尚未创建时预留，创建后保持不变。"""
+    j, resume, key = _ios_relay_job_for(target, request)
+    generation = str(j.get("generation") or "")
+    if not generation:
+        generation = _RELAY_RESERVED_GENERATION.get(key) or os.urandom(8).hex()
+        _RELAY_RESERVED_GENERATION[key] = generation
+    return resume, generation
+
+
+def _relay_timeline_start(j: dict) -> float:
+    """零基MKV的实际源起点；输入-ss可能落在请求点之前的关键帧。"""
+    if not j or not j.get("zero_based"):
+        return 0.0
+    try:
+        return max(0.0, float(j.get("timeline_start", j.get("start")) or 0))
+    except (TypeError, ValueError, OverflowError):
+        return max(0.0, float(j.get("start") or 0))
+
+
+def _ios_relay_duration(target: dict | None, brief: dict,
+                        request: Request = None) -> int:
+    """返回实际MKV时间轴时长；零基续播片段只包含全片的剩余部分。"""
+    timeline_start = 0.0
     if target:
         try:
-            j = _RELAY_JOBS.get(_relay_key(target)) or {}
+            j, resume, _key = _ios_relay_job_for(target, request)
+            timeline_start = (_relay_timeline_start(j) if j.get("zero_based")
+                              else (float(resume) if not j else 0.0))
+            if target.get("t4"):
+                timeline_start = 0  # T4仍播放自己的全时间轴HLS会话。
             if (j.get("duration_source") != "brief"
                     and float(j.get("duration") or 0) > 0):
-                return int(round(float(j["duration"])))
+                return int(round(max(0.0, float(j["duration"]) - timeline_start)))
             playlist_duration = _relay_duration_fallback(target)
             if playlist_duration > 0:
-                return playlist_duration
+                return int(round(max(0.0, playlist_duration - timeline_start)))
         except Exception:  # noqa: BLE001
             pass
     runtime = (brief or {}).get("runtime")
     try:
-        return int(float(runtime) * 60) if runtime else 0
+        base = int(float(runtime) * 60) if runtime else 0
+        return int(round(max(0.0, base - timeline_start)))
     except (TypeError, ValueError):
         return 0
 
 
-def _apply_ios_relay_metadata(sl: dict, brief: dict, target: dict = None):
+def _ios_zero_timeline_play_info(info: dict, target: dict,
+                                 request: Request) -> dict:
+    """把全片历史进度转换为实际零基MKV的播放位置与剩余时间轴。"""
+    if not info or _client_of(request).kind != clientmod.IOS or not target:
+        return info
+    try:
+        if not _guess_wrapper(target)[1] or target.get("t4"):
+            # T4 play/play使用自己的HLS会话，不经过MKV relay，保持全片历史语义。
+            return info
+        j, resume, _key = _ios_relay_job_for(target, request)
+        start = (_relay_timeline_start(j) if j.get("zero_based")
+                 else (float(resume) if not j else 0.0))
+        item = info.get("item") if isinstance(info.get("item"), dict) else {}
+        global_ts = int(float(info.get("ts") or item.get("watched_ts")
+                              or item.get("ts") or 0))
+        relative_ts = max(0, int(round(global_ts - start)))
+        info["ts"] = relative_ts
+        if item:
+            item["ts"] = relative_ts
+            item["watched_ts"] = relative_ts
+            duration = _ios_relay_duration(
+                target, {"runtime": item.get("runtime")}, request)
+            if duration > 0:
+                item["duration"] = duration
+                item["runtime"] = max(1, int(duration / 60))
+    except Exception:
+        _log.info("iOS zero-based play/info mapping failed", exc_info=True)
+    return info
+
+
+def _apply_ios_relay_metadata(sl: dict, brief: dict, target: dict = None,
+                              request: Request = None):
     """把 HLS 虚拟流统一描述为 relay 实际交付的 MKV 文件。
 
     duration 优先取当前 line/index 的真实媒体清单或 relay 探测结果，size 仅用于
     客户端判可播和稳定 Range 估算，绝不参与时间轴换算。两个 stream 入口必须共用
     同一 duration/size 规则。
     """
-    duration = _ios_relay_duration(target, brief)
+    duration = _ios_relay_duration(target, brief, request)
+    relay_job, resume, _key = (_ios_relay_job_for(target, request)
+                               if target else ({}, 0, ""))
     videos = sl.get("video_streams") or []
     for v in videos:
         v["wrapper"] = "MKV"
@@ -3659,6 +3827,14 @@ def _apply_ios_relay_metadata(sl: dict, brief: dict, target: dict = None):
         if not v.get("duration"):
             v["duration"] = 5400
     estimated_duration = (videos[0].get("duration") if videos else 0) or 5400
+    # 零基duration已经是remaining，不能再减一次resume；旧绝对时间轴job才需要扣start。
+    estimated_size = int(relay_job.get("size_est") or 0)
+    if not estimated_size:
+        size_duration = (estimated_duration
+                         if not (target and target.get("t4")) and
+                         (not relay_job or relay_job.get("zero_based"))
+                         else max(0, estimated_duration - resume))
+        estimated_size = int(size_duration * 4_000_000 / 8)
     for f in sl.get("files") or []:
         file_name = (brief.get("title") or "video").replace("/", "_") + ".mkv"
         parent = str(f.get("path") or "在线/video.m3u8").rsplit("/", 1)[0]
@@ -3667,7 +3843,7 @@ def _apply_ios_relay_metadata(sl: dict, brief: dict, target: dict = None):
         # 否则 wrapper/file_name 都是 MKV，path 却仍把播放器导向 HLS。
         f["path"] = parent + "/" + file_name
         if not f.get("size"):
-            f["size"] = int(estimated_duration * 4_000_000 / 8)
+            f["size"] = estimated_size
 
 
 async def _stream_list_impl(guid: str, request: Request):
@@ -3704,17 +3880,27 @@ async def _stream_list_impl(guid: str, request: Request):
             _v["guid"] = _p_vg
             _v["media_guid"] = _p_mg
         if _is_xiaoya_line_name(_p_line):
-            # 小雅是直连文件（MP4/MKV），绝非 HLS。必须返回直连文件元数据（wrapper MP4、
-            # play_link 指向 /direct），否则播放器按 CMS 的 HLS(.m3u8) 元数据去解析直连
-            # 文件字节，Web/App 均「播放出错」。与分类库 _xlib_stream_payload 同构。
+            # 小雅是直连文件（MP4/MKV），绝非 HLS。必须返回直连文件元数据（真实
+            # wrapper/size/扩展名、play_link 指向 /direct），否则播放器按 CMS 的
+            # HLS(.m3u8) 元数据去解析直连文件字节，Web/App 均「播放出错」。
+            # 与分类库 _xlib_stream_payload 同构。
             _xy_title = brief.get("title", "") or "小雅资源"
-            _xy_fname = _xy_title + ".mp4"
+            _xy_ext, _xy_wrap, _xy_size = _xiaoya_file_meta(fixed)
+            _xy_fname = _xy_title + _xy_ext
+            _xy_dur = 0
+            if brief.get("runtime"):
+                try:
+                    _xy_dur = int(float(brief["runtime"]) * 60)
+                except (TypeError, ValueError):
+                    pass
             _xy_res = "2160p" if ("2160" in _xy_title or "4K" in _xy_title.upper()) else "1080p"
-            _xy_q = urllib.parse.urlencode({"line": _p_line, "index": _p_idx})
+            _xy_q = urllib.parse.urlencode({
+                "line": _p_line, "index": _p_idx,
+                "season": int(fixed.get("season", 1) or 1)})
             sl = {
                 "files": [{
                     "guid": _p_mg, "path": f"网盘/{_xy_fname}", "file_name": _xy_fname,
-                    "size": 0, "timestamp": 0, "type": 1, "sort_num": 0, "can_play": 1,
+                    "size": _xy_size, "timestamp": 0, "type": 1, "sort_num": 0, "can_play": 1,
                     "play_error": "", "create_time": 0, "update_time": 0,
                     "parent_fv_guid": "", "progress_thumb_hash_dir": "",
                 }],
@@ -3725,10 +3911,10 @@ async def _stream_list_impl(guid: str, request: Request):
                     "profile": "High", "index": 0, "width": 0, "height": 0,
                     "coded_width": 0, "coded_height": 0, "display_aspect_ratio": "16:9",
                     "pix_fmt": "yuv420p", "level": "40", "color_space": "",
-                    "color_transfers": "", "color_primaries": "", "duration": 0,
+                    "color_transfers": "", "color_primaries": "", "duration": _xy_dur,
                     "dv_profile": 0, "refs": 1, "r_frame_rate": "24 fps",
                     "avg_frame_rate": "24 fps", "bits_per_raw_sample": "8", "bps": 0,
-                    "progressive": 1, "bit_depth": 8, "wrapper": "MP4",
+                    "progressive": 1, "bit_depth": 8, "wrapper": _xy_wrap,
                     "create_time": 0, "update_time": 0, "rotation": 0, "ext1": 0,
                     "is_bluray": False,
                 }],
@@ -3805,7 +3991,7 @@ async def _stream_list_impl(guid: str, request: Request):
                 and not _is_xiaoya_line_name(target.get("line", "")):
             # iOS fncache relay：stream/list 与 stream POST 共用同一 MKV 元数据。
             _tb = store.get_title_by_guid(target.get("online_guid", "")) or {}
-            _apply_ios_relay_metadata(sl, _tb, target)
+            _apply_ios_relay_metadata(sl, _tb, target, request)
             try:
                 asyncio.create_task(_ensure_relay_job(target, request))
             except Exception:  # noqa: BLE001
@@ -4109,14 +4295,18 @@ def _online_play_info(guid: str, request: Request) -> dict | None:
 
 
 def _vod_play_info_from_snapshot(og: str, line: str, index: int,
-                                 client) -> JSONResponse | None:
+                                 client, request: Request = None,
+                                 season: int = 1) -> JSONResponse | None:
     """store 淘汰后，用历史快照为固定线路卡重建 play/info。
 
     快照按基础集 guid 存了当前集线路；这里尊重请求里显式的 line/index，
     只借快照里的 brief 元数据与 ts，不回注 store，避免污染完整缓存。
     """
     try:
-        eg = episode_guid(og, "", index)
+        is_xiaoya = _is_xiaoya_line_name(line)
+        fixed_season = max(1, int(season or 1)) if is_xiaoya else 1
+        eg = (_xiaoya_episode_guid(og, index, fixed_season)
+              if is_xiaoya else episode_guid(og, "", index))
         # 显式集与历史记录必须严格对应：其他集/影片级快照只能补元数据，
         # 绝不能把它的 ts 套到本集，否则手动下一集会从上一集结尾起播。
         same_ep_rec = history.get(eg)
@@ -4131,7 +4321,8 @@ def _vod_play_info_from_snapshot(og: str, line: str, index: int,
         snap_ep["episode_number"] = index + 1
         snap_ep["ep_title"] = f"第{index + 1}集"
         snap_ep["ep_guid"] = eg
-        snap_ep["season"] = snap_ep.get("season") or 1
+        snap_ep["season"] = (fixed_season if is_xiaoya else
+                             snap_ep.get("season") or 1)
         snap_ep["season_guid"] = season_guid(og, int(snap_ep.get("season") or 1))
         # 能从快照重建出 snap_ep（带集序号）即按剧集 Episode 处理；不能依赖
         # is_tv(brief)，因为快照只含当前集线路，_ep_count 会把连载剧误判成电影。
@@ -4142,7 +4333,8 @@ def _vod_play_info_from_snapshot(og: str, line: str, index: int,
             info["media_guid"] = ep_media_guid(eg, line)
             info["video_guid"] = ep_video_guid(eg, line)
             witem = info.get("item") or {}
-            witem["guid"] = _line_item_guid(og, line, index)
+            witem["guid"] = _line_item_guid(
+                og, line, index, fixed_season if is_xiaoya else None)
             witem["parent_guid"] = _line_season_guid(
                 og, line, int(snap_ep.get("season") or 1))
             witem["media_guid"] = ep_media_guid(eg, line)
@@ -4154,6 +4346,12 @@ def _vod_play_info_from_snapshot(og: str, line: str, index: int,
             info["video_guid"] = ep_video_guid(og, line)
             info["ts"] = rec.get("ts", 0)
         _ensure_resume_duration(info)
+        if request is not None:
+            target = store.resolve_episode(og, line, index)
+            if target is None and snap_ep:
+                target = dict(snap_ep, online_guid=og, ep_guid=eg,
+                              line=line, index=index, kind="episode")
+            _ios_zero_timeline_play_info(info, target, request)
         return JSONResponse({"code": 0, "msg": "", "data":
                              clientmod.normalize_detail(info, client)})
     except Exception:
@@ -4162,13 +4360,15 @@ def _vod_play_info_from_snapshot(og: str, line: str, index: int,
 
 
 def _vod_play_info(guid: str, client, request: Request = None) -> JSONResponse | None:
-    parsed = _parse_line_item_guid(guid)
-    if not parsed:
+    parts = _parse_line_item_parts(guid)
+    if not parts:
         return None
-    og, line, index = parsed
+    og, line, index, fixed_season = parts
+    fixed_season = fixed_season or 1
     brief = store.get_title_by_guid(og)
     if not brief:
-        return _vod_play_info_from_snapshot(og, line, index, client)
+        return _vod_play_info_from_snapshot(
+            og, line, index, client, request, fixed_season)
     is_pansou = _is_pansou_line_name(line)
     is_xiaoya = _is_xiaoya_line_name(line)
     # 必须尊重请求中显式编码的集 index：线路卡已用 _vod_resume_index 生成默认
@@ -4181,18 +4381,21 @@ def _vod_play_info(guid: str, client, request: Request = None) -> JSONResponse |
         # 能锁定本网盘线（否则透传官方 invalid sign，触发链不启动）。
         _pansou_register_media(og, index)
     elif is_xiaoya:
-        target = _xiaoya_manual_target(og, index)
+        target = _xiaoya_manual_target(og, index, fixed_season)
     else:
         target = store.resolve_episode(og, line, index)
         if not target:
-            return _vod_play_info_from_snapshot(og, line, index, client)
+            return _vod_play_info_from_snapshot(
+                og, line, index, client, request, fixed_season)
     is_tv = inj.is_tv(brief)
-    eg = episode_guid(og, "", index)
+    eg = (_xiaoya_episode_guid(og, index, fixed_season)
+          if is_tv and is_xiaoya else episode_guid(og, "", index))
     base_guid = eg if is_tv else og
     if is_tv:
         ep = store.get_episode(eg)
         if not ep:
-            return _vod_play_info_from_snapshot(og, line, index, client)
+            return _vod_play_info_from_snapshot(
+                og, line, index, client, request, fixed_season)
         # 飞牛 Web 只在 play/info 为 Episode 形状（type=Episode、parent 指向季、
         # 带 season/episode 序号）时渲染「选集」入口；TV/detail 形状会被当成独立影片而
         # 不显示选集。故 Web 多集内容复用 episode_play_info 的原生形状（与播放历史入口
@@ -4206,7 +4409,8 @@ def _vod_play_info(guid: str, client, request: Request = None) -> JSONResponse |
             # 而失败；改成带固定线路身份的 line-item/line-season guid 与其带线路 media
             # guid，使选集链全程锁定本线路（复用已验证的 episode_list_route 固定线路链）。
             _witem = info.get("item") or {}
-            _witem["guid"] = _line_item_guid(og, line, index)
+            _witem["guid"] = _line_item_guid(
+                og, line, index, fixed_season if is_xiaoya else None)
             _witem["parent_guid"] = _line_season_guid(og, line, int(ep.get("season") or 1))
             _witem["media_guid"] = ep_media_guid(eg, line)
             _witem["video_guid"] = ep_video_guid(eg, line)
@@ -4263,6 +4467,7 @@ def _vod_play_info(guid: str, client, request: Request = None) -> JSONResponse |
         if _item_dur > 0:
             item["runtime"] = max(1, int(_item_dur / 60))
     if request is not None:
+        _ios_zero_timeline_play_info(info, target, request)
         # 社区新版：播放页一打开就启动当前线单飞；函数自身限制为 iOS/HLS。
         _ios_prepare_playlist(ep_media_guid(eg, line), target, request)
     return JSONResponse({"code": 0, "msg": "", "data":
@@ -4299,6 +4504,7 @@ async def play_info(request: Request):
             mg = str(info.get("media_guid") or "")
             target = _pick_episode(mg, request) if mg else None
             if target:
+                _ios_zero_timeline_play_info(info, target, request)
                 _ios_prepare_playlist(mg, target, request)
                 # iOS 走 MKV relay：详情页即启动 ffmpeg remux，把转封装等待前移到
                 # 用户浏览详情阶段，掩盖首次 Range 的起播延迟（单飞，不重复启动）。
@@ -4678,17 +4884,39 @@ async def stream_post(request: Request):
     else:
         v["guid"] = video_guid(target["online_guid"])
     if _is_xiaoya_line_name(target.get("line", "")):
-        # 小雅是直连文件，stream 元数据必须 MP4（非 HLS），与 play_link /direct 一致。
-        _t = (store.get_title_by_guid(target["online_guid"]) or {}).get("title", "") or "小雅资源"
-        v["wrapper"] = "MP4"
+        # 小雅是网盘真实完整文件：iOS fncache 以真实 size/wrapper 判可播，size=0
+        # 会被判不可播而不取流。绑定（搜索+fs/list）是该线路的必需解析而非额外
+        # 探测，在 stream 阶段完成使 media/range 直接命中单飞缓存，总耗时不变。
+        try:
+            _xy = await _ensure_xiaoya_manual(
+                target.get("online_guid", ""), int(target.get("index", 0) or 0),
+                int(target.get("season", 1) or 1))
+            if _xy:
+                # 绑定结果只带 _xiaoya_manual，不带 _fixed_line；小雅是用户明确点选
+                # 的固定手动线，必须保留固定身份，否则 _stream_play_link 误加 auto=1
+                # 触发竞速，违反二级线路墙固定线禁竞速约定（与 play/play 不一致）。
+                target = dict(_xy, _fixed_line=True)
+        except Exception:  # noqa: BLE001
+            pass
+        _b = store.get_title_by_guid(target["online_guid"]) or {}
+        _t = _b.get("title", "") or "小雅资源"
+        _ext, _wrap, _size = _xiaoya_file_meta(target)
+        v["wrapper"] = _wrap
         v["codec_name"] = "hevc"
-        f["file_name"] = _t + ".mp4"
-        f["path"] = "网盘/" + _t + ".mp4"
+        f["file_name"] = _t + _ext
+        f["path"] = "网盘/" + _t + _ext
+        if _size > 0:
+            f["size"] = _size
+        if not v.get("duration") and _b.get("runtime"):
+            try:
+                v["duration"] = int(float(_b["runtime"]) * 60)
+            except (TypeError, ValueError):
+                pass
     elif _client_of(request).kind == clientmod.IOS and _guess_wrapper(target)[1]:
         # iOS HLS(fncache) 零分片坏路径 → 渐进式 MKV relay。镜像本地契约：
         # wrapper MKV + 非零 duration/size + .mkv path；预热 remux 掩盖起播延迟。
         _b = store.get_title_by_guid(target["online_guid"]) or {}
-        _apply_ios_relay_metadata(sl, _b, target)
+        _apply_ios_relay_metadata(sl, _b, target, request)
         try:
             asyncio.create_task(_ensure_relay_job(target, request))
         except Exception:  # noqa: BLE001
@@ -4785,6 +5013,21 @@ async def media_range(mg: str, request: Request):
         # 验证可播的是渐进式文件，故 iOS+HLS 302 到 /relay（ffmpeg remux MKV，
         # 文件式 Range 可 seek）。Web/TV 仍 preset master 选线菜单。
         if _client_of(request).kind == clientmod.IOS:
+            # 必须与 play/info、play/play、relay 使用同一套剧集身份解析。
+            # 直接用 store 的标题级记录会在换集/媒体重定向后丢失当前集续播点，
+            # 额外启动一路从 0 秒下载的 ffmpeg，与正确的 resume 任务争抢带宽。
+            resume_target = _pick_episode(mg, request) or target
+            resume_target = dict(
+                resume_target,
+                _relay_start=_ios_resume_seconds(resume_target, request))
+            resume, generation = _ios_relay_url_identity(resume_target, request)
+            # start与generation共同固定fncache资源；重建后旧偏移不能进入新MKV。
+            params["start"] = resume
+            params["g"] = generation
+            q = urllib.parse.urlencode(params)
+            # media_range是fncache携带App会话令牌的请求；在此绑定会话→(mg,代际)，
+            # 使退出时play/record能凭同一令牌取回权威续播坐标（relay字节请求不带令牌）。
+            _bind_ios_relay_session(mg, generation, request)
             return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/relay?{q}",
                                     status_code=302)
         return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{q}",
@@ -4794,15 +5037,94 @@ async def media_range(mg: str, request: Request):
 
 _RELAY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "relay")
 _RELAY_JOBS: dict = {}
+# 失败的 resume key → full key。映射在进程生命周期内固定；即使 full 文件因空闲
+# 被清理，后续同URL也只能重建full，绝不能重新spawn suffix导致字节资源切换。
+_RELAY_RESUME_FALLBACK: dict[str, str] = {}
+# requested start对应的较早覆盖任务：进程生命周期内固定，防止旧URL换资源。
+_RELAY_REUSE_ALIAS: dict[str, tuple[str, int]] = {}
+# 尚无job时由play_link预留代际，创建job时消费；重建必须换新URL使fncache废弃旧偏移。
+_RELAY_RESERVED_GENERATION: dict[str, str] = {}
+# 同一relay URL已公布的HTTP总字节数只可增加，不能因完成或TTL重建而缩小。
+_RELAY_PUBLISHED_TOTAL: dict[str, int] = {}
 _RELAY_LOCK = asyncio.Lock()
-_RELAY_MAX_JOBS = 3
+_RELAY_MAX_JOBS = 3  # 软上限：优先淘汰已完成任务，不能因此杀掉仍在生成的 ffmpeg。
+_RELAY_HARD_MAX_JOBS = 6
 _RELAY_TTL = 120.0
+# 已完成文件没有进程开销，保留更长的暂停/续播窗口；运行中的 ffmpeg 不按此 TTL 删除。
+_RELAY_FILE_TTL = 30 * 60.0
 _RELAY_RANGE_MAX = 4 * 1024 * 1024  # 单次同步读取上限，避免开放区间吃光内存。
+_RELAY_INDEX_SPACE = 1024 * 1024
+_RELAY_INDEX_SCAN_MAX = 8 * 1024 * 1024
+
+
+def _ios_resume_seconds(target: dict, request: Request = None) -> int:
+    """解析当前集的有效续播点；显式 start=0 必须能覆盖旧历史。"""
+    explicit = request.query_params.get("start") if request is not None else None
+    ts = 0.0
+    rec = None
+    try:
+        if explicit is not None:
+            ts = float(explicit)
+        else:
+            og = str(target.get("online_guid") or "")
+            index = int(target.get("index") or 0)
+            eg = str(target.get("ep_guid") or "")
+            rec = history.get(eg) if eg else None
+            if not rec and og:
+                # query 覆盖 line/index 时 target 可能没有 ep_guid；集 guid 本身不绑线，
+                # 可由 og/index 确定性恢复，绝不能借用其它集的进度。
+                rec = history.get(episode_guid(og, "", index))
+            if not rec and og and target.get("kind") == "title":
+                rec = history.get(og)
+            if not rec and og:
+                latest = history.latest_episode_record(og)
+                snap = (latest or {}).get("snapshot") or {}
+                if latest and snap.get("_ep_index") == index:
+                    rec = latest
+            ts = float((rec or {}).get("ts") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    if not math.isfinite(ts) or ts <= 0:
+        return 0
+    # 只读现有清单/历史时长，不为续播额外联网；仅真正越过片尾才从头处理。
+    try:
+        duration = _relay_duration_fallback(target)
+        if duration <= 0:
+            # 冷缓存没有EXTINF时，历史已上报片长仍是防止-ss越过片尾的重要上限。
+            duration = int(float((rec or {}).get("duration") or 0))
+        # 冷缓存预热与热清单响应必须得到同一个续播点。只要 ts 尚未越过
+        # 片尾，即使已到 95% 之后也不能把预热 start 突然改回 0，否则真正
+        # 的 relay 请求会重新从全片开头下载。整数时长允许 ts 等于其上限。
+        if duration > 0 and ts > duration:
+            return 0
+        if explicit is not None and duration > 0:
+            ts = min(ts, float(duration))
+    except Exception:  # noqa: BLE001
+        pass
+    return max(0, int(ts))
 
 
 def _relay_key(target: dict) -> str:
-    raw = f"{target.get('online_guid')}|{target.get('line')}|{target.get('index')}"
+    start = int(target.get("_relay_start") or 0)
+    raw = (f"{target.get('online_guid')}|{target.get('line')}|"
+           f"{target.get('index')}|resume:{start}")
     return hashlib.md5(raw.encode()).hexdigest()
+
+
+def _relay_publish_total(j: dict) -> None:
+    """固定URL的字节总长估值；TTL重建只能沿用或向上修正。"""
+    key = j.get("key")
+    if not key:
+        return
+    known = _RELAY_PUBLISHED_TOTAL.get(key, 0)
+    if known > 0:
+        j["published_total"] = known
+        j["size_est"] = known
+        return
+    total = int(j.get("published_total") or j.get("size_est") or 0)
+    j["published_total"] = total
+    if total > 0:
+        _RELAY_PUBLISHED_TOTAL[key] = total
 
 
 def _relay_kill(j: dict):
@@ -4818,21 +5140,36 @@ def _relay_drop(key: str):
     j = _RELAY_JOBS.pop(key, None)
     if not j:
         return
-    _relay_kill(j)
-    try:
-        os.remove(j["path"])
-    except OSError:
-        pass
+    # cancel不会终止已交给to_thread的索引写。与线程共用index_lock，等待
+    # 在途写结束后再删文件；随后旧线程即使醒来，也会因job已出表而拒绝写入。
+    lock = j.get("index_lock") or threading.Lock()
+    with lock:
+        _relay_kill(j)
+        task = j.get("index_task")
+        if task is not None and not task.done():
+            task.cancel()
+        try:
+            os.remove(j["path"])
+        except OSError:
+            pass
 
 
 def _relay_cleanup():
     now = time.time()
     for k, j in list(_RELAY_JOBS.items()):
-        # TTL 从最后一次取流算起；尚未关闭的连续响应必须继续持有任务，不能按
-        # ffmpeg 创建时间强杀，否则长播/暂停后恢复会突然删文件或重新下载。
-        if j.get("active", 0) > 0 or now - j["ts"] <= _RELAY_TTL:
+        # 没有HTTP请求不代表客户端已经不需要文件：fncache可能暂停取流后继续从
+        # 大偏移读取。运行中的ffmpeg一旦杀掉，同一路径只能重新生成并造成长等待；
+        # 让它完成，随后仅按更长的已完成文件保留期回收磁盘。
+        if j.get("active", 0) > 0 or j["proc"].returncode is None:
+            continue
+        if now - j["ts"] <= _RELAY_FILE_TTL:
             continue
         _relay_drop(k)
+
+
+def _relay_only_shared_probe(j: dict) -> bool:
+    """仅交付过两种资源共同的EBML魔数时，才可同URL透明切到full。"""
+    return j.get("delivered", 0) <= j.get("compatible_delivered", 0)
 
 
 def _relay_reuse(key: str):
@@ -4841,8 +5178,9 @@ def _relay_reuse(key: str):
     if j is None:
         return None
     rc = j["proc"].returncode
-    if rc is None or (rc == 0 and time.time() - j["ts"] < _RELAY_TTL):
+    if rc is None or (rc == 0 and time.time() - j["ts"] < _RELAY_FILE_TTL):
         j["ts"] = time.time()
+        _relay_publish_total(j)
         return j
     _relay_drop(key)
     return None
@@ -4903,6 +5241,544 @@ def _ebml_next(buf: bytes, offset: int, limit: int):
     if end > limit:
         return None
     return element_id, start, data_start, end
+
+
+def _ebml_file_next(src, offset: int, limit: int):
+    """只读文件中的EBML头，声明长度可大于当前文件，不读媒体payload。"""
+    start = offset
+    if offset >= limit:
+        return None
+    src.seek(offset)
+    head = src.read(12)
+    if len(head) < 2:
+        return None
+    first = head[0]
+    mask, id_len = 0x80, 1
+    while id_len <= 4 and not (first & mask):
+        mask >>= 1
+        id_len += 1
+    if id_len > 4 or id_len >= len(head):
+        return None
+    element_id = int.from_bytes(head[:id_len], "big")
+    pos = id_len
+    first = head[pos]
+    mask, size_len = 0x80, 1
+    while size_len <= 8 and not (first & mask):
+        mask >>= 1
+        size_len += 1
+    if size_len > 8 or pos + size_len > len(head):
+        return None
+    size = first & (mask - 1)
+    for value in head[pos + 1:pos + size_len]:
+        size = (size << 8) | value
+    data_start = start + pos + size_len
+    unknown = size == (1 << (7 * size_len)) - 1
+    end = limit if unknown else data_start + size
+    return element_id, start, data_start, end, not unknown
+
+
+def _ebml_encode_uint(value: int) -> bytes:
+    value = int(value)
+    if value < 0:
+        raise ValueError("EBML uint cannot be negative")
+    return value.to_bytes(max(1, (value.bit_length() + 7) // 8), "big")
+
+
+def _ebml_encode_size(size: int, width: int = 0) -> bytes:
+    """EBML VINT size；全1保留给unknown size，不能用作普通元素长度。"""
+    for n in range(max(1, int(width)), 9):
+        if size < (1 << (7 * n)) - 1:
+            return (size | (1 << (7 * n))).to_bytes(n, "big")
+    raise ValueError("EBML size is too large")
+
+
+def _ebml_encode_element(element_id: int, payload: bytes,
+                         size_width: int = 0) -> bytes:
+    return (_ebml_encode_uint(element_id)
+            + _ebml_encode_size(len(payload), size_width) + payload)
+
+
+def _mkv_index_header(buf: bytes, file_size: int) -> dict | None:
+    """定位预留Void、首个Cluster、视频轨及TimecodeScale。"""
+    ebml = _ebml_next(buf, 0, min(len(buf), file_size))
+    if not ebml or ebml[0] != 0x1A45DFA3:
+        return None
+    seg = _ebml_next(buf, ebml[3], file_size)
+    if not seg or seg[0] != 0x18538067:
+        return None
+    segment_data = seg[2]
+    pos = segment_data
+    reserve = None
+    first_cluster = None
+    video_track = 1
+    scale = 1_000_000
+    while pos < len(buf):
+        item = _ebml_next(buf, pos, len(buf))
+        if not item:
+            break
+        eid, start, data_start, end = item
+        if eid == 0x1F43B675:
+            first_cluster = start
+            break
+        if eid == 0xEC and end - start >= 4096 and reserve is None:
+            reserve = (start, end)
+        elif eid == 0x1549A966:  # Info
+            child = data_start
+            while child < end:
+                part = _ebml_next(buf, child, end)
+                if not part:
+                    break
+                cid, _cs, ds, ce = part
+                if cid == 0x2AD7B1:
+                    scale = int.from_bytes(buf[ds:ce], "big") or scale
+                child = ce
+        elif eid == 0x1654AE6B:  # Tracks
+            child = data_start
+            while child < end:
+                entry = _ebml_next(buf, child, end)
+                if not entry:
+                    break
+                eid2, _es, ds2, ee = entry
+                if eid2 == 0xAE:
+                    number, track_type = 0, 0
+                    field = ds2
+                    while field < ee:
+                        part = _ebml_next(buf, field, ee)
+                        if not part:
+                            break
+                        fid, _fs, ds3, fe = part
+                        if fid == 0xD7:
+                            number = int.from_bytes(buf[ds3:fe], "big")
+                        elif fid == 0x83:
+                            track_type = int.from_bytes(buf[ds3:fe], "big")
+                        field = fe
+                    if track_type == 1 and number:
+                        video_track = number
+                child = ee
+        pos = end
+    if reserve is None:
+        return None
+    return {"segment_data": segment_data, "index_start": reserve[0],
+            "index_end": reserve[1], "first_cluster": first_cluster or reserve[1],
+            "track": video_track, "scale": scale}
+
+
+def _mkv_index_payload(segment_data: int, index_start: int, capacity: int,
+                       cues: list[tuple[int, int]], track: int) -> bytes:
+    """生成预留区前缀；剩余Void只写头，payload可保留旧字节。"""
+    cue_points = []
+    for cue_time, cluster_pos in cues:
+        tracks = (_ebml_encode_element(0xF7, _ebml_encode_uint(track))
+                  + _ebml_encode_element(0xF1, _ebml_encode_uint(cluster_pos)))
+        cue_points.append(_ebml_encode_element(
+            0xBB, _ebml_encode_element(0xB3, _ebml_encode_uint(cue_time))
+            + _ebml_encode_element(0xB7, tracks)))
+    cues_payload = b"".join(cue_points)
+
+    def build(seek_width: int) -> tuple[bytes, bytes]:
+        # SeekPosition的值长度会影响SeekHead自身长度，迭代到稳定。
+        cues_pos = index_start + 32 - segment_data
+        seek_head = b""
+        for _ in range(4):
+            seek = (_ebml_encode_element(0x53AB, b"\x1c\x53\xbb\x6b")
+                    + _ebml_encode_element(0x53AC, _ebml_encode_uint(cues_pos)))
+            seek_head = _ebml_encode_element(
+                0x114D9B74, _ebml_encode_element(0x4DBB, seek), seek_width)
+            actual = index_start + len(seek_head) - segment_data
+            if actual == cues_pos:
+                break
+            cues_pos = actual
+        return seek_head, _ebml_encode_element(0x1C53BB6B, cues_payload)
+
+    # SeekHead优先用2字节size，给“只剩1字节无法构成Void”的情况留1字节余量。
+    for width in (2, 1):
+        seek_head, cues_el = build(width)
+        remaining = capacity - len(seek_head) - len(cues_el)
+        if remaining < 0 or remaining == 1:
+            continue
+        void_header = b""
+        if remaining:
+            for n in range(1, 9):
+                void_size = remaining - 1 - n
+                if void_size < 0:
+                    continue
+                try:
+                    size = _ebml_encode_size(void_size, n)
+                except ValueError:
+                    continue
+                if len(size) == n:
+                    void_header = _ebml_encode_uint(0xEC) + size
+                    break
+            if not void_header:
+                continue
+        return seek_head + cues_el + void_header
+    raise ValueError("MKV cue index exceeds reserved space")
+
+
+def _wait_process_stopped(pid: int, timeout: float = 0.1) -> bool:
+    """等待SIGSTOP真正生效；只有stopped状态才保证没有进行中的文件write。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as src:
+                stat = src.read()
+            state = stat[stat.rfind(b")") + 2:stat.rfind(b")") + 3]
+            if state in (b"T", b"t"):
+                return True
+            if state in (b"Z", b"X", b"x"):
+                return False
+        except OSError:
+            return False
+        time.sleep(0.001)
+    return False
+
+
+def _mkv_write_active_index(j: dict, payload: bytes) -> bool:
+    """等待producer真实停止后校验并写活动索引，闭合跨进程check-write竞态。"""
+    proc = j["proc"]
+    pid = getattr(proc, "pid", None)
+    if proc.returncode is not None or not pid:
+        return False
+    try:
+        os.kill(pid, signal.SIGSTOP)
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+    try:
+        if not _wait_process_stopped(pid) or proc.returncode is not None:
+            return False
+        with open(j["path"], "r+b", buffering=0) as out:
+            out.seek(int(j["index_start"]))
+            previous = j.get("index_written")
+            if previous:
+                # 只能在上次自己写入的前缀上更新；若ffmpeg已写最终Cues立即放弃。
+                if out.read(len(previous)) != previous:
+                    return False
+            elif out.read(1) != b"\xec":
+                return False
+            out.seek(int(j["index_start"]))
+            if out.write(payload) != len(payload):
+                raise OSError("short MKV index write")
+        j["index_written"] = payload
+        return True
+    finally:
+        try:
+            os.kill(pid, signal.SIGCONT)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
+def _mkv_read_final_index(j: dict) -> bool:
+    """完成后只读取ffmpeg最终Cues和实际媒体覆盖，绝不写文件。"""
+    try:
+        size = os.path.getsize(j["path"])
+        with open(j["path"], "rb") as src:
+            head = src.read(min(size, 2 * 1024 * 1024))
+        layout = _mkv_index_header(head, size)
+        if not layout:
+            return False
+        j.update(layout)
+        segment_data = int(layout["segment_data"])
+        first_cluster = int(layout["first_cluster"])
+        track = int(layout.get("track") or 1)
+        cues = []
+        pos = segment_data
+        while pos < first_cluster:
+            item = _ebml_next(head, pos, first_cluster)
+            if not item:
+                break
+            eid, _start, data_start, end = item
+            if eid != 0x1C53BB6B:
+                pos = end
+                continue
+            child = data_start
+            while child < end:
+                point = _ebml_next(head, child, end)
+                if not point:
+                    break
+                pid, _ps, pds, pe = point
+                if pid == 0xBB:
+                    field = pds
+                    cue_time = None
+                    cue_pos = None
+                    while field < pe:
+                        part = _ebml_next(head, field, pe)
+                        if not part:
+                            break
+                        fid, _fs, fds, fe = part
+                        if fid == 0xB3:
+                            cue_time = int.from_bytes(head[fds:fe], "big")
+                        elif fid == 0xB7:
+                            tp = fds
+                            cue_track = None
+                            while tp < fe:
+                                tf = _ebml_next(head, tp, fe)
+                                if not tf:
+                                    break
+                                tid, _ts, tds, te = tf
+                                if tid == 0xF7:
+                                    cue_track = int.from_bytes(head[tds:te], "big")
+                                elif tid == 0xF1:
+                                    cue_pos = int.from_bytes(head[tds:te], "big")
+                                tp = te
+                            if cue_track not in (None, track):
+                                cue_pos = None
+                        field = fe
+                    if cue_time is not None and cue_pos is not None:
+                        cues.append((cue_time, cue_pos))
+                child = pe
+            pos = end
+        if cues:
+            j["cues"] = sorted(set(cues))
+            scale = int(layout.get("scale") or 1_000_000)
+            relative_end = max(t for t, _p in cues) * scale / 1_000_000_000
+            j["media_end"] = (relative_end + _relay_timeline_start(j)
+                              if j.get("zero_based") else relative_end)
+        j["index_finalized"] = True
+        return bool(j.get("cues"))
+    except (OSError, ValueError, OverflowError, IndexError):
+        return False
+
+
+def _mkv_simpleblock_keyframe(src, data_start: int, end: int, track: int) -> bool:
+    """SimpleBlock的track number + flags；仅视频关键帧允许进入Cues。"""
+    src.seek(data_start)
+    raw = src.read(min(16, end - data_start))
+    if len(raw) < 4:
+        return False
+    first = raw[0]
+    mask, length = 0x80, 1
+    while length <= 8 and not (first & mask):
+        mask >>= 1
+        length += 1
+    if length > 8 or len(raw) < length + 3:
+        return False
+    number = first & (mask - 1)
+    for value in raw[1:length]:
+        number = (number << 8) | value
+    return number == track and bool(raw[length + 2] & 0x80)
+
+
+def _mkv_update_active_index_locked(j: dict) -> bool:
+    """调用方已持index_lock；逐个头扫描，cluster payload再大也不进内存。"""
+    try:
+        size = os.path.getsize(j["path"])
+        with open(j["path"], "rb") as src:
+            if not j.get("index_scan"):
+                head = src.read(min(size, 2 * 1024 * 1024))
+                layout = _mkv_index_header(head, size)
+                if not layout:
+                    return False
+                j.update(layout)
+                j["index_scan"] = layout["first_cluster"]
+            scan = int(j["index_scan"])
+            cues = []
+            pos = scan
+            while pos < size:
+                item = _ebml_file_next(src, pos, size)
+                if not item:
+                    break
+                eid, start, data_start, end, known_size = item
+                # known-size且end==size的最后一个Cluster已完整落盘，可以立即索引；
+                # unknown-size末尾或声明长度超过当前文件才需要等待更多字节。
+                if end > size or (end == size and not known_size):
+                    break
+                if eid == 0x1F43B675:
+                    child = data_start
+                    cue_time = None
+                    keyframe = False
+                    while child < end:
+                        part = _ebml_file_next(src, child, end)
+                        if not part:
+                            break
+                        cid, _cs, ds, ce, _known = part
+                        if cid == 0xE7:
+                            src.seek(ds)
+                            raw = src.read(ce - ds)
+                            if len(raw) != ce - ds:
+                                break
+                            cue_time = int.from_bytes(raw, "big")
+                        elif cid == 0xA3:
+                            keyframe = _mkv_simpleblock_keyframe(
+                                src, ds, ce, int(j.get("track") or 1))
+                        if cue_time is not None and keyframe:
+                            break
+                        child = ce
+                    if cue_time is not None and keyframe:
+                        cues.append((cue_time, start - int(j["segment_data"])))
+                pos = end
+        if not cues:
+            # 没有关键帧的Cluster可以安全跳过；有待写Cues时则必须先写成功。
+            j["index_scan"] = pos
+            return False
+        merged = list(j.get("cues") or []) + cues
+        payload = _mkv_index_payload(
+            int(j["segment_data"]), int(j["index_start"]),
+            int(j["index_end"]) - int(j["index_start"]),
+            merged, int(j.get("track") or 1))
+        if not _mkv_write_active_index(j, payload):
+            # SIGSTOP超时、ffmpeg收尾等瞬时失败不得提交扫描游标；
+            # 下次从旧位置重扫，避免已发现Cues永久丢失。
+            return False
+        j["index_scan"] = pos
+        j["cues"] = merged
+        scale = int(j.get("scale") or 1_000_000)
+        relative_end = max(t for t, _p in cues) * scale / 1_000_000_000
+        media_end = (relative_end + _relay_timeline_start(j)
+                     if j.get("zero_based") else relative_end)
+        j["media_end"] = max(float(j.get("media_end") or 0), media_end)
+        return True
+    except (OSError, ValueError, OverflowError, IndexError):
+        return False
+
+
+def _mkv_update_index(j: dict) -> bool:
+    """活动中安全写索引；ffmpeg完成后只采用其最终Cues。"""
+    lock = j.setdefault("index_lock", threading.Lock())
+    with lock:
+        key = j.get("key")
+        if j.get("index_task") is not None and key and _RELAY_JOBS.get(key) is not j:
+            # drop已淘汰此job：取消to_thread的await并不会终止已运行线程，
+            # 绝不能让旧worker打开并写入同路径的新job文件。
+            return False
+        proc = j["proc"]
+        if proc.returncode not in (None, 0) or j.get("index_full"):
+            return bool(j.get("cues"))
+        if j.get("index_finalized"):
+            return bool(j.get("cues"))
+        if proc.returncode == 0:
+            return _mkv_read_final_index(j)
+        result = _mkv_update_active_index_locked(j)
+        if proc.returncode == 0:
+            return _mkv_read_final_index(j)
+        return result
+
+
+def _mkv_has_media_cluster(path: str) -> bool:
+    """完成的 MKV 必须有 Segment→Cluster；非空 EBML/Tracks 头不等于有媒体。
+
+    只逐个读取 EBML 头并跳过 payload，不能用固定前缀判断：1MiB 的
+    reserve_index_space 会把首个 Cluster 推到边界后，已知 Segment 总长
+    也可能远大于当前可读前缀。
+    """
+    try:
+        with open(path, "rb") as src:
+            limit = os.fstat(src.fileno()).st_size
+            offset = 0
+            while offset < limit:
+                element = _ebml_file_next(src, offset, limit)
+                if element is None:
+                    return False
+                eid, _start, data_start, end, _known = element
+                if eid == 0x18538067:
+                    offset = data_start
+                    break
+                offset = end
+            else:
+                return False
+            while offset < limit:
+                element = _ebml_file_next(src, offset, limit)
+                if element is None:
+                    return False
+                eid, _start, _data_start, end, _known = element
+                if eid == 0x1F43B675:
+                    return True
+                offset = end
+    except (OSError, ValueError, TypeError):
+        pass
+    return False
+
+
+def _mkv_segment_layout(path: str, actual: int) -> tuple | None:
+    """返回Segment的size字段位置；只读EBML头，不加载媒体payload。"""
+    try:
+        with open(path, "rb") as src:
+            offset = 0
+            while offset < actual:
+                element = _ebml_file_next(src, offset, actual)
+                if element is None:
+                    return None
+                eid, start, data_start, end, known = element
+                if eid == 0x18538067:
+                    src.seek(start)
+                    head = src.read(max(1, data_start - start))
+                    if not head:
+                        return None
+                    id_width, mask = 1, 0x80
+                    while id_width < 4 and not head[0] & mask:
+                        id_width += 1
+                        mask >>= 1
+                    size_offset = start + id_width
+                    width = data_start - size_offset
+                    if width < 1 or width > 8:
+                        return None
+                    return start, data_start, end, known, size_offset, width
+                if end <= offset:
+                    return None
+                offset = end
+    except (OSError, ValueError, TypeError):
+        return None
+    return None
+
+
+def _relay_finalize_file_size(j: dict) -> bool:
+    """用合法MKV Void兑现已公布总长，并同步known-size Segment边界。"""
+    if j["proc"].returncode != 0:
+        return False
+    lock = j.setdefault("index_lock", threading.Lock())
+    with lock:
+        key = j.get("key")
+        if (key and j.get("index_task") is not None
+                and _RELAY_JOBS.get(key) is not j):
+            return False  # 旧to_thread不得给同路径的新任务补尾
+        try:
+            path = j["path"]
+            actual = os.path.getsize(path)
+            total = max(actual, int(j.get("published_total")
+                                    or j.get("size_est") or 0))
+            if total - actual == 1:
+                # 最短EBML元素是2字节；唯一无法精确填充的gap向上修正1字节。
+                total = actual + 2
+            j["published_total"] = total
+            j["size_est"] = total
+            if key:
+                _RELAY_PUBLISHED_TOTAL[key] = max(
+                    total, _RELAY_PUBLISHED_TOTAL.get(key, 0))
+            if j.get("size_finalized") and actual == total:
+                return True
+            if not _mkv_has_media_cluster(path):
+                return False
+            gap = total - actual
+            segment = _mkv_segment_layout(path, actual) if gap > 0 else None
+            encoded_segment_size = None
+            if gap > 0:
+                if segment is None:
+                    return False
+                _start, data_start, end, known, size_offset, width = segment
+                if known:
+                    if end != actual:
+                        return False  # 不猜测非生产布局，避免把Void放到Segment之外。
+                    encoded_segment_size = _ebml_encode_size(total - data_start, width)
+                    if encoded_segment_size is None or len(encoded_segment_size) != width:
+                        return False  # 新长度若需更宽VINT，绝不能覆盖首个payload字节。
+            if gap > 0:
+                with open(path, "r+b", buffering=0) as out:
+                    out.seek(actual)
+                    void_width = gap - 1 if gap < 9 else 8
+                    payload = gap - 1 - void_width
+                    out.write(b"\xec" + _ebml_encode_size(payload, void_width))
+                    if payload > 0:
+                        # Void内容由空洞提供，读取仍全为零；不为估值误差实写数百MB。
+                        out.seek(payload - 1, 1)
+                        out.write(b"\0")
+                    if encoded_segment_size is not None:
+                        out.seek(size_offset)
+                        out.write(encoded_segment_size)
+                _log.info("iOS relay final size file=%s bytes=%s total=%s padding=%s",
+                          os.path.basename(path), actual, total, gap)
+            j["size_finalized"] = True
+            return True
+        except (OSError, ValueError, TypeError, OverflowError):
+            return False
 
 
 def _mkv_write_duration(path: str, seconds: float) -> bool:
@@ -4991,63 +5867,208 @@ def _relay_write_duration(j: dict):
     if (j.get("duration_header") or j["proc"].returncode is not None
             or float(j.get("duration") or 0) <= 0):
         return
-    if _mkv_write_duration(j["path"], j["duration"]):
+    if j.get("zero_based") and not j.get("origin_resolved"):
+        # 真实关键帧原点未确定前绝不提交请求点Duration，避免worker先写1353、
+        # probe晚到1417.6后旧值无法改写的竞态（STALE_DURATION）。
+        return
+    start = _relay_timeline_start(j)
+    timeline_duration = max(0.0, float(j["duration"]) - start)
+    if timeline_duration > 0 and _mkv_write_duration(j["path"], timeline_duration):
         j["duration_header"] = True
 
 
+async def _relay_refresh_index(j: dict, force: bool = False):
+    """限频在后台线程更新活动索引，避免Range读路径同步扫描大文件。"""
+    if j["proc"].returncode not in (None, 0) or j.get("index_finalized"):
+        return
+    now = time.monotonic()
+    if not force and now - float(j.get("index_refresh") or 0) < 1.0:
+        return
+    j["index_refresh"] = now
+    await asyncio.to_thread(_mkv_update_index, j)
+
+
+async def _relay_index_worker(j: dict):
+    """由媒体生产任务持续更新索引，绝不依赖客户端继续发Range请求。
+
+    客户端在EOF等待或取消请求后，ffmpeg仍会继续产出；若只由HTTP路径刷新，
+    Cues会永久停在最后一次请求的位置，播放器便一直等不到可seek的新索引。
+    """
+    try:
+        while True:
+            try:
+                if os.path.getsize(j["path"]) >= 4096:
+                    _relay_write_duration(j)
+            except OSError:
+                pass
+            if j["proc"].returncode == 0:
+                await asyncio.to_thread(_relay_finalize_file_size, j)
+            await _relay_refresh_index(j)
+            if j["proc"].returncode is not None:
+                # 正常完成时只读采用ffmpeg最终Cues；失败则立即退出，绝不补写。
+                await _relay_refresh_index(j, force=True)
+                return
+            await asyncio.sleep(0.5)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001
+        _log.exception("iOS relay index worker failed file=%s",
+                       os.path.basename(j.get("path", "")))
+
+
 async def _ensure_relay_job(target: dict, request: Request = None) -> dict:
-    """单飞启动/复用 ffmpeg remux 到临时 MKV，供文件式 Range 服务。"""
+    """单飞启动/复用 ffmpeg remux；续播从对应源时间开始但保留绝对时间戳。"""
+    resume = int(target.get("_relay_start") or 0)
+    if (not target.get("_relay_start") and request is not None
+            and _client_of(request).kind == clientmod.IOS):
+        resume = _ios_resume_seconds(target, request)
+    target = dict(target, _relay_start=resume)
     key = _relay_key(target)
+    requested_key = key
+    full_key = _RELAY_RESUME_FALLBACK.get(requested_key)
+    if full_key:
+        # 映射不随文件TTL失效：full被清理后也只能在同URL下重建full。
+        resume = 0
+        target = dict(target, _relay_start=0)
+        key = full_key
+    else:
+        alias = _RELAY_REUSE_ALIAS.get(requested_key)
+        if alias:
+            key, resume = alias
+            target = dict(target, _relay_start=resume)
+            alias_full = _RELAY_RESUME_FALLBACK.get(key)
+            if alias_full:
+                resume = 0
+                target = dict(target, _relay_start=0)
+                key = alias_full
+
+    def reuse_covering():
+        if resume <= 0:
+            return None
+        covering = _relay_covering_job(target, resume)
+        if covering is not None:
+            _RELAY_REUSE_ALIAS[requested_key] = (
+                covering["key"], int(covering.get("start") or 0))
+        return covering
+
+    def fallback_to_full(failed_key: str):
+        nonlocal target, key, resume
+        _relay_drop(failed_key)
+        resume = 0
+        target = dict(target, _relay_start=0)
+        key = _relay_key(target)
+        _RELAY_RESUME_FALLBACK[failed_key] = key
+
     needs_resolve = any(target.get(k) for k in
                         ("resolve", "redirect", "xsrc", "catvod", "drpy", "guard", "spider_src"))
     if request is not None and needs_resolve:
         # 每个 Range 都会经过这里：健康任务直接复用，不能重复解析分享页/专有源。
         async with _RELAY_LOCK:
+            failed = _RELAY_JOBS.get(key)
+            if resume and failed and failed["proc"].returncode not in (None, 0):
+                if not _relay_only_shared_probe(failed):
+                    # 客户端已按suffix偏移取过不兼容字节，同URL绝不能换成full。
+                    return failed
+                fallback_to_full(key)
             _relay_cleanup()
             j = _relay_reuse(key)
             if j is not None:
                 return j
+            covering = reuse_covering()
+            if covering is not None:
+                return covering
         # 只在真正需要解析的后台任务里联网；普通 CMS 直链没有额外起播探测。
         target = dict(target, _relay_full_headers=True)
         target = await _resolve_if_needed(target, request) or target
+        target = dict(target, _relay_start=resume)
     if not target.get("url"):
         raise ValueError("relay 未解析出媒体地址")
     # stream/list、stream、play/play 会连续预热同一目标；锁内二次检查，避免多个
     # 调用都在登记任务前 await spawn，进而重复启动 ffmpeg 写同一路径。
     async with _RELAY_LOCK:
+        failed = _RELAY_JOBS.get(key)
+        if resume and failed and failed["proc"].returncode not in (None, 0):
+            if not _relay_only_shared_probe(failed):
+                # 已交付不兼容suffix后只允许读同一文件或报可重试错误。
+                return failed
+            fallback_to_full(key)
         _relay_cleanup()
         j = _relay_reuse(key)
         if j is not None:
             return j
+        covering = reuse_covering()
+        if covering is not None:
+            return covering
         while len(_RELAY_JOBS) >= _RELAY_MAX_JOBS:
-            # 优先淘汰空闲且最久未使用的任务；只有全部活跃才淘汰最旧活跃任务。
-            ok = min(_RELAY_JOBS,
-                     key=lambda k: (_RELAY_JOBS[k].get("active", 0) > 0,
-                                    _RELAY_JOBS[k]["ts"]))
+            # 软上限只淘汰已完成且空闲的文件；达到硬上限前允许正在生成的任务
+            # 暂时超额，避免第四个请求把前三路ffmpeg杀掉后迫使客户端重新下载。
+            completed = [k for k, old in _RELAY_JOBS.items()
+                         if old.get("active", 0) <= 0
+                         and old["proc"].returncode is not None]
+            if completed:
+                ok = min(completed, key=lambda k: _RELAY_JOBS[k]["ts"])
+            elif len(_RELAY_JOBS) < _RELAY_HARD_MAX_JOBS:
+                break
+            else:
+                ok = min(_RELAY_JOBS, key=lambda k: _RELAY_JOBS[k]["ts"])
             _relay_drop(ok)
         os.makedirs(_RELAY_DIR, exist_ok=True)
         path = os.path.join(_RELAY_DIR, key + ".mkv")
+        # 重启后内存job为空，但同key旧文件可能仍在磁盘。若等ffmpeg自己
+        # 打开并截断，首个Range会先读到旧大小/旧Cues，随后字节又变成新资源。
+        # 在单飞锁内先解除目录项：旧fd继续读旧inode，新请求只能等待新文件。
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            _log.error("iOS relay stale file unlink failed path=%s error=%r", path, exc)
+            raise
         cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                "-probesize", "2000000", "-analyzeduration", "2000000"]
         # 官方本地播放契约：MKV + application/octet-stream + File-Size + 数字Content-Range，
         # iOS 可直接播 MKV（本地库实证），无需 MP4/faststart。remux 为 matroska。
         # -y 覆盖服务重启后留下的同 key 文件，避免 ffmpeg 等待交互而直接退出。
         cmd += _relay_input_args(target)
-        cmd += ["-i", target["url"], "-c", "copy", "-f", "matroska", path]
+        if resume:
+            # HLS 输入 seek 直接跳到对应分片，避免从 0 顺序下载整部片。
+            cmd += ["-ss", str(resume)]
+        cmd += ["-i", target["url"], "-c", "copy"]
+        if resume:
+            # fncache续播需要零基时间轴：输入仍跳到全片resume，输出从0开始。
+            cmd += ["-avoid_negative_ts", "make_zero"]
+        cmd += ["-reserve_index_space", str(_RELAY_INDEX_SPACE),
+                "-cluster_time_limit", "1000", "-cluster_size_limit", "262144",
+                "-flush_packets", "1", "-f", "matroska", path]
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL)
         cached_duration = _relay_duration_fallback(target)
-        j = {"proc": proc, "path": path, "ts": time.time(),
+        remaining = max(0, cached_duration - resume)
+        generation = _RELAY_RESERVED_GENERATION.pop(key, None) or os.urandom(8).hex()
+        j = {"proc": proc, "path": path, "ts": time.time(), "key": key,
+             "generation": generation,
+             "base_key": _relay_key(dict(target, _relay_start=0)),
+             "start": resume, "requested_start": int(target.get("_relay_start") or 0),
+             "zero_based": bool(resume), "timeline_start": float(resume),
+             "origin_resolved": not bool(resume),
              "duration": cached_duration,
              "duration_source": "playlist" if cached_duration else "",
-             "size_est": int(cached_duration * 4_000_000 / 8),
-             "duration_header": False, "active": 0}
+             "size_est": int(remaining * 4_000_000 / 8),
+             "duration_header": False, "active": 0, "delivered": 0,
+             "compatible_delivered": 0, "has_media": None,
+             "media_end": float(resume), "cues": [], "index_scan": 0,
+             "index_refresh": 0.0, "index_full": False,
+             "index_lock": threading.Lock()}
         _RELAY_JOBS[key] = j
+        j["index_task"] = asyncio.create_task(_relay_index_worker(j))
+        if resume:
+            _log.info("iOS resume relay start=%ss path=%s", resume, os.path.basename(path))
         try:
             asyncio.create_task(_relay_probe_meta(j, target))
         except Exception:  # noqa: BLE001
             pass
+        _relay_publish_total(j)
         return j
 
 
@@ -5068,19 +6089,39 @@ async def _relay_probe_meta(j: dict, target: dict):
     """探测真实时长；HLS 清单的 format.bit_rate 不是媒体码率，绝不用于估算。"""
     p = None
     try:
+        probe_args = ["ffprobe", "-v", "error", *_relay_input_args(target)]
+        requested = int(j.get("start") or 0)
+        if j.get("zero_based") and requested > 0:
+            # 输入-ss会退到请求点前的关键帧。用同一demuxer读取实际首包，
+            # 建立零基MKV→全片的真实坐标原点，避免进度/索引整体漂移。
+            probe_args += ["-select_streams", "v:0", "-read_intervals",
+                           f"{requested}%+#1",
+                           "-show_entries", "format=duration:packet=pts_time,flags"]
+        else:
+            probe_args += ["-show_entries", "format=duration,bit_rate"]
+        probe_args += ["-of", "json", "-i", target["url"]]
         p = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "error", *_relay_input_args(target),
-            "-show_entries", "format=duration,bit_rate", "-of", "json",
-            "-i", target["url"],
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            *probe_args, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL)
         out, _ = await asyncio.wait_for(p.communicate(), 15)
-        d = (json.loads(out) or {}).get("format", {})
+        payload = json.loads(out) or {}
+        d = payload.get("format", {})
         dur = float(d.get("duration") or 0)
+        if j.get("zero_based") and requested > 0:
+            packets = payload.get("packets") or []
+            if packets:
+                actual = float(packets[0].get("pts_time") or 0)
+                if math.isfinite(actual) and actual >= 0:
+                    if abs(actual - _relay_timeline_start(j)) > 0.001:
+                        # 允许下一次worker用真实remaining覆盖先前请求点的Duration。
+                        j["duration_header"] = False
+                    j["timeline_start"] = actual
         if dur > 0:
             duration = int(round(dur))
             j["duration"] = duration
             j["duration_source"] = "ffprobe"
-            j["size_est"] = int(duration * 4_000_000 / 8)
+            j["size_est"] = int(max(0.0, duration - _relay_timeline_start(j))
+                                * 4_000_000 / 8)
     except Exception:  # noqa: BLE001
         pass
     finally:
@@ -5095,26 +6136,50 @@ async def _relay_probe_meta(j: dict, target: dict):
         if fb > 0:
             j["duration"] = fb
             j["duration_source"] = "playlist"
-            j["size_est"] = int(fb * 4_000_000 / 8)
+            j["size_est"] = int(max(0.0, fb - _relay_timeline_start(j))
+                                * 4_000_000 / 8)
+    # probe无论成功/超时/失败都已给出当前最优原点；此后原点不再变化，
+    # 允许worker提交Duration。失败时退回请求点原点，与旧兜底行为一致。
+    j["origin_resolved"] = True
 
 
-async def _relay_wait_size(j: dict, n: int, timeout: float) -> int:
+async def _relay_wait_size(j: dict, n: int, timeout: float,
+                           wait_index: bool = False) -> int:
     loop = asyncio.get_event_loop()
     end = loop.time() + timeout
     while loop.time() < end:
+        if j["proc"].returncode == 0 and not j.get("size_finalized"):
+            await asyncio.to_thread(_relay_finalize_file_size, j)
         try:
             sz = os.path.getsize(j["path"])
         except OSError:
             sz = 0
         if sz >= 4096:
-            _relay_write_duration(j)
-        if sz >= n or j["proc"].returncode is not None:
+            task = j.get("index_task")
+            if task is None or task.done():
+                # 仅兼容测试/异常退出的worker；正常生产job由后台worker推进。
+                _relay_write_duration(j)
+                await _relay_refresh_index(j)
+        # 首个正式 Range 若抢在第一条Cue之前返回，AVPlayer会把资源缓存成
+        # “无索引文件”，之后即使活动文件补了Cues也不会再发起有效定位。
+        index_pending = (wait_index and j["proc"].returncode is None
+                         and not j.get("cues"))
+        if (sz >= n and not index_pending) or j["proc"].returncode is not None:
             return sz
         await asyncio.sleep(0.15)
     try:
         return os.path.getsize(j["path"])
     except OSError:
         return 0
+
+
+def _relay_has_media(j: dict) -> bool:
+    """只缓存已完成任务的Cluster检测；增长中的文件不能提前判定为无媒体。"""
+    if j["proc"].returncode is None:
+        return True
+    if j.get("has_media") is None:
+        j["has_media"] = _mkv_has_media_cluster(j["path"])
+    return bool(j["has_media"])
 
 
 async def _relay_wait_done(j: dict, timeout: float) -> bool:
@@ -5142,23 +6207,128 @@ async def ios_relay(mg: str, request: Request):
     except Exception as exc:  # noqa: BLE001
         _log.warning("ios relay spawn failed: %r", exc)
         return Response("relay 不可用", status_code=502)
+    j.setdefault("key", _relay_key(dict(target or {},
+                                       _relay_start=int(j.get("start") or 0))))
+    j["mg"] = str(mg)  # 服务端权威归属：会话坐标解析不得跨媒体串用代际。
+    _relay_publish_total(j)
     path = j["path"]
+
+    def _stale_job() -> bool:
+        key = j.get("key")
+        return bool(key and j.get("index_task") is not None
+                    and _RELAY_JOBS.get(key) is not j)
+
+    def _stale_response():
+        return Response("媒体任务已更新，请重试", status_code=503,
+                        headers={"Cache-Control": "no-store", "Retry-After": "1"})
+
+    if _stale_job():
+        return _stale_response()
+
+    def _redirect_to_job(job: dict):
+        _bind_ios_relay_play_context(mg, job, request)
+        query = urllib.parse.urlencode({
+            "line": target.get("line", ""), "index": target.get("index", 0),
+            "start": int(job.get("start") or 0),
+            "g": str(job.get("generation") or ""),
+        })
+        return RedirectResponse(
+            url=f"{ONLINE_PREFIX}/{mg}/relay?{query}", status_code=302,
+            headers={"Cache-Control": "no-store", "Connection": "close"},
+        )
+
+    job_generation = str(j.get("generation") or "")
+    requested_generation = request.query_params.get("g") or ""
+    if job_generation and requested_generation != job_generation:
+        # 只有明确的full/覆盖复用别名可换URL；同key旧代际仍必须410。
+        requested_key = _relay_key(dict(
+            target, _relay_start=_ios_resume_seconds(target, request)))
+        fallback_key = _RELAY_RESUME_FALLBACK.get(requested_key)
+        covering = _RELAY_REUSE_ALIAS.get(requested_key)
+        if fallback_key == j.get("key") or (
+                covering and covering[0] == j.get("key")):
+            return _redirect_to_job(j)
+        # 旧fncache的高Range不得落到重建后的新资源；新播放链接会携带新代际。
+        _log.info("iOS relay stale generation file=%s", os.path.basename(path))
+        return Response("媒体资源已更新，请重新进入播放", status_code=410,
+                        headers={"Cache-Control": "no-store"})
+    if j["proc"].returncode == 0:
+        # 不能让fncache继续等待估值中永远不存在的字节；补齐后再处理Range/416。
+        await asyncio.to_thread(_relay_finalize_file_size, j)
+        if _stale_job():
+            return _stale_response()
+    _bind_ios_relay_play_context(mg, j, request)
     H = {"Accept-Ranges": "bytes", "Cache-Control": "no-store",
          "Access-Control-Allow-Origin": "*"}
     rng = request.headers.get("range")
-    # 优先用 ffprobe 估算保持稳定进度；实际字节超过估值后必须上调，绝不可返回
-    # Content-Range: bytes 0-99/50 这类非法响应。ffmpeg 完成后以真实文件大小为准。
-    total_est = j.get("size_est") or 0
+    if rng:
+        # 访问日志只记录请求完成状态；这里保留拖动/停顿发生前的最后一个真实
+        # 字节位置，才能区分客户端未发新请求与服务端尚未生成目标数据。
+        try:
+            _range_size = os.path.getsize(path)
+        except OSError:
+            _range_size = 0
+        _log.info(
+            "iOS relay Range begin file=%s request=%s size=%s cues=%s media_end=%.3f",
+            os.path.basename(path), rng, _range_size, len(j.get("cues") or []),
+            float(j.get("media_end") or 0))
+    # 总字节数只能向上修正；完成或TTL重建都不能让同一URL的已公布总长缩小。
+    if j.get("start") and rng and not j.get("range_trace"):
+        j["range_trace"] = True
+        _log.info("iOS resume Range start=%ss request=%s file=%s",
+                  j["start"], rng, os.path.basename(path))
 
     def _total(sz: int, minimum: int = 0) -> int:
-        if j["proc"].returncode is not None:
-            return max(sz, minimum)
-        return max(j.get("size_est") or 0, total_est, sz, minimum)
+        key = j["key"]
+        published = int(j.get("published_total")
+                        or _RELAY_PUBLISHED_TOTAL.get(key, 0) or 0)
+        candidate = published or int(j.get("size_est") or 0)
+        # 实际文件超过估值时必须上调；估值高于最终文件时则保持首次承诺的总长。
+        candidate = max(candidate, sz)
+        if j["proc"].returncode is None:
+            candidate = max(candidate, minimum)
+        if candidate > published:
+            j["published_total"] = candidate
+            j["size_est"] = candidate
+            _RELAY_PUBLISHED_TOTAL[key] = max(
+                candidate, _RELAY_PUBLISHED_TOTAL.get(key, 0))
+        return candidate
 
     def _hdr(total: int):
         return {**H, "File-Size": str(total)}
 
+    async def _retry_full_without_media():
+        """空/header-only suffix在未交付不兼容字节时，固定回退到full资源。"""
+        if (not j.get("start") or not _relay_only_shared_probe(j)
+                or request.scope.get("_relay_full_retried")):
+            return None
+        request.scope["_relay_full_retried"] = True
+        failed_key = j.get("key") or _relay_key(
+            dict(target, _relay_start=int(j["start"])))
+        full_key = _relay_key(dict(target, _relay_start=0))
+        async with _RELAY_LOCK:
+            if _RELAY_JOBS.get(failed_key) is j:
+                _relay_drop(failed_key)
+            _RELAY_RESUME_FALLBACK[failed_key] = full_key
+        full = await _ensure_relay_job(target, request)
+        return _redirect_to_job(full)
+
     if rng:
+        suffix = re.fullmatch(r"bytes=-(\d+)", rng.strip())
+        if suffix:
+            count = int(suffix.group(1))
+            try:
+                current = os.path.getsize(path)
+            except OSError:
+                current = 0
+            if count <= 0 or (j["proc"].returncode is not None and current == 0):
+                return Response(b"", status_code=416,
+                                headers={**H, "Content-Range": f"bytes */{_total(current)}"})
+            if j["proc"].returncode is None:
+                # 增长中文件没有固定尾部，不能伪装成200全量响应。
+                return Response("媒体尚未完成，暂不能读取尾部", status_code=503,
+                                headers={"Cache-Control": "no-store", "Retry-After": "1"})
+            rng = f"bytes={max(0, current - count)}-{current - 1}"
         m = re.fullmatch(r"bytes=(\d+)-(\d*)", rng.strip())
         if m:
             s = int(m.group(1))
@@ -5171,25 +6341,46 @@ async def ios_relay(mg: str, request: Request):
                 return Response(b"", status_code=416,
                                 headers={**H, "Content-Range": f"bytes */{_total(cur)}"})
             probe = (s == 0 and (e is None or e <= 1))
-            sz = await _relay_wait_size(j, s + 1, 10 if probe else 60)
-            total_est = j.get("size_est") or total_est
+            sz = await _relay_wait_size(
+                j, s + 1, 10 if probe else 60,
+                wait_index=(s == 0 and not probe))
+            if _stale_job():
+                return _stale_response()
             rc = j["proc"].returncode
+            if s == 0 and not probe and j.get("cues") and not j.get("initial_index_logged"):
+                j["initial_index_logged"] = True
+                _log.info("iOS relay initial index ready file=%s cues=%s size=%s",
+                          os.path.basename(path), len(j["cues"]), sz)
+            if rc == 0 and j.get("start") and not _relay_has_media(j):
+                retry = await _retry_full_without_media()
+                if retry is not None:
+                    return retry
+                # 已交付过不兼容suffix字节时保持资源一致，明确告知从头重开。
+                total = _total(sz)
+                return Response("续播位置没有媒体数据，请从头播放", status_code=416,
+                                media_type="application/octet-stream",
+                                headers={**_hdr(total), "Content-Range": f"bytes */{total}"})
             if sz <= s:
                 if rc is not None:
                     if rc != 0:
                         return Response("relay 转封装失败", status_code=502,
                                         headers={"Cache-Control": "no-store"})
+                    total = _total(sz)
                     return Response(b"", status_code=416, media_type="application/octet-stream",
-                                    headers={**_hdr(sz), "Content-Range": f"bytes */{sz}"})
+                                    headers={**_hdr(total), "Content-Range": f"bytes */{total}"})
                 if probe:
                     # 下载尚未产出时只给首探测返回 EBML 魔数，保持 iOS 不起播即 416
                     # 的兼容行为；其它 Range 必须继续等待或以可重试错误结束。
                     n = (e + 1) if e is not None else 2
-                    total = max(total_est, sz, n)
+                    total = _total(sz, n)
                     return Response(b"\x1a\x45\xdf\xa3"[:n], status_code=206,
                                     media_type="application/octet-stream",
                                     headers={**_hdr(total),
                                              "Content-Range": f"bytes 0-{n-1}/{total}"})
+                _log.info(
+                    "iOS relay Range not ready file=%s request=%s size=%s rc=%s "
+                    "cues=%s media_end=%.3f", os.path.basename(path), rng, sz, rc,
+                    len(j.get("cues") or []), float(j.get("media_end") or 0))
                 return Response("媒体尚未生成到请求位置", status_code=503,
                                 headers={"Cache-Control": "no-store", "Retry-After": "1"})
             requested_end = e if e is not None else sz - 1
@@ -5197,42 +6388,96 @@ async def ios_relay(mg: str, request: Request):
             with open(path, "rb") as f:
                 f.seek(s)
                 data = f.read(end - s + 1)
+            if len(data) != end - s + 1:
+                return Response("媒体读取竞态，请重试", status_code=503,
+                                headers={"Cache-Control": "no-store", "Retry-After": "1"})
             # 读取期间文件仍可能增长；以实际返回区间的末端为总长的最低合法值。
             if not data:
                 return Response("媒体读取竞态，请重试", status_code=503,
                                 headers={"Cache-Control": "no-store", "Retry-After": "1"})
             actual_end = s + len(data) - 1
             total = _total(sz, actual_end + 1)
+            j["delivered"] = j.get("delivered", 0) + len(data)
+            if s == 0 and len(data) <= 4 and data == b"\x1a\x45\xdf\xa3"[:len(data)]:
+                # 两种MKV共享的EBML魔数不算不兼容suffix负载。
+                j["compatible_delivered"] = j.get("compatible_delivered", 0) + len(data)
             return Response(data, status_code=206,
                             media_type="application/octet-stream",
                             headers={**_hdr(total),
                                      "Content-Range": f"bytes {s}-{actual_end}/{total}"})
 
+    if j["proc"].returncode == 0 and j.get("start") and not _relay_has_media(j):
+        retry = await _retry_full_without_media()
+        if retry is not None:
+            return retry
+        if _stale_job():
+            return _stale_response()
+        total = _total(os.path.getsize(path))
+        return Response("续播位置没有媒体数据，请从头播放", status_code=416,
+                        media_type="application/octet-stream",
+                        headers={**_hdr(total), "Content-Range": f"bytes */{total}"})
+
+    # full响应必须在返回前绑定原inode；首次迭代才open会把同路径新job误发给旧客户端。
+    try:
+        stream_file = open(path, "rb")
+    except OSError:
+        return Response("relay 文件暂不可用", status_code=503,
+                        headers={**H, "Retry-After": "1"})
+    if _stale_job():
+        stream_file.close()
+        return _stale_response()
     j["active"] = j.get("active", 0) + 1
+    stream_state = {"finished": False}
+
+    def _finish_stream():
+        if stream_state["finished"]:
+            return
+        stream_state["finished"] = True
+        stream_file.close()
+        j["active"] = max(0, j.get("active", 1) - 1)
+        j["ts"] = time.time()
 
     async def pump():
         try:
-            with open(path, "rb") as f:
+            with stream_file as f:
                 while True:
                     chunk = f.read(65536)
                     if chunk:
                         # 连续响应也是活动引用，不能只靠创建时间判断 TTL。
                         j["ts"] = time.time()
+                        j["delivered"] = j.get("delivered", 0) + len(chunk)
+                        task = j.get("index_task")
+                        if task is None or task.done():
+                            await _relay_refresh_index(j)
                         yield chunk
                         continue
                     if j["proc"].returncode is not None:
+                        if j["proc"].returncode == 0:
+                            # 完成可能发生在两次read之间；先定稿，再读新补出的Void。
+                            finalized = await asyncio.to_thread(_relay_finalize_file_size, j)
+                            # 旧流可能已出表、path已删除或换成新job；只能检查当前fd，
+                            # 绝不能把同路径新inode的大小与旧fd偏移混合。
+                            try:
+                                fd_size = os.fstat(f.fileno()).st_size
+                            except OSError:
+                                break
+                            if fd_size > f.tell():
+                                continue
+                            if not finalized:
+                                break  # 被淘汰的旧流安全收尾，不能操作新job的路径。
                         break
                     await asyncio.sleep(0.2)
         finally:
-            j["active"] = max(0, j.get("active", 1) - 1)
-            j["ts"] = time.time()
+            _finish_stream()
 
     try:
-        current_size = os.path.getsize(path)
+        current_size = os.fstat(stream_file.fileno()).st_size
     except OSError:
         current_size = 0
+    from starlette.background import BackgroundTask
     return StreamingResponse(pump(), media_type="application/octet-stream",
-                             headers={**H, "File-Size": str(_total(current_size))})
+                             headers={**H, "File-Size": str(_total(current_size))},
+                             background=BackgroundTask(_finish_stream))
 
 
 def _guess_wrapper(target: dict) -> tuple[str, bool]:
@@ -5241,7 +6486,7 @@ def _guess_wrapper(target: dict) -> tuple[str, bool]:
     双向 302 兜底，所以这里宁可默认 HLS（绝大多数资源是 m3u8）。"""
     # 小雅虚拟占位尚未带文件扩展名，但它始终走原画 direct，不可误入 HLS/preset。
     if target.get("_xiaoya_manual"):
-        return "MP4", False
+        return _xiaoya_file_meta(target)[1], False
     url = (target.get("url") or "")
     path = url.split("?", 1)[0].lower()
     # 裸 mp4 直链（非跳转/解析页）才直接判 MP4
@@ -5269,10 +6514,21 @@ def _stream_play_link(target: dict, mg: str, request: Request = None) -> str:
     iOS HLS 给 /relay（渐进式 MKV）、Web/TV HLS 给 preset.m3u8、直连文件给 /direct；
     固定线路不带 auto（不竞速）。iOS 与官方 play/play 一样返回相对路径复用当前会话。"""
     params = {"line": target.get("line", ""), "index": int(target.get("index", 0) or 0)}
+    if _is_xiaoya_line_name(target.get("line", "")):
+        params["season"] = int(target.get("season", 1) or 1)
     if not target.get("_fixed_line"):
         params["auto"] = "1"
     _w, is_hls = _guess_wrapper(target)
     _ios = request is not None and _client_of(request).kind == clientmod.IOS
+    if is_hls and _ios:
+        resume_target = dict(
+            target, _relay_start=_ios_resume_seconds(target, request))
+        resume, generation = _ios_relay_url_identity(resume_target, request)
+        params["start"] = resume  # start=0同样是不可变资源身份的一部分。
+        params["g"] = generation
+        # 1.13+可能纯走play-info/stream取play_link而不经media_range；在此同样绑定
+        # 会话令牌，保证退出时play/record能取回续播坐标（覆盖审查观察A）。
+        _bind_ios_relay_session(mg, generation, request)
     q = urllib.parse.urlencode(params)
     if is_hls and _ios:
         # iOS 1.13 的 HLS(fncache) 是零分片坏路径（issue#98 官方已知；resolver 能播
@@ -5387,14 +6643,28 @@ async def play_play(request: Request):
     if chosen_line == XIAOYA_LINE:
         # 原画 MP4/MKV 走 direct；搜索、剧集定位和签名 /d 均在播放器取流时执行。
         _xidx = int(base_target.get("index", 0) or 0)
-        _xq = urllib.parse.urlencode({"line": XIAOYA_LINE, "index": _xidx})
+        # 绑定是该线路必需解析（与 stream/media-range 共用单飞缓存，不增总耗时）；
+        # wrapper 必须报真实容器：MKV 字节标 MP4 会让 fncache 选错解封装。
+        try:
+            _xb = await _ensure_xiaoya_manual(
+                base_target.get("online_guid", ""), _xidx,
+                int(base_target.get("season", 1) or 1))
+            if _xb:
+                base_target = _xb
+        except Exception:  # noqa: BLE001
+            pass
+        _xext, _xwrap, _xsize = _xiaoya_file_meta(base_target)
+        _xq = urllib.parse.urlencode({
+            "line": XIAOYA_LINE, "index": _xidx,
+            "season": int(base_target.get("season", 1) or 1)})
+        _xpl = _absolute_media_url(request, f"{ONLINE_PREFIX}/{mg}/direct?{_xq}")
         return JSONResponse({"code": 0, "msg": "", "data": {
             "audio_guid": "", "audio_index": -1, "hls_time": 6,
             "is_subtitle_external": 0, "media_guid": mg,
-            "play_link": f"{ONLINE_PREFIX}/{mg}/direct?{_xq}",
+            "play_link": _xpl,
             "subtitle_guid": "", "subtitle_index": -1,
             "subtitle_link": "", "video_guid": body.get("video_guid", vg_for(mg)),
-            "video_index": 0, "wrapper": "MP4", "non_fatal_errno": None,
+            "video_index": 0, "wrapper": _xwrap, "non_fatal_errno": None,
             "video_encoder": "", "not_supported_resolution": "",
             "supported_highest_resolution": ""}})
     if chosen_line and chosen_line != base_target.get("line"):
@@ -5424,7 +6694,16 @@ async def play_play(request: Request):
     if is_hls:
         if use_ios_relay:
             # iOS HLS(fncache) 零分片坏路径 → 渐进式 MKV relay（真机唯一可播）。
+            resume_target = dict(
+                target, _relay_start=_ios_resume_seconds(target, request))
+            resume, generation = _ios_relay_url_identity(resume_target, request)
+            params["start"] = resume
+            params["g"] = generation
+            q = urllib.parse.urlencode(params)
             play_link = f"{ONLINE_PREFIX}/{mg}/relay?{q}"
+            # play_play body/头携带App会话令牌；与media_range互为兜底绑定会话上下文。
+            _bind_ios_relay_session(mg, generation, request,
+                                    session=str(body.get("play_link") or ""))
             # 预热：提前 remux 首段掩盖起播延迟（有界后台任务，TTL 自动清理）。
             try:
                 asyncio.create_task(_ensure_relay_job(target, request))
@@ -5493,7 +6772,7 @@ async def _await_pansou_target(mg: str, request: Request,
     return None
 
 
-@app.get(f"{ONLINE_PREFIX}/{{mg}}/direct")
+@app.api_route(f"{ONLINE_PREFIX}/{{mg}}/direct", methods=["GET", "HEAD"])
 async def direct_proxy(mg: str, request: Request):
     """mp4 等非 HLS 直链代理：同源、带 Range 支持（播放器 seek）。"""
     failed_g = await _await_pending_chart(mg)
@@ -5731,6 +7010,191 @@ async def person_list(guid: str, request: Request):
         "total": len(people), "list": people}})
 
 
+# iOS零基relay的播放坐标上下文；只保留少量元数据，任务淘汰后仍可收尾上报。
+_RELAY_PLAY_CONTEXT: dict[tuple[str, str], dict] = {}
+# App播放会话令牌→(media_guid,资源代际)。在携带会话令牌的入口(media_range/play_play)
+# 绑定；relay字节请求不带令牌，只刷新media上下文。record凭会话令牌+代际匹配取权威坐标，
+# 既修复“relay无令牌导致session上下文缺失”，又保留旧会话迟到record的拒绝边界。
+_RELAY_PLAY_SESSION: dict[tuple[str, str], tuple[str, str]] = {}
+
+
+def _ios_relay_session_generation(mg: str, session: str, user: str) -> str:
+    """会话→资源代际。registry以带令牌入口的user建键；心跳record的play_link可能
+    直接是relay URL，其query自带g=，同样可解析。两者都要求mg一致。"""
+    session = str(session or "").strip()
+    if not mg or not session:
+        return ""
+    reg = _RELAY_PLAY_SESSION.get((str(user or ""), session))
+    if reg and reg[0] == str(mg):
+        return str(reg[1] or "")
+    try:
+        if "://" in session:
+            parsed = urllib.parse.urlparse(session)
+            path, query = parsed.path, parsed.query
+        else:
+            path, _, query = session.partition("?")
+        if path != f"{ONLINE_PREFIX}/{mg}/relay":
+            return ""
+        return str(urllib.parse.parse_qs(query).get("g", [""])[0] or "")
+    except ValueError:
+        return ""
+
+
+def _ios_relay_session_context(mg: str, session: str, user: str):
+    """relay字节请求不带App令牌，其media上下文键的user与record不同；改按代际从
+    进程内权威job取坐标，与请求用户无关。job已淘汰则返回None（保守拒绝）。"""
+    gen = _ios_relay_session_generation(mg, session, user)
+    if not gen:
+        return None
+    for j in list(_RELAY_JOBS.values()):
+        if str(j.get("generation") or "") != gen:
+            continue
+        if str(j.get("mg") or "") != str(mg):
+            continue  # 代际碰撞/伪造URL不得跨媒体取坐标。
+        return {
+            "key": str(j.get("key") or ""),
+            "start": int(j.get("start") or 0),
+            "timeline_start": _relay_timeline_start(j),
+            "source_duration": float(j.get("duration") or 0),
+            "generation": gen,
+            "zero_based": bool(j.get("zero_based")),
+            "updated": time.time(),
+        }
+    return None
+
+
+def _bind_ios_relay_session(mg: str, generation: str, request: Request,
+                            session: str = ""):
+    if not mg or _client_of(request).kind != clientmod.IOS:
+        return
+    try:
+        user = str(histmod.current_user() or "")
+        session = str(session or request.headers.get("play-link") or "").strip()
+        if not session:
+            return
+        key = (user, session)
+        _RELAY_PLAY_SESSION.pop(key, None)
+        _RELAY_PLAY_SESSION[key] = (str(mg), str(generation or ""))
+        while len(_RELAY_PLAY_SESSION) > 256:
+            _RELAY_PLAY_SESSION.pop(next(iter(_RELAY_PLAY_SESSION)))
+        _log.info("iOS relay session bound mg=%s g=%s session=%s",
+                  str(mg)[:8], str(generation)[:8], session[:8])
+    except Exception:
+        _log.debug("iOS relay session bind failed", exc_info=True)
+
+
+def _bind_ios_relay_play_context(mg: str, j: dict, request: Request):
+    if not mg or not j or _client_of(request).kind != clientmod.IOS:
+        return
+    try:
+        user = str(histmod.current_user() or "")
+        session = str(request.headers.get("play-link") or "").strip()
+        ctx = {
+            "key": str(j.get("key") or ""),
+            "start": int(j.get("start") or 0),
+            "timeline_start": _relay_timeline_start(j),
+            "source_duration": float(j.get("duration") or 0),
+            "generation": str(j.get("generation") or ""),
+            "zero_based": bool(j.get("zero_based")),
+            "updated": time.time(),
+        }
+        # play/record的play_link与relay的play-link是同一播放会话UUID。
+        # 会话键防止旧Range覆盖新播放；media键仅供缺少会话ID的旧客户端兼容。
+        keys = [(user, "media:" + str(mg))]
+        if session:
+            keys.insert(0, (user, "session:" + session))
+        for key in keys:
+            _RELAY_PLAY_CONTEXT.pop(key, None)
+            _RELAY_PLAY_CONTEXT[key] = dict(ctx)
+        while len(_RELAY_PLAY_CONTEXT) > 256:
+            _RELAY_PLAY_CONTEXT.pop(next(iter(_RELAY_PLAY_CONTEXT)))
+    except Exception:
+        _log.debug("iOS relay play context bind failed", exc_info=True)
+
+
+def _ios_relay_history_body(body: dict, request: Request) -> tuple[dict, bool]:
+    """相对播放时间转回全片历史；零基上下文缺失时绝不写坏续播点。"""
+    if _client_of(request).kind != clientmod.IOS:
+        return body, True
+    mg = str(body.get("media_guid") or "")
+    if not mg:
+        return body, True
+    try:
+        user = str(histmod.current_user() or "")
+        session = str(body.get("play_link") or request.headers.get("play-link") or "").strip()
+        media_key = (user, "media:" + mg)
+        media_ctx = _RELAY_PLAY_CONTEXT.get(media_key)
+        ctx = (_RELAY_PLAY_CONTEXT.get((user, "session:" + session))
+               if session else media_ctx)
+        if ctx is None and session:
+            # 字节请求的media上下文键user与record不同；按代际从权威job取坐标。
+            ctx = _ios_relay_session_context(mg, session, user)
+        if ctx is None and session and media_ctx is not None:
+            # 兼容：media上下文代际与会话登记一致时才取作旁证，
+            # 防止旧会话迟到record套用新全片会话的start。
+            reg = _RELAY_PLAY_SESSION.get((user, session))
+            if reg and reg[0] == mg and reg[1] == str(media_ctx.get("generation") or ""):
+                ctx = media_ctx
+        if ctx is None:
+            # 会话能解析出代际但job已淘汰：无法证明坐标，保守拒绝，
+            # 避免把相对ts当全局写入。
+            if session and _ios_relay_session_generation(mg, session, user):
+                _log.info("iOS play/record skipped with evicted relay job "
+                          "mg=%s session=%s", str(mg)[:8], session[:8])
+                return body, False
+            # 有会话ID时绝不回退到“最后一次relay”的start；media_ctx只用于
+            # 判断该资源是否必须保守跳过。T4自己的HLS会话不做零基映射。
+            target = _pick_episode(mg, request)
+            if target and target.get("t4") and media_ctx is None:
+                return body, True
+            if target and target.get("t4") and session:
+                # 当前target是T4不能证明这条迟到record属于T4。仅在该play_link
+                # 对应仍有效的T4 session时保留全局历史，否则按淘汰relay拒绝。
+                t4_session = session
+                if "://" in session or session.startswith("/"):
+                    try:
+                        parsed = urllib.parse.urlparse(session)
+                        t4_session = (urllib.parse.parse_qs(parsed.query).get("session", [""])[0]
+                                      if parsed.path == f"{ONLINE_PREFIX}/{mg}/t4" else "")
+                    except ValueError:
+                        t4_session = ""
+                if t4_session and _get_t4_service().session_target(mg, t4_session) is not None:
+                    return body, True
+            if media_ctx is not None:
+                if session:
+                    # 旧零基会话被淘汰后，不能用同媒体的新全片会话证明ts是全局时间。
+                    _log.info("iOS play/record skipped with evicted session context "
+                              "mg=%s session=%s media_g=%s", str(mg)[:8],
+                              session[:8], str(media_ctx.get("generation") or "")[:8])
+                    return body, False
+                if media_ctx.get("zero_based"):
+                    _log.info("iOS zero-based play/record skipped without session context")
+                    return body, False
+                return body, True
+            if target and _guess_wrapper(target)[1]:
+                _log.info("iOS zero-based play/record skipped without relay context")
+                return body, False
+            return body, True
+        if not ctx.get("zero_based"):
+            return body, True
+        mapped = dict(body)
+        relative = max(0, int(float(body.get("ts") or 0)))
+        reset_to_zero = bool(body.get("reset")) and relative == 0
+        timeline_start = float(ctx.get("timeline_start", ctx.get("start")) or 0)
+        mapped["ts"] = (0 if reset_to_zero
+                        else int(round(timeline_start + relative)))
+        duration = float(ctx.get("source_duration") or 0)
+        current = _RELAY_JOBS.get(str(ctx.get("key") or ""))
+        if current is not None:
+            duration = float(current.get("duration") or duration)
+        if duration > 0:
+            mapped["duration"] = int(round(duration))
+        return mapped, True
+    except Exception:
+        _log.info("iOS zero-based play/record mapping failed", exc_info=True)
+        return body, False
+
+
 @app.post("/v/api/v1/play/record")
 async def play_record(request: Request):
     import json
@@ -5738,6 +7202,9 @@ async def play_record(request: Request):
         body = json.loads(await request.body() or b"{}")
     except Exception:
         body = {}
+    body, record_progress = _ios_relay_history_body(body, request)
+    if not record_progress:
+        return JSONResponse({"code": 0, "msg": "", "data": True})
     ig = body.get("item_guid", "")
     if _parse_line_item_guid(ig) or _parse_line_season_guid(ig):
         # 固定线路卡上报：归一化为原影片/基础集 guid 再记录，保证续播身份统一、
@@ -6004,10 +7471,16 @@ def _pick_episode(mg: str, request: Request) -> dict | None:
             index = 0
         r = store.resolve_episode(alt_og, request.query_params.get("line"), index)
         if r:
+            if index > 0 or r.get("ep_guid"):
+                return dict(r, online_guid=alt_og, kind="episode",
+                            ep_guid=r.get("ep_guid")
+                            or store.episode_guid_at(alt_og, index))
             return dict(r, online_guid=alt_og, kind="title")
     # 优先：mg 已绑定具体某集（TV 选集）或标题第一集
     target = store.resolve_media_guid(mg)
     if target:
+        base_og = target.get("online_guid", "")
+        base_index = int(target.get("index", 0) or 0)
         # query 可显式覆盖集序/线路（master 变体、STRM/调试用）
         if request.query_params.get("index") is not None or request.query_params.get("line"):
             try:
@@ -6028,8 +7501,16 @@ def _pick_episode(mg: str, request: Request) -> dict | None:
                         r = ar
                         target = dict(target, online_guid=alt_og)
             if r:
+                new_index = int(r.get("index", idx) or 0)
+                new_eg = target.get("ep_guid", "")
+                if new_index != base_index or target["online_guid"] != base_og:
+                    # 换集/换聚合记录后不能沿用旧集ep_guid，否则续播历史会借错集。
+                    new_eg = (r.get("ep_guid") or store.episode_guid_at(
+                        target["online_guid"], new_index))
+                new_kind = ("episode" if new_index != base_index
+                            or target["online_guid"] != base_og else target.get("kind"))
                 return dict(r, online_guid=target["online_guid"],
-                            ep_guid=target.get("ep_guid", ""), kind=target.get("kind"))
+                            ep_guid=new_eg, kind=new_kind)
         return target
     # 兼容：未在索引中的旧 mg，退回标题解析；也支持秒进时登记的待绑定榜单片
     og = _MEDIA_REDIRECT.get(mg) or store.online_guid_by_media(mg) \
@@ -6208,6 +7689,97 @@ PANSOU_LABEL = "🎞️网盘高清（PanSou）"
 XIAOYA_LINE = "builtin-xiaoya::小雅资源"
 XIAOYA_LABEL = "小雅资源"
 _XIAOYA_MEDIA_MAP: dict[str, tuple] = {}
+_XIAOYA_MAN_EPS: dict[str, tuple[float, list[dict]]] = {}
+# 冷启动恢复：小雅 media/video guid 是哈希（不可反解），重启后内存映射清空会让
+# App 复用缓存 media_guid 直接取 media/range|direct 时反查不到 → 落兜底透传官方
+# 报 403/404「无法播放」。落盘映射并在启动时回填，使重启后旧 guid 仍可恢复播放。
+_XIAOYA_MEDIA_STATE = Path(__file__).resolve().parent.parent / "state" / "xiaoya_media.json"
+_XIAOYA_MEDIA_LOCK = threading.Lock()
+_XIAOYA_MEDIA_TIMER: threading.Timer | None = None
+
+
+def _xiaoya_load_media_map() -> None:
+    if not features.CATVOD:
+        return
+    try:
+        j = json.loads(_XIAOYA_MEDIA_STATE.read_text(encoding="utf-8"))
+        rows = []
+        for mg, ref in (j.get("map") or {}).items():
+            if isinstance(ref, (list, tuple)) and len(ref) in (2, 3):
+                item = (str(ref[0]), int(ref[1]))
+                rows.append((str(mg), item if len(ref) == 2 else item + (int(ref[2]),)))
+        # 旧版本只有 map，没有 bindings；保持兼容。新版本保存成功绑定的
+        # native URL/大小/季集，重启后即使 store brief 尚未恢复也可直接取流。
+        bindings = []
+        for og, episodes in (j.get("bindings") or {}).items():
+            if not isinstance(episodes, list) or not episodes:
+                continue
+            clean = [dict(row) for row in episodes
+                     if isinstance(row, dict) and
+                     str(row.get("url") or "").startswith("xiaoya-native:")]
+            if clean:
+                bindings.append((str(og), clean))
+        with _XIAOYA_MEDIA_LOCK:
+            _XIAOYA_MEDIA_MAP.update(rows)
+            for og, episodes in bindings:
+                _XIAOYA_MAN_EPS[og] = (time.time(), episodes)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _xiaoya_flush_media_map() -> None:
+    global _XIAOYA_MEDIA_TIMER
+    # 同一锁覆盖快照和替换，避免 timer/关闭路径并发写入旧快照。
+    with _XIAOYA_MEDIA_LOCK:
+        _XIAOYA_MEDIA_TIMER = None
+        try:
+            _XIAOYA_MEDIA_STATE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _XIAOYA_MEDIA_STATE.with_suffix(".tmp")
+            bindings = {}
+            for og, cached in _XIAOYA_MAN_EPS.items():
+                if not isinstance(cached, (list, tuple)) or len(cached) != 2:
+                    continue
+                episodes = cached[1]
+                if not episodes:
+                    continue  # 负缓存不落盘，避免临时故障变成重启后的长期不可播。
+                clean = [dict(row) for row in episodes
+                         if isinstance(row, dict) and
+                         str(row.get("url") or "").startswith("xiaoya-native:")]
+                if clean:
+                    bindings[str(og)] = clean
+            tmp.write_text(json.dumps({"map": dict(_XIAOYA_MEDIA_MAP),
+                                       "bindings": bindings}, ensure_ascii=False),
+                           encoding="utf-8")
+            os.replace(tmp, _XIAOYA_MEDIA_STATE)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _xiaoya_close_media_map() -> None:
+    """服务退出时取消防抖并同步写入，不能丢最后一批媒体 guid。"""
+    global _XIAOYA_MEDIA_TIMER
+    with _XIAOYA_MEDIA_LOCK:
+        timer = _XIAOYA_MEDIA_TIMER
+        _XIAOYA_MEDIA_TIMER = None
+    if timer is not None:
+        timer.cancel()
+    _xiaoya_flush_media_map()
+
+
+def _xiaoya_schedule_media_save() -> None:
+    """新增 guid 登记后延迟合并落盘（浏览整季会连续登记，避免逐条写盘）。"""
+    global _XIAOYA_MEDIA_TIMER
+    if not features.CATVOD:
+        return
+    with _XIAOYA_MEDIA_LOCK:
+        if _XIAOYA_MEDIA_TIMER is not None:
+            return
+        _XIAOYA_MEDIA_TIMER = threading.Timer(2.0, _xiaoya_flush_media_map)
+        _XIAOYA_MEDIA_TIMER.daemon = True
+        _XIAOYA_MEDIA_TIMER.start()
+
+
+_xiaoya_load_media_map()
 
 
 def _is_xiaoya_line_name(line: str) -> bool:
@@ -6219,12 +7791,25 @@ if not features.CATVOD:
         return False
 
 
-    def _xiaoya_manual_target(og: str, index: int = 0) -> dict:
+    def _xiaoya_manual_target(og: str, index: int = 0, season: int = 1) -> dict:
         return {}
 
 
-    async def _ensure_xiaoya_manual(og: str, index: int = 0):
+    async def _ensure_xiaoya_manual(og: str, index: int = 0, season: int = 1):
         return None
+
+
+    def _xiaoya_episode_guid(og: str, index: int = 0, season: int = 1) -> str:
+        return episode_guid(og, "", max(0, int(index or 0)))
+
+
+    def _xiaoya_register_media(og: str, index: int = 0, season: int = 1,
+                               ep_guid: str = "") -> tuple[str, str, str]:
+        return "", "", ""
+
+
+    def _xiaoya_file_meta(target: dict):
+        return ".mp4", "MP4", 0
 
 
 def _is_pansou_line_name(line: str) -> bool:
@@ -7869,7 +9454,7 @@ def _m3u8_resp(body, request: Request, headers: dict = None) -> Response:
                     media_type="application/vnd.apple.mpegurl", headers=h)
 
 
-@app.get(f"{ONLINE_PREFIX}/{{mg}}/preset.m3u8")
+@app.api_route(f"{ONLINE_PREFIX}/{{mg}}/preset.m3u8", methods=["GET", "HEAD"])
 async def hls_preset(mg: str, request: Request):
     _pl = request.query_params.get("line")
     idx0 = int(request.query_params.get("index", 0) or 0)
